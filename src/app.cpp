@@ -3,13 +3,32 @@
 #include "engine.hpp"
 #include "router.hpp"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <set>
 #include <tuple>
 
 namespace crocket {
+
+Config Config::dev() {
+  Config c;
+  c.profile = Profile::Dev;
+  c.debug_routes = true;
+  c.request_timeout = std::chrono::hours(1);
+  c.drain_timeout = std::chrono::seconds(1);
+  return c;
+}
+
+Config Config::from_env() {
+  const char* v = std::getenv("CROCKET_PROFILE");
+  std::string_view p = v ? v : "";
+  if (p.empty() || p == "release") return {};
+  if (p == "dev") return dev();
+  throw std::invalid_argument("CROCKET_PROFILE=" + std::string(p) + ": unknown profile (use dev or release)");
+}
 
 App::App(Config cfg) : core_(std::make_unique<detail::AppCore>()) { core_->config = std::move(cfg); }
 App::App(App&&) noexcept = default;
@@ -42,6 +61,18 @@ bool valid_request_id(std::string_view id) {
 
 std::string describe(const RouteDef& r) {
   return std::string(http::method_name(r.method)) + " " + r.path + " (" + std::string(r.handler) + ")";
+}
+
+/// The dev profile's launch banner: every route, aligned, on stderr.
+void print_banner(const Routes& routes) {
+  std::size_t width = 0;
+  for (auto& r : routes) width = std::max(width, r.path.size());
+  std::fprintf(stderr, "crocket: dev profile (error bodies include details; not for production)\n");
+  for (auto& r : routes) {
+    auto rank = r.rank ? " (rank " + std::to_string(r.rank) + ")" : std::string();
+    std::fprintf(stderr, "  %-7s %-*s  %.*s%s\n", http::method_name(r.method).data(), int(width), r.path.c_str(),
+                 int(r.handler.size()), r.handler.data(), rank.c_str());
+  }
 }
 
 RouteDef builtin_route(std::string path, std::string_view handler, detail::Builtin b) {
@@ -135,6 +166,7 @@ void App::prepare(Request& req) const {
   }
   if (req.deadline.at == Clock::time_point::max()) req.deadline.at = req.received + core_->config.request_timeout;
   req.state_registry = &core_->state;
+  req.dev_profile = core_->config.profile == Profile::Dev;
 }
 
 Response App::handle(Request req) {
@@ -335,6 +367,9 @@ int App::listen(ListenOptions opts) {
     std::fprintf(stderr, "%s\n", IgniteError{problems}.message().c_str());
     return 1;
   }
+  bool dev = core_->config.profile == Profile::Dev;
+  if (opts.host.empty()) opts.host = dev ? "127.0.0.1" : "0.0.0.0";
+  if (dev) print_banner(core_->routes);
   return detail::run_engine(*this, opts);
 }
 

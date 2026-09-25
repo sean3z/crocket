@@ -20,6 +20,10 @@
 
 namespace crocket {
 
+/// Release is the default. Dev is for a developer's machine: readable logs, a
+/// route banner, and error bodies that include ApiError::detail.
+enum class Profile : std::uint8_t { Release, Dev };
+
 /// Framework behaviour that is not about the socket.
 struct Config {
   std::size_t max_body_bytes = 1 << 20;               // 413 body.too_large
@@ -27,11 +31,19 @@ struct Config {
   std::chrono::milliseconds request_timeout{30'000};  // 504 deadline.exceeded
   std::chrono::milliseconds drain_timeout{10'000};    // graceful shutdown budget
   bool debug_routes = false;                          // expose GET /__routes
+  Profile profile = Profile::Release;
+
+  /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
+  /// breakpoint), a one-second drain, and listening on 127.0.0.1.
+  static Config dev();
+  /// dev() when CROCKET_PROFILE=dev; the defaults when it is unset or "release".
+  /// Throws std::invalid_argument for any other value.
+  static Config from_env();
 };
 
 /// Socket, TLS and threading. TLS is enabled when both cert and key are set.
 struct ListenOptions {
-  std::string host = "0.0.0.0";
+  std::string host = {};  // empty: 0.0.0.0, or 127.0.0.1 in the dev profile
   std::uint16_t port = 8000;
   std::string tls_cert = {};
   std::string tls_key = {};

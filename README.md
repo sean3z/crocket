@@ -326,7 +326,8 @@ one JSON envelope and carries the request id:
 `ApiError{status, code, message, detail}` is the type behind it:
 
 - `code` is a stable, dotted identifier that clients can switch on.
-- `detail` goes to the logs only, never to the client.
+- `detail` goes to the logs only, never to the client. The one exception is the
+  [dev profile](#dev-profile), which adds it to error bodies.
 - An uncaught exception becomes 500 `internal`. Its `what()` is logged, never sent.
 
 ### Managed state and sentinels
@@ -555,6 +556,30 @@ What you get:
 
 The threading model and limits are in [docs/ENGINE.md](docs/ENGINE.md).
 
+### Dev profile
+
+`Config::dev()` is for running on your own machine. Choose it in code, or read
+`CROCKET_PROFILE` with `Config::from_env()`, which gives `dev()` for `dev`, the release
+defaults when unset or `release`, and throws `std::invalid_argument` for anything else:
+
+```cpp
+return App{Config::from_env()}   // CROCKET_PROFILE=dev ./my_app
+    .attach(Logger{})
+    .mount("/", reflect_routes<^^api>())
+    .listen({.port = 8000});
+```
+
+Compared with the release defaults, the dev profile:
+
+- **Error bodies carry `detail`**, including an uncaught exception's `what()`, so you
+  see the cause in the client without reading logs. Release never sends it.
+- **Logs are readable lines** from `Logger`, coloured on a terminal unless `NO_COLOR`
+  is set: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
+- **`listen()` prints every route** before it starts.
+- **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
+  breakpoint), and the drain on shutdown is one second.
+- **An empty `ListenOptions::host` binds `127.0.0.1`** instead of `0.0.0.0`.
+
 ### Not (yet) in crocket
 
 Rocket features without an equivalent today:
@@ -570,7 +595,7 @@ Rocket features without an equivalent today:
 | `Shield` security headers | Write a small `on_response` fairing |
 | Error catchers (`#[catch]`) | `ApiError` plus an `on_response` fairing, as in `NotFoundPage` above |
 | `on_liftoff` | Not implemented |
-| Config profiles (`Rocket.toml` / Figment) | `Config` and `ListenOptions` are plain structs; read env or files yourself (see `examples/serve.cpp`) |
+| Config profiles (`Rocket.toml` / Figment) | A release and a [dev profile](#dev-profile) chosen with `CROCKET_PROFILE`; other settings are plain structs, read from env or files yourself (see `examples/serve.cpp`) |
 | Mutual TLS | Not implemented |
 
 ## Building
@@ -625,7 +650,8 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CROCKET_HOST` | `0.0.0.0` | Address to listen on |
+| `CROCKET_PROFILE` | `release` | `dev` for the [dev profile](#dev-profile) |
+| `CROCKET_HOST` | `0.0.0.0` (`127.0.0.1` in dev) | Address to listen on |
 | `CROCKET_PORT` | `8000` | Port to listen on |
 | `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | unset | Enable TLS; both must be set |
 | `CROCKET_DEBUG_ROUTES` | unset | Set to any value to expose `GET /__routes` |

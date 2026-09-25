@@ -2,8 +2,13 @@
 #include "crocket/json.hpp"
 #include "crocket/responder.hpp"
 
+#include <unistd.h>
+
 #include <array>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <format>
 #include <map>
 #include <mutex>
 #include <tuple>
@@ -34,10 +39,29 @@ std::string line_start(std::string_view level, std::string_view msg) {
 }
 }  // namespace
 
-Logger::Logger() : sink_(std::make_shared<Sink>(stderr_sink)) {}
+Logger::Logger() : sink_(std::make_shared<Sink>(stderr_sink)), to_stderr_(true) {}
 Logger::Logger(Sink sink) : sink_(std::make_shared<Sink>(std::move(sink))) {}
 
+namespace {
+std::string local_time_now() {
+  auto now = std::chrono::system_clock::now();
+  auto t = std::chrono::system_clock::to_time_t(now);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+  std::tm tm{};
+  localtime_r(&t, &tm);
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "%02d:%02d:%02d.%03d", tm.tm_hour, tm.tm_min, tm.tm_sec, int(ms));
+  return buf;
+}
+}  // namespace
+
 void Logger::on_ignite(Ignite& ig) {
+  text_ = ig.config().profile == Profile::Dev;
+  if (text_) {  // listen() prints the route banner
+    const char* no_colour = std::getenv("NO_COLOR");
+    colour_ = to_stderr_ && isatty(STDERR_FILENO) && !(no_colour && *no_colour);
+    return;
+  }
   auto o = line_start("info", "ignite");
   o += R"(,"routes":)" + std::to_string(ig.routes().size()) + "}";
   (*sink_)(o);
@@ -45,6 +69,22 @@ void Logger::on_ignite(Ignite& ig) {
 
 void Logger::on_response(const Request& rq, Response& rs) {
   auto dur = std::chrono::duration<double, std::milli>(Clock::now() - rq.received).count();
+  if (text_) {
+    auto paint = [&](std::string_view code, std::string_view s) {
+      return colour_ ? std::format("\x1b[{}m{}\x1b[0m", code, s) : std::string(s);
+    };
+    std::string_view hue = rs.status >= 500 ? "31" : rs.status >= 400 ? "33" : rs.status >= 300 ? "36" : "32";
+    auto o = std::format("{} {} {} {} {:.2f}ms", paint("2", local_time_now()), rq.method_text, rq.path,
+                         paint(hue, std::to_string(rs.status)), dur);
+    if (!rq.handler.empty()) o += std::format(" {}", rq.handler);
+    if (!rs.error_code.empty()) {
+      auto what = rs.error_detail.empty() ? std::string(rs.error_code)
+                                          : std::format("{}: {}", rs.error_code, rs.error_detail);
+      o += std::format(" {} {}", paint(hue, what), paint("2", "[" + rq.request_id + "]"));
+    }
+    (*sink_)(o);
+    return;
+  }
   std::string_view level = rs.status >= 500 ? "error" : rs.status >= 400 ? "warn" : "info";
   auto o = line_start(level, "request");
   field(o, "id", rq.request_id);
@@ -64,7 +104,7 @@ void Logger::on_response(const Request& rq, Response& rs) {
   (*sink_)(o);
 }
 
-void Logger::on_shutdown() { (*sink_)(line_start("info", "shutdown") + "}"); }
+void Logger::on_shutdown() { (*sink_)(text_ ? "shutdown" : line_start("info", "shutdown") + "}"); }
 
 // ---- Cors -----------------------------------------------------------------------
 

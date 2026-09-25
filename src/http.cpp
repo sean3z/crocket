@@ -22,6 +22,10 @@ void write_error(const ApiError& e, const Request& rq, Response& rs) {
   json::write_string(rs.body, e.message);
   rs.body += R"(,"request_id":)";
   json::write_string(rs.body, rq.request_id);
+  if (rq.dev_profile && !e.detail.empty()) {
+    rs.body += R"(,"detail":)";
+    json::write_string(rs.body, e.detail);
+  }
   rs.body += "}}";
 }
 

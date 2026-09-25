@@ -67,6 +67,7 @@ struct Request {
   std::string request_id;
   Clock::time_point received = Clock::now();
   Deadline deadline;
+  bool dev_profile = false;  // error bodies include ApiError::detail
 
   // Set by the router for the candidate currently being tried.
   std::string_view route_template;  // "/users/{id}"; "" while unmatched

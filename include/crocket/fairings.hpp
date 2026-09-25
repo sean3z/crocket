@@ -18,6 +18,9 @@ namespace crocket {
 ///  "route":"/hello/{name}/{age}","status":200,"code":"","duration_ms":0.41,
 ///  "bytes":27,"proto":"h2"}
 /// ApiError::detail appears here (as "detail") and nowhere else.
+/// In the dev profile the line is readable text instead, coloured when it goes
+/// to a terminal and NO_COLOR is unset:
+///   14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: capture '{age}' did not parse [id]
 /// Attach it first so on_response (reverse order) sees the final response.
 class Logger {
  public:
@@ -31,6 +34,9 @@ class Logger {
 
  private:
   std::shared_ptr<Sink> sink_;
+  bool to_stderr_ = false;
+  bool text_ = false;    // dev profile
+  bool colour_ = false;  // text_ on a terminal
 };
 
 /// CORS as a fairing. Default is deny: no cross-origin headers are ever

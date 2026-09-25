@@ -151,13 +151,15 @@ int main() {
     return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
   }};
 
-  Config cfg;
-  cfg.request_timeout = 10s;
-  cfg.drain_timeout = 5s;
-  cfg.debug_routes = !env("CROCKET_DEBUG_ROUTES").empty();
+  Config cfg = Config::from_env();  // CROCKET_PROFILE=dev|release
+  if (cfg.profile == Profile::Release) {
+    cfg.request_timeout = 10s;
+    cfg.drain_timeout = 5s;
+  }
+  if (!env("CROCKET_DEBUG_ROUTES").empty()) cfg.debug_routes = true;
 
   ListenOptions listen;
-  listen.host = env("CROCKET_HOST", "0.0.0.0");
+  listen.host = env("CROCKET_HOST");  // empty: 0.0.0.0, or 127.0.0.1 in dev
   listen.port = static_cast<std::uint16_t>(std::stoi(env("CROCKET_PORT", "8000")));
   listen.tls_cert = env("CROCKET_TLS_CERT");
   listen.tls_key = env("CROCKET_TLS_KEY");

@@ -5,9 +5,11 @@
 #include <crocket/crocket.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <cstdio>
 #include <format>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -234,8 +236,8 @@ auto bulk(Json<std::vector<Widget>> ws) -> std::string { return std::to_string(w
 
 bool contains(std::string_view hay, std::string_view needle) { return hay.find(needle) != std::string_view::npos; }
 
-App make_app(LogCapture& log, Metrics* metrics_out = nullptr) {
-  App app{Config{.debug_routes = true}};
+App make_app(LogCapture& log, Metrics* metrics_out = nullptr, Config cfg = Config{.debug_routes = true}) {
+  App app{std::move(cfg)};
   app.manage(Db{}).manage(test_auth()).manage(Greeter{"Hi"}).attach(log.logger());
   if (metrics_out) app.attach(*metrics_out);
   app.attach(Cors::allow_origins({"https://ok.example"}))
@@ -554,6 +556,60 @@ int main() {
     CHECK_EQ(probe.capture("pid").value_or("?"), std::string_view("99"));
     CHECK_EQ(probe.capture("uid").value_or("?"), std::string_view("7"));
     CHECK(!probe.capture("id").has_value());
+  }
+
+  section("dev profile: details in error bodies only in dev");
+  {
+    // Release (the app above): the detail is logged, never sent.
+    for (auto path : {"/boom", "/hello/Ada/400"}) {
+      auto r = client.get(path).dispatch();
+      CHECK(r.status >= 400);
+      CHECK(!contains(r.body, R"("detail")"));
+      CHECK(contains(log.last(), R"("detail":)"));
+    }
+    CHECK(Config{}.profile == Profile::Release);
+
+    LogCapture dev_log;
+    App dev_app = make_app(dev_log, nullptr, Config::dev());
+    LocalClient dev(dev_app);
+    auto boom = dev.get("/boom").dispatch();
+    CHECK_EQ(boom.status, 500);
+    CHECK(contains(boom.body, R"x("detail":"uncaught exception in api::boom: secret database password in what()")x"));
+    auto fwd = dev.get("/hello/Ada/400").dispatch();
+    CHECK(contains(fwd.body, R"("detail":"api::hello: capture '{age}' did not parse")"));
+
+    // Readable log lines, no JSON, no colour for a custom sink.
+    auto line = dev_log.last();
+    CHECK(contains(line, " GET /hello/Ada/400 404 "));
+    CHECK(contains(line, "api::hello path.invalid: api::hello: capture '{age}' did not parse ["));
+    CHECK(contains(line, *fwd.headers.get("x-request-id")));
+    CHECK(!contains(line, "{\"ts\""));
+    CHECK(!contains(line, "\x1b["));
+    CHECK_EQ(dev.get("/__routes").dispatch().status, 200);
+
+    auto d = Config::dev();
+    CHECK(d.debug_routes);
+    CHECK_EQ(d.request_timeout, std::chrono::milliseconds(std::chrono::hours(1)));
+    CHECK_EQ(d.drain_timeout, std::chrono::milliseconds(1000));
+  }
+
+  section("dev profile: CROCKET_PROFILE");
+  {
+    ::unsetenv("CROCKET_PROFILE");
+    CHECK(Config::from_env().profile == Profile::Release);
+    ::setenv("CROCKET_PROFILE", "release", 1);
+    CHECK(Config::from_env().profile == Profile::Release);
+    ::setenv("CROCKET_PROFILE", "dev", 1);
+    CHECK(Config::from_env().profile == Profile::Dev);
+    ::setenv("CROCKET_PROFILE", "prod", 1);
+    std::string err;
+    try {
+      (void)Config::from_env();
+    } catch (const std::invalid_argument& e) {
+      err = e.what();
+    }
+    CHECK_EQ(err, std::string("CROCKET_PROFILE=prod: unknown profile (use dev or release)"));
+    ::unsetenv("CROCKET_PROFILE");
   }
 
   std::fprintf(stderr, "\n%d checks, %d failures\n", g_checks, g_failures);

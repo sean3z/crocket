@@ -26,8 +26,9 @@ auto index() -> std::string { return "Try GET /hello/<name>/<age>\n"; }
 }  // namespace api
 
 int main() {
-  return App{}
+  // CROCKET_PROFILE=dev: readable logs, a route banner, error details, 127.0.0.1.
+  return App{Config::from_env()}
       .attach(Logger{})
       .mount("/", reflect_routes<^^api>())
-      .listen({.host = "0.0.0.0", .port = 8000});
+      .listen({.port = 8000});
 }

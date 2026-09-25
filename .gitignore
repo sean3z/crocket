@@ -1,0 +1,6 @@
+# build trees (release: build/, dev: build-dev/, anything else: build-*)
+/build/
+/build-*/
+# clangd index and the compile_commands.json symlink ./dev creates
+/.cache/
+/compile_commands.json

@@ -8,6 +8,24 @@ set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ---- linker ------------------------------------------------------------------
+# Prefer lld, then mold, but only if it really links with this compiler: mold
+# 2.40 cannot parse GCC 16's libgcc_s_asneeded.so script. Otherwise the default
+# linker. Pass -DCMAKE_LINKER_TYPE=... to choose yourself.
+if(NOT DEFINED CMAKE_LINKER_TYPE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  include(CheckLinkerFlag)
+  foreach(ld IN ITEMS lld mold)
+    check_linker_flag(CXX "-fuse-ld=${ld}" CROCKET_LINKER_${ld}_WORKS)
+    if(CROCKET_LINKER_${ld}_WORKS)
+      string(TOUPPER ${ld} CMAKE_LINKER_TYPE)
+      break()
+    endif()
+  endforeach()
+endif()
+if(CMAKE_LINKER_TYPE)
+  message(STATUS "crocket: linking with ${CMAKE_LINKER_TYPE}")
+endif()
+
 # ---- libwebsockets (the only wire engine) ---------------------------------
 include(FetchContent)
 # lws 4.3.5 declares an old cmake_minimum_required that CMake 4 rejects.

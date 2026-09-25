@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# crocket's developer entry point. `./dev help` lists the commands.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$ROOT"
+
+APT_PACKAGES=(g++-16 cmake ninja-build ccache lld libssl-dev pkg-config
+              git curl openssl gdb inotify-tools
+              make m4 bzip2 gpgv)   # the last line is for ./dev gcc
+GCC_VERSION=16.2.0
+WATCH_DIRS=(include src examples tests CMakeLists.txt)
+
+if [[ -t 2 ]]; then B=$'\e[1m' BLUE=$'\e[1;34m' RED=$'\e[1;31m' GREEN=$'\e[1;32m' R=$'\e[0m'
+else B='' BLUE='' RED='' GREEN='' R=''; fi
+say()  { printf '%s==>%s %s\n' "$BLUE" "$R" "$*" >&2; }
+ok()   { printf '%s==>%s %s\n' "$GREEN" "$R" "$*" >&2; }
+warn() { printf '%s==>%s %s\n' "$RED" "$R" "$*" >&2; }
+die()  { warn "$*"; exit 1; }
+
+usage() {
+  cat <<EOF
+${B}./dev${R} <command> [args]
+
+  setup                     Install the toolchain with apt (asks for sudo once)
+  gcc                       Build GCC ${GCC_VERSION} into ~/.local (the distro g++-16 is a
+                            pre-release snapshot that miscompiles crocket's reflection)
+  build [target...]         Build the dev tree (build-dev/, -O0 -g, ccache, lld)
+  run <target> [-- args]    Build a target and run it with CROCKET_PROFILE=dev
+  watch <target> [-- args]  Run, then rebuild and restart on every save; a failed
+                            build leaves the running server alone
+  test [ctest args]         Build the dev tree and run ctest in it
+  check                     Release tree (build/, -O2) plus the full ctest: run
+                            this before calling a change done
+  clean [dev|release|all]   Delete build trees (default: dev)
+
+<target> is a CMake target; 'hello' and 'serve' are short for crocket_hello and
+crocket_serve. Examples:  ./dev watch hello     ./dev test -R compile_fail
+EOF
+}
+
+# ---- toolchain ---------------------------------------------------------------
+
+cmd_setup() {
+  if ((EUID != 0)); then exec sudo "$ROOT/dev" setup; fi
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+  echo
+  g++-16 --version | head -1
+  cmake --version | head -1
+  printf 'ninja %s, ccache %s, %s\n' "$(ninja --version)" \
+    "$(ccache --version | head -1 | awk '{print $3}')" "$(ld.lld --version | head -1)"
+}
+
+cmd_gcc() {
+  local v=$GCC_VERSION src=$HOME/.cache/crocket-gcc
+  if [[ -x $GCC_PREFIX/bin/g++-${v%.*} ]]; then ok "GCC $v is already in $GCC_PREFIX"; return; fi
+  for t in make m4 bzip2 gpgv curl; do command -v "$t" >/dev/null || die "missing $t; run ./dev setup"; done
+  mkdir -p "$src" && cd "$src"
+  local url=https://ftp.gnu.org/gnu/gcc/gcc-$v/gcc-$v.tar.xz
+  [[ -f gcc-$v.tar.xz ]] || curl -fLO "$url"
+  curl -fsSLO "$url.sig"
+  curl -fsSL https://ftp.gnu.org/gnu/gnu-keyring.gpg -o gnu-keyring.gpg
+  gpgv --keyring ./gnu-keyring.gpg "gcc-$v.tar.xz.sig" "gcc-$v.tar.xz" || die "gcc-$v.tar.xz: bad signature"
+  say "unpacking"
+  rm -rf "gcc-$v" obj
+  tar xf "gcc-$v.tar.xz"
+  (cd "gcc-$v" && ./contrib/download_prerequisites)
+  mkdir obj && cd obj
+  say "building GCC $v into $GCC_PREFIX (15-30 minutes)"
+  "../gcc-$v/configure" --prefix="$GCC_PREFIX" --program-suffix="-${v%.*}" \
+    --enable-languages=c,c++ --disable-bootstrap --disable-multilib --enable-checking=release \
+    CC=gcc-16 CXX=g++-16
+  make -j"$(nproc)"
+  make install-strip
+  cd "$ROOT" && rm -rf "$src/gcc-$v" "$src/obj"
+  ok "$("$GCC_PREFIX/bin/g++-${v%.*}" --version | head -1); ./dev uses it from now on"
+}
+
+# Compiler: $CROCKET_CC/$CROCKET_CXX, else a GCC 16.2 installed under
+# $CROCKET_GCC_PREFIX (default ~/.local/gcc-16.2), else the distro's gcc-16/g++-16.
+GCC_PREFIX=${CROCKET_GCC_PREFIX:-$HOME/.local/gcc-${GCC_VERSION%.*}}
+if [[ -n ${CROCKET_CXX:-} ]]; then CXX=$CROCKET_CXX CC=${CROCKET_CC:-gcc}
+elif [[ -x $GCC_PREFIX/bin/g++-${GCC_VERSION%.*} ]]; then
+  CXX=$GCC_PREFIX/bin/g++-${GCC_VERSION%.*} CC=$GCC_PREFIX/bin/gcc-${GCC_VERSION%.*}
+else CXX=g++-16 CC=gcc-16; fi
+
+need_tools() {
+  local missing=()
+  for t in "$CXX" cmake ninja ccache; do command -v "$t" >/dev/null || missing+=("$t"); done
+  ((${#missing[@]} == 0)) || die "missing ${missing[*]}; run ./dev setup"
+}
+
+# ---- builds ------------------------------------------------------------------
+
+# preset -> build directory (kept in sync with CMakePresets.json)
+tree() { [[ $1 == dev ]] && echo "$ROOT/build-dev" || echo "$ROOT/build"; }
+
+configure() { # preset
+  local dir; dir=$(tree "$1")
+  local cxx; cxx=$(command -v "$CXX")
+  # Afterwards, `cmake --build` re-runs configure by itself when CMakeLists change.
+  # A different compiler needs a fresh tree.
+  local cached; cached=$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "$dir/CMakeCache.txt" 2>/dev/null || true)
+  if [[ ! -f $dir/build.ninja || $cached != "$cxx" ]]; then
+    local args=(--fresh --preset "$1" -DCMAKE_C_COMPILER="$(command -v "$CC")" -DCMAKE_CXX_COMPILER="$cxx")
+    # A compiler outside /usr ships a newer libstdc++ than the system's; find it at run time.
+    local libdir; libdir=$(dirname "$("$cxx" -print-file-name=libstdc++.so)")
+    [[ $libdir == /usr/* ]] || args+=(-DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,$libdir")
+    cmake "${args[@]}" >/dev/null
+  fi
+  if [[ $1 == dev ]]; then ln -sfn build-dev/compile_commands.json "$ROOT/compile_commands.json"; fi
+}
+
+target_name() { # 'hello' -> crocket_hello
+  case $1 in hello|serve) echo "crocket_$1" ;; *) echo "$1" ;; esac
+}
+
+build() { # preset [target...]
+  local preset=$1; shift
+  need_tools
+  configure "$preset"
+  local targets=()
+  for t in "$@"; do targets+=(--target "$(target_name "$t")"); done
+  cmake --build "$(tree "$preset")" "${targets[@]}"
+}
+
+exe_path() { # target -> path of the built executable
+  local exe; exe="$(tree dev)/$(target_name "$1")"
+  [[ -x $exe ]] || exe=$(find "$(tree dev)" -type f -name "$(target_name "$1")" -perm -u+x | head -1)
+  [[ -n $exe && -x $exe ]] || die "no executable for target '$1' in build-dev/"
+  echo "$exe"
+}
+
+cmd_build() { build dev "$@"; }
+
+cmd_run() {
+  (($# >= 1)) || die "usage: ./dev run <target> [-- args]"
+  local target=$1; shift
+  [[ ${1:-} == -- ]] && shift
+  build dev "$target"
+  local exe; exe=$(exe_path "$target")
+  say "running ${exe#"$ROOT"/} $*"
+  CROCKET_PROFILE=dev exec "$exe" "$@"
+}
+
+cmd_test() {
+  build dev
+  ctest --preset dev "$@"
+}
+
+cmd_check() {
+  build release
+  ctest --preset release "$@"
+}
+
+cmd_clean() {
+  case ${1:-dev} in
+    dev)     rm -rf "$ROOT/build-dev" "$ROOT/compile_commands.json" ;;
+    release) rm -rf "$ROOT/build" ;;
+    all)     rm -rf "$ROOT/build-dev" "$ROOT/build" "$ROOT/compile_commands.json" ;;
+    *)       die "usage: ./dev clean [dev|release|all]" ;;
+  esac
+}
+
+# ---- watch -------------------------------------------------------------------
+
+cmd_watch() {
+  (($# >= 1)) || die "usage: ./dev watch <target> [-- args]"
+  command -v inotifywait >/dev/null || die "inotifywait missing; run ./dev setup"
+  local target=$1; shift
+  [[ ${1:-} == -- ]] && shift
+  local args=("$@") pid='' build_pid=''
+
+  stop_server() {
+    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+    pid=''
+  }
+  start_server() {
+    local exe; exe=$(exe_path "$target")
+    CROCKET_PROFILE=dev "$exe" "${args[@]}" &
+    pid=$!
+    ok "started ${exe#"$ROOT"/} (pid $pid)"
+  }
+  rebuild() {
+    # In the background, so a signal to ./dev is handled without waiting for the build.
+    build dev "$target" & build_pid=$!
+    if wait "$build_pid"; then
+      stop_server   # graceful: SIGTERM drains in-flight requests first
+      start_server
+    elif [[ -n $pid ]]; then
+      warn "build failed; the previous server is still running"
+    else
+      warn "build failed; waiting for changes"
+    fi
+  }
+
+  # One long-lived inotifywait feeds a pipe, so saves made during a build are
+  # queued and trigger the next rebuild instead of being missed.
+  coproc WATCH { exec inotifywait -mqr -e close_write,moved_to,create,delete --format '%w%f' \
+                   "${WATCH_DIRS[@]}"; }
+  local watch_pid=$WATCH_PID
+  kill_tree() { local c; for c in $(pgrep -P "$1"); do kill_tree "$c"; done; kill "$1" 2>/dev/null || true; }
+  trap '[[ -n $build_pid ]] && kill_tree "$build_pid"; stop_server; kill "$watch_pid" 2>/dev/null; exit 0' INT TERM
+
+  rebuild
+  say "watching ${WATCH_DIRS[*]} (Ctrl-C to stop)"
+  local path
+  while read -r path <&"${WATCH[0]}"; do
+    case $path in *.cpp|*.hpp|*.h|*.cmake|*CMakeLists.txt|*.sh) ;; *) continue ;; esac
+    # Editors often write several files per save; wait until it has been quiet for 200 ms.
+    while read -r -t 0.2 path <&"${WATCH[0]}"; do :; done
+    if [[ -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null && warn "server exited" || warn "server exited with status $?"
+      pid=''
+    fi
+    say "change detected; rebuilding"
+    rebuild
+  done
+  die "file watcher stopped"
+}
+
+# ---- dispatch ----------------------------------------------------------------
+
+cmd=${1:-help}
+shift || true
+case $cmd in
+  setup|gcc|build|run|watch|test|check|clean) "cmd_$cmd" "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac

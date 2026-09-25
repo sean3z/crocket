@@ -580,6 +580,13 @@ automatically as a `PUBLIC` compile option of the `crocket` target), CMake 4.2 a
 Ninja on Ubuntu 26.04. You also need OpenSSL development headers, because lws is built
 with TLS.
 
+GCC 16.2 or later is required. Ubuntu 26.04's `g++-16` package is a pre-release
+snapshot (`16-20260322`) whose reflection bugs break any translation unit that mounts
+routes. Its errors start with `accessing uninitialized member 'crocket::detail::Binding::kind'`.
+
+CMake links with lld when it can, then mold, then the default linker. Each candidate
+is tried with a real test link, because mold 2.40 cannot link with GCC 16.
+
 libwebsockets 4.3.5 declares a `cmake_minimum_required` that CMake 4 rejects. The
 top-level `CMakeLists.txt` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` before fetching it.
 
@@ -587,6 +594,22 @@ Options:
 
 - `CROCKET_BUILD_EXAMPLES` (ON) builds `crocket_hello` and `crocket_serve`.
 - `CROCKET_BUILD_TESTS` (ON) builds the acceptance tests.
+
+## Working on crocket
+
+`./dev` is the entry point for developing crocket itself. Applications using crocket
+don't need it.
+
+```bash
+./dev setup        # apt packages (asks for sudo)
+./dev gcc          # build GCC 16.2 into ~/.local/gcc-16.2 (about 10 minutes on 32 cores)
+./dev watch hello  # run an example; rebuild and restart it on every save
+./dev check        # release build plus the full ctest, before calling a change done
+```
+
+`./dev help` lists every command. Builds go to `build-dev/` (Debug) and `build/`
+(release), configured from `CMakePresets.json`. `./dev` picks the compiler in this
+order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 ## Tests
 

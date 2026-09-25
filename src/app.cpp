@@ -206,6 +206,15 @@ Response App::reject(Request& req, const ApiError& err) {
 }
 
 void App::finish(const Request& req, Response& res) {
+  // A header built from untrusted input must not split the response.
+  for (auto& [k, v] : res.headers) {
+    if (http::valid_header_name(k) && http::valid_header_value(v)) continue;
+    auto what = http::valid_header_name(k) ? "response header '" + k + "'" : std::string("a response header name");
+    res = Response{};
+    write_error(ApiError::internal(what + " contains a character not allowed in HTTP headers (CR, LF, NUL, ...)"),
+                req, res);
+    break;
+  }
   res.headers.set("x-request-id", req.request_id);
   auto& fs = core_->fairings;
   for (auto it = fs.rbegin(); it != fs.rend(); ++it) {
@@ -285,7 +294,7 @@ Response App::run_routes(Request& req) {
   return res;
 }
 
-Response App::builtin(detail::Builtin b, Request& req) {
+Response App::builtin(detail::Builtin b, Request& /*req*/) {
   Response res;
   res.set_content_type("application/json");
   res.headers.set("cache-control", "no-store");

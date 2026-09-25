@@ -39,8 +39,23 @@ class Pool {
   class Lease {
    public:
     Lease(Lease&&) noexcept = default;
-    Lease& operator=(Lease&&) noexcept = default;
-    ~Lease() {
+    /// Returns the resource this lease holds before taking over `o`'s.
+    Lease& operator=(Lease&& o) noexcept {
+      if (this != &o) {
+        release();
+        shared_ = std::move(o.shared_);
+        item_ = std::move(o.item_);
+      }
+      return *this;
+    }
+    ~Lease() { release(); }
+    T& operator*() const { return *item_; }
+    T* operator->() const { return item_.get(); }
+
+   private:
+    friend class Pool;
+    Lease(std::shared_ptr<Shared> s, std::unique_ptr<T> i) : shared_(std::move(s)), item_(std::move(i)) {}
+    void release() noexcept {
       if (!item_) return;
       {
         std::lock_guard lk(shared_->mu);
@@ -48,12 +63,6 @@ class Pool {
       }
       shared_->cv.notify_one();
     }
-    T& operator*() const { return *item_; }
-    T* operator->() const { return item_.get(); }
-
-   private:
-    friend class Pool;
-    Lease(std::shared_ptr<Shared> s, std::unique_ptr<T> i) : shared_(std::move(s)), item_(std::move(i)) {}
     std::shared_ptr<Shared> shared_;
     std::unique_ptr<T> item_;
   };

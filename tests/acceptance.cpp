@@ -62,6 +62,10 @@ struct Db {
 std::atomic<int> g_hello_calls{0};
 std::atomic<int> g_create_calls{0};
 
+struct Target {
+  std::string to;
+};
+
 namespace api {
 
 [[= http::get("/hello/{name}/{age}")]]
@@ -101,6 +105,12 @@ auto item_special() -> std::string { return "special"; }
 auto maybe(int n) -> std::optional<Json<int>> {
   if (n < 0) return std::nullopt;
   return Json<int>{n * 2};
+}
+
+[[= http::get("/redirect")]]  // a Location built from untrusted input
+auto redirect(Query<Target> q, Response& rs) -> void {
+  rs.status = 302;
+  rs.headers.set("location", q->to);
 }
 
 [[= http::get("/boom")]]
@@ -506,6 +516,39 @@ int main() {
     auto cancelled = pool.checkout(Deadline{Clock::now() + std::chrono::seconds(10), cancel.get_token()});
     CHECK(!cancelled.has_value());
     CHECK(Clock::now() - t0 < std::chrono::seconds(1));
+  }
+
+  section("pool: reassigning a lease returns its resource");
+  {
+    Pool<int> pool(2, [] { return 0; });
+    Deadline d{Clock::now() + std::chrono::seconds(1), {}};
+    {
+      auto a = pool.checkout(d);
+      auto b = pool.checkout(d);
+      CHECK_EQ(pool.available(), std::size_t(0));
+      *a = std::move(*b);  // a's resource goes back now; b's goes back when a ends
+      CHECK_EQ(pool.available(), std::size_t(1));
+      *a = std::move(*a);  // self-move keeps the resource
+      CHECK_EQ(pool.available(), std::size_t(1));
+    }
+    CHECK_EQ(pool.available(), std::size_t(2));
+  }
+
+  section("response headers: no CR/LF/NUL on the wire");
+  {
+    static_assert(http::valid_header_name("x-request-id") && !http::valid_header_name("bad name") &&
+                  !http::valid_header_name("") && !http::valid_header_name("a:b"));
+    static_assert(http::valid_header_value("/items/1") && !http::valid_header_value("a\r\nb") &&
+                  !http::valid_header_value("a\nb") && !http::valid_header_value(std::string_view("a\0b", 3)));
+    auto ok = client.get("/redirect?to=/items/1").dispatch();
+    CHECK_EQ(ok.status, 302);
+    CHECK_EQ(*ok.headers.get("location"), std::string_view("/items/1"));
+    auto evil = client.get("/redirect?to=/x%0D%0Aset-cookie:%20pwned=1").dispatch();
+    CHECK_EQ(evil.status, 500);
+    CHECK_EQ(evil.error_code, std::string_view("internal"));
+    CHECK(!evil.headers.contains("location"));
+    CHECK(!contains(evil.body, "pwned"));
+    CHECK(contains(log.last(), "response header 'location' contains a character not allowed"));
   }
 
   section("json::from_path: one struct for POST and PUT");

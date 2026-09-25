@@ -387,6 +387,12 @@ int Engine::on_writeable(lws* wsi, Pss* pss) {
     if (lws_add_http_header_status(wsi, unsigned(r.status), &p, end)) return -1;
     for (auto& [k, v] : r.headers) {
       if (k == "content-length" || k == "connection" || k == "transfer-encoding" || k == "keep-alive") continue;
+      // App::finish rejects these; a fairing's on_response runs after it, so check again.
+      if (!http::valid_header_name(k) || !http::valid_header_value(v)) {
+        std::fprintf(stderr, "crocket: request %s: dropped a response header with a character not allowed in HTTP "
+                     "headers (set by an on_response fairing)\n", s->meta.request_id.c_str());
+        continue;
+      }
       std::string name = k + ":";
       if (lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>(name.c_str()),
                                       reinterpret_cast<const unsigned char*>(v.data()), int(v.size()), &p, end))

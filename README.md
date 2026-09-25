@@ -33,14 +33,33 @@ The trade-off is toolchain reach and build time. You need a compiler with C++26 
 
 See [REQUIREMENTS.md](REQUIREMENTS.md) and [docs/ENGINE.md](docs/ENGINE.md).
 
-```bash
-cmake -S . -B build -G Ninja && cmake --build build
-./build/crocket_hello
-./build/crocket_serve
-cd build && ctest --output-on-failure
+## Using crocket
+
+Add crocket to a CMake project with FetchContent, from a vendored copy or a git
+submodule (or `GIT_REPOSITORY` and `GIT_TAG` for a hosted copy):
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(crocket SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/crocket)
+FetchContent_MakeAvailable(crocket)
+
+target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
 
-Requires GCC (or experimental Clang) with C++26 reflection for the public API. libwebsockets is pulled via CMake FetchContent (v4.3.5).
+Linking `crocket::crocket` adds `-std=c++26 -freflection` to your target. crocket's
+own examples and tests are not built, and libwebsockets stays private: it is not
+linked into your headers or your CMake cache.
+
+You need:
+
+- **GCC 16.2 or later.** Ubuntu 26.04's `g++-16` package is too old (see
+  [Building](#building)). Clang is not tested yet.
+- **CMake 3.28 or later**, and Ninja or Make.
+- **OpenSSL development headers** (`libssl-dev`), because libwebsockets is built with TLS.
+- **Network access on the first configure**, to fetch libwebsockets v4.3.5 from GitHub.
+  Set `FETCHCONTENT_SOURCE_DIR_LIBWEBSOCKETS` to a local checkout to build offline.
+
+There are no `install()` rules yet, so `find_package(crocket)` does not work.
 
 ## Rocket, in C++
 
@@ -329,6 +348,9 @@ one JSON envelope and carries the request id:
 - `detail` goes to the logs only, never to the client. The one exception is the
   [dev profile](#dev-profile), which adds it to error bodies.
 - An uncaught exception becomes 500 `internal`. Its `what()` is logged, never sent.
+- A response header with CR, LF or NUL in its value, or an invalid name, also becomes
+  500 `internal`, so a `Location` built from user input cannot inject headers. If an
+  `on_response` fairing adds such a header, the engine drops it and reports it on stderr.
 
 ### Managed state and sentinels
 
@@ -617,8 +639,10 @@ top-level `CMakeLists.txt` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` before fetchi
 
 Options:
 
-- `CROCKET_BUILD_EXAMPLES` (ON) builds `crocket_hello` and `crocket_serve`.
-- `CROCKET_BUILD_TESTS` (ON) builds the acceptance tests.
+- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello` and `crocket_serve`.
+- `CROCKET_BUILD_TESTS` builds the tests.
+
+Both are ON when crocket is the top-level project and OFF when it is a dependency.
 
 ## Working on crocket
 
@@ -640,8 +664,9 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 | Test | What it checks |
 |---|---|
-| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS and pools. |
+| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile and header validation. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
+| `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or lws cache entries leak into the application. |
 | `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 
 ## `crocket_serve` configuration

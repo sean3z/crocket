@@ -37,6 +37,23 @@ constexpr Method parse_method(std::string_view s) noexcept {
   return Method::Unknown;
 }
 
+/// A header name is an RFC 9110 token: letters, digits and !#$%&'*+-.^_`|~.
+constexpr bool valid_header_name(std::string_view name) noexcept {
+  if (name.empty()) return false;
+  for (char c : name) {
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              std::string_view("!#$%&'*+-.^_`|~").find(c) != std::string_view::npos;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/// A header value must not contain CR, LF or NUL: they would end the header and
+/// let the rest of the value inject new headers (response splitting).
+constexpr bool valid_header_value(std::string_view value) noexcept {
+  return value.find_first_of(std::string_view("\r\n\0", 3)) == std::string_view::npos;
+}
+
 /// One path segment of a route template: either literal text or a `{capture}`.
 struct Segment {
   bool capture;

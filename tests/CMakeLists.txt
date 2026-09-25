@@ -37,3 +37,11 @@ if(CURL AND OPENSSL AND CROCKET_BUILD_EXAMPLES)
            $<TARGET_FILE:crocket_hello>)
   set_tests_properties(tls_h2 PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 endif()
+
+# An application that pulls crocket in with FetchContent builds and runs.
+add_test(NAME consumer
+         COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DBIN=${CMAKE_CURRENT_BINARY_DIR}/consumer
+                 -DLWS_SRC=${libwebsockets_SOURCE_DIR} -DCC=${CMAKE_C_COMPILER} -DCXX=${CMAKE_CXX_COMPILER}
+                 "-DLAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}" "-DLDFLAGS=${CMAKE_EXE_LINKER_FLAGS}"
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/consumer.cmake)
+set_tests_properties(consumer PROPERTIES TIMEOUT 600)

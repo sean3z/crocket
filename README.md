@@ -693,3 +693,12 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 - Over HTTP/2, a client-supplied `X-Request-Id` is not visible, because of a
   libwebsockets 4.3.5 limitation, so a new id is generated. See
   [docs/ENGINE.md](docs/ENGINE.md).
+
+## License
+
+crocket is released under the [MIT license](LICENSE).
+
+It links [libwebsockets](https://libwebsockets.org) statically into your program.
+libwebsockets is MIT-licensed, with a few files under BSD licenses, so a binary you
+distribute must also include its license notice (`LICENSE` in the libwebsockets
+source). OpenSSL is linked dynamically under the Apache License 2.0.

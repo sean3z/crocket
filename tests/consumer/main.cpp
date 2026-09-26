@@ -13,7 +13,7 @@ auto hi(std::string_view name) -> std::string { return "hi " + std::string(name)
 }  // namespace api
 
 int main() {
-  App app;
+  Crocket app;
   app.mount("/", reflect_routes<^^api>());
   LocalClient client(app);
   auto r = client.get("/hi/consumer").dispatch();

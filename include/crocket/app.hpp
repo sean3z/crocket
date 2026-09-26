@@ -1,5 +1,5 @@
 #pragma once
-// The application: managed state, fairings, mounted routes, ignite, listen.
+// Crocket, the application: managed state, fairings, mounted routes, ignite, launch.
 
 #include "crocket/detail/invoke.hpp"
 #include "crocket/http.hpp"
@@ -42,7 +42,7 @@ struct Config {
 };
 
 /// Socket, TLS and threading. TLS is enabled when both cert and key are set.
-struct ListenOptions {
+struct LaunchOptions {
   std::string host = {};  // empty: 0.0.0.0, or 127.0.0.1 in the dev profile
   std::uint16_t port = 8000;
   std::string tls_cert = {};
@@ -82,7 +82,7 @@ struct IgniteError {
   [[nodiscard]] std::string message() const;
 };
 
-class App;
+class Crocket;
 class Ignite;
 
 namespace detail {
@@ -138,7 +138,7 @@ struct Stats {
   std::atomic<bool> draining{false};
 };
 
-struct AppCore {
+struct Core {
   Config config;
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
@@ -164,23 +164,23 @@ class Ignite {
   [[nodiscard]] const detail::Stats& stats() const { return core_.stats; }
 
  private:
-  friend class App;
-  Ignite(detail::AppCore& c, std::vector<std::string>& e) : core_(c), errors_(e) {}
-  detail::AppCore& core_;
+  friend class Crocket;
+  Ignite(detail::Core& c, std::vector<std::string>& e) : core_(c), errors_(e) {}
+  detail::Core& core_;
   std::vector<std::string>& errors_;
 };
 
-class App {
+class Crocket {
  public:
-  explicit App(Config cfg = {});
-  App(App&&) noexcept;
-  App& operator=(App&&) noexcept;
-  ~App();
+  explicit Crocket(Config cfg = {});
+  Crocket(Crocket&&) noexcept;
+  Crocket& operator=(Crocket&&) noexcept;
+  ~Crocket();
 
   /// Store exactly one T. A second manage<T>() is an ignite error.
   /// If T has `bool ready() const`, GET /readyz calls it.
   template <class T>
-  App& manage(T value) & {
+  Crocket& manage(T value) & {
     auto name = detail::type_display_name<T>();
     if (!core_->state.put<T>(std::move(value)))
       core_->build_errors.push_back(std::string("manage<") + name + ">() called twice");
@@ -190,31 +190,31 @@ class App {
     return *this;
   }
   template <class T>
-  App&& manage(T value) && { return std::move(manage(std::move(value))); }
+  Crocket&& manage(T value) && { return std::move(manage(std::move(value))); }
 
   /// Attach a fairing. on_request runs in attach order, on_response in
   /// reverse. Fairings run on worker threads concurrently: keep them short,
   /// synchronous and thread-safe.
   template <class F>
-  App& attach(F fairing) & {
+  Crocket& attach(F fairing) & {
     core_->fairings.push_back(std::make_unique<detail::FairingModel<F>>(std::move(fairing)));
     return *this;
   }
   template <class F>
-  App&& attach(F fairing) && { return std::move(attach(std::move(fairing))); }
+  Crocket&& attach(F fairing) && { return std::move(attach(std::move(fairing))); }
 
-  App& mount(std::string_view base, Routes routes) &;
-  App&& mount(std::string_view base, Routes routes) && { return std::move(mount(base, std::move(routes))); }
+  Crocket& mount(std::string_view base, Routes routes) &;
+  Crocket&& mount(std::string_view base, Routes routes) && { return std::move(mount(base, std::move(routes))); }
 
-  App& configure(Config cfg) &;
-  App&& configure(Config cfg) && { return std::move(configure(std::move(cfg))); }
+  Crocket& configure(Config cfg) &;
+  Crocket&& configure(Config cfg) && { return std::move(configure(std::move(cfg))); }
 
   /// Validate everything and freeze the route table. Idempotent.
   std::expected<void, IgniteError> ignite();
 
   /// Ignite, serve until SIGINT/SIGTERM, drain, shut down. Returns an exit
-  /// status (non-zero when ignite or listen fails).
-  int listen(ListenOptions opts);
+  /// status (non-zero when ignite or launch fails).
+  int launch(LaunchOptions opts);
 
   /// The full request pipeline: request id, fairings, routing, extractors,
   /// handler, responder, error mapping. Used by the engine and LocalClient.
@@ -229,14 +229,17 @@ class App {
 
   [[nodiscard]] const Config& config() const { return core_->config; }
   [[nodiscard]] std::span<const RouteDef> routes() const { return core_->routes; }
-  [[nodiscard]] detail::AppCore& core() { return *core_; }
+  [[nodiscard]] detail::Core& core() { return *core_; }
 
  private:
   Response run_routes(Request& req);
   Response builtin(detail::Builtin b, Request& req);
   void finish(const Request& req, Response& res);
-  std::unique_ptr<detail::AppCore> core_;
+  std::unique_ptr<detail::Core> core_;
 };
+
+/// Start a Crocket: `crocket::build(cfg).attach(...).mount(...).launch({...})`.
+[[nodiscard]] inline Crocket build(Config cfg = {}) { return Crocket{std::move(cfg)}; }
 
 /// In-process client for tests: same pipeline as the network engine,
 /// no sockets. Construction ignites the app and throws on ignite failure.
@@ -256,12 +259,12 @@ class LocalClient {
 
    private:
     friend class LocalClient;
-    Call(App& app, http::Method m, std::string_view target);
-    App& app_;
+    Call(Crocket& app, http::Method m, std::string_view target);
+    Crocket& app_;
     Request req_;
   };
 
-  explicit LocalClient(App& app);
+  explicit LocalClient(Crocket& app);
   Call get(std::string_view target) { return {app_, http::Method::Get, target}; }
   Call head(std::string_view target) { return {app_, http::Method::Head, target}; }
   Call post(std::string_view target) { return {app_, http::Method::Post, target}; }
@@ -271,7 +274,7 @@ class LocalClient {
   Call options(std::string_view target) { return {app_, http::Method::Options, target}; }
 
  private:
-  App& app_;
+  Crocket& app_;
 };
 
 namespace detail {

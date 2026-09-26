@@ -1,5 +1,5 @@
 #pragma once
-// Managed state: App::manage(T) stores exactly one T; State<T> hands out a
+// Managed state: Crocket::manage(T) stores exactly one T; State<T> hands out a
 // reference to it. Requirements are declared by extractors at compile time
 // and checked at ignite, never on the first request.
 
@@ -81,7 +81,7 @@ class StateRegistry {
 }  // namespace detail
 
 /// Extractor for managed state. Cheap to copy; refers to the single T owned by
-/// the App. T must be safe for concurrent use: handlers run on worker threads.
+/// the Crocket instance. T must be safe for concurrent use: handlers run on worker threads.
 template <class T>
 class State {
  public:

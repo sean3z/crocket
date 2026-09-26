@@ -8,7 +8,7 @@
 //                                 body or dispatch
 //   LWS_CALLBACK_HTTP_BODY        append, enforce max_body_bytes
 //   LWS_CALLBACK_HTTP_BODY_COMPLETION   dispatch
-//   (worker)                      App::handle -> completion queue -> lws_cancel_service
+//   (worker)                      Crocket::handle -> completion queue -> lws_cancel_service
 //   LWS_CALLBACK_EVENT_WAIT_CANCELLED   pull completions, request writeable
 //   LWS_CALLBACK_HTTP_WRITEABLE   status+headers, then body in chunks, then
 //                                 lws_http_transaction_completed
@@ -88,7 +88,7 @@ struct Completed {
 
 class Engine {
  public:
-  Engine(App& app, const ListenOptions& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
+  Engine(Crocket& app, const LaunchOptions& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
 
   int run();
 
@@ -115,8 +115,8 @@ class Engine {
   void worker_loop();
   bool wait_workers_idle(Clock::time_point until);
 
-  App& app_;
-  const ListenOptions& opts_;
+  Crocket& app_;
+  const LaunchOptions& opts_;
   const Config& cfg_;
   lws_context* ctx_ = nullptr;
 
@@ -312,7 +312,7 @@ void Engine::dispatch(Session* s) {
       Response res;
       try {
         res = app_.handle(std::move(rq));
-      } catch (...) {  // App::handle maps handler exceptions; this is a last resort
+      } catch (...) {  // Crocket::handle maps handler exceptions; this is a last resort
         res.status = 500;
         res.body = R"({"error":{"code":"internal","message":"internal error"}})";
         res.set_content_type("application/json");
@@ -387,7 +387,7 @@ int Engine::on_writeable(lws* wsi, Pss* pss) {
     if (lws_add_http_header_status(wsi, unsigned(r.status), &p, end)) return -1;
     for (auto& [k, v] : r.headers) {
       if (k == "content-length" || k == "connection" || k == "transfer-encoding" || k == "keep-alive") continue;
-      // App::finish rejects these; a fairing's on_response runs after it, so check again.
+      // Crocket::finish rejects these; a fairing's on_response runs after it, so check again.
       if (!http::valid_header_name(k) || !http::valid_header_value(v)) {
         std::fprintf(stderr, "crocket: request %s: dropped a response header with a character not allowed in HTTP "
                      "headers (set by an on_response fairing)\n", s->meta.request_id.c_str());
@@ -548,7 +548,7 @@ int Engine::run() {
     }
     jobs_cv_.notify_all();
     for (auto& w : workers_) w.join();
-    shutdown_app(app_);
+    shut_down(app_);
     return 1;
   }
   g_ctx.store(ctx_);
@@ -606,14 +606,14 @@ int Engine::run() {
   sigaction(SIGINT, &old_int, nullptr);
   sigaction(SIGTERM, &old_term, nullptr);
 
-  shutdown_app(app_);
+  shut_down(app_);
   if (!drained) std::fprintf(stderr, "crocket: drain timeout reached with requests still open\n");
   return drained ? 0 : 2;
 }
 
 }  // namespace
 
-int run_engine(App& app, const ListenOptions& opts) {
+int run_engine(Crocket& app, const LaunchOptions& opts) {
   Engine engine(app, opts);
   return engine.run();
 }

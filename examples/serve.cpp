@@ -158,13 +158,13 @@ int main() {
   }
   if (!env("CROCKET_DEBUG_ROUTES").empty()) cfg.debug_routes = true;
 
-  ListenOptions listen;
-  listen.host = env("CROCKET_HOST");  // empty: 0.0.0.0, or 127.0.0.1 in dev
-  listen.port = static_cast<std::uint16_t>(std::stoi(env("CROCKET_PORT", "8000")));
-  listen.tls_cert = env("CROCKET_TLS_CERT");
-  listen.tls_key = env("CROCKET_TLS_KEY");
+  LaunchOptions launch;
+  launch.host = env("CROCKET_HOST");  // empty: 0.0.0.0, or 127.0.0.1 in dev
+  launch.port = static_cast<std::uint16_t>(std::stoi(env("CROCKET_PORT", "8000")));
+  launch.tls_cert = env("CROCKET_TLS_CERT");
+  launch.tls_key = env("CROCKET_TLS_KEY");
 
-  return App{cfg}
+  return build(cfg)
       .manage(std::move(pool))  // Pool::ready() also drives GET /readyz
       .manage(std::move(auth))
       .manage(Info{"crocket-serve 0.1.0"})
@@ -173,5 +173,5 @@ int main() {
       .attach(Metrics{})
       .mount("/api", reflect_routes<^^api>())
       .mount("/", reflect_routes<^^Info>())
-      .listen(listen);
+      .launch(launch);
 }

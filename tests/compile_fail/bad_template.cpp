@@ -7,4 +7,4 @@ namespace bad {
 auto get(int id) -> std::string { return std::to_string(id); }
 }  // namespace bad
 
-int main() { App{}.mount("/", reflect_routes<^^bad>()); }
+int main() { Crocket{}.mount("/", reflect_routes<^^bad>()); }

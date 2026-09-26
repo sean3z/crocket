@@ -30,19 +30,19 @@ Config Config::from_env() {
   throw std::invalid_argument("CROCKET_PROFILE=" + std::string(p) + ": unknown profile (use dev or release)");
 }
 
-App::App(Config cfg) : core_(std::make_unique<detail::AppCore>()) { core_->config = std::move(cfg); }
-App::App(App&&) noexcept = default;
-App& App::operator=(App&&) noexcept = default;
-App::~App() = default;
+Crocket::Crocket(Config cfg) : core_(std::make_unique<detail::Core>()) { core_->config = std::move(cfg); }
+Crocket::Crocket(Crocket&&) noexcept = default;
+Crocket& Crocket::operator=(Crocket&&) noexcept = default;
+Crocket::~Crocket() = default;
 
-App& App::mount(std::string_view base, Routes routes) & {
+Crocket& Crocket::mount(std::string_view base, Routes routes) & {
   if (core_->ignited)
     core_->build_errors.push_back("mount(\"" + std::string(base) + "\") after ignite");
   core_->mounts.emplace_back(std::string(base), std::move(routes));
   return *this;
 }
 
-App& App::configure(Config cfg) & {
+Crocket& Crocket::configure(Config cfg) & {
   core_->config = std::move(cfg);
   return *this;
 }
@@ -86,7 +86,7 @@ RouteDef builtin_route(std::string path, std::string_view handler, detail::Built
 
 }  // namespace
 
-std::expected<void, IgniteError> App::ignite() {
+std::expected<void, IgniteError> Crocket::ignite() {
   auto& c = *core_;
   if (c.ignited) return {};
   std::vector<std::string> errors = c.build_errors;
@@ -159,7 +159,7 @@ std::expected<void, IgniteError> App::ignite() {
   return {};
 }
 
-void App::prepare(Request& req) const {
+void Crocket::prepare(Request& req) const {
   if (req.request_id.empty()) {
     auto hdr = req.header("x-request-id");
     req.request_id = (hdr && valid_request_id(*hdr)) ? std::string(*hdr) : detail::generate_request_id();
@@ -169,7 +169,7 @@ void App::prepare(Request& req) const {
   req.dev_profile = core_->config.profile == Profile::Dev;
 }
 
-Response App::handle(Request req) {
+Response Crocket::handle(Request req) {
   prepare(req);
   core_->stats.in_flight.fetch_add(1, std::memory_order_relaxed);
   struct Dec {
@@ -197,7 +197,7 @@ Response App::handle(Request req) {
   return res;
 }
 
-Response App::reject(Request& req, const ApiError& err) {
+Response Crocket::reject(Request& req, const ApiError& err) {
   prepare(req);
   Response res;
   write_error(err, req, res);
@@ -205,7 +205,7 @@ Response App::reject(Request& req, const ApiError& err) {
   return res;
 }
 
-void App::finish(const Request& req, Response& res) {
+void Crocket::finish(const Request& req, Response& res) {
   // A header built from untrusted input must not split the response.
   for (auto& [k, v] : res.headers) {
     if (http::valid_header_name(k) && http::valid_header_value(v)) continue;
@@ -227,7 +227,7 @@ void App::finish(const Request& req, Response& res) {
   }
 }
 
-Response App::run_routes(Request& req) {
+Response Crocket::run_routes(Request& req) {
   Response res;
   if (!core_->ignited) {
     write_error(ApiError::internal("request handled before ignite"), req, res);
@@ -294,7 +294,7 @@ Response App::run_routes(Request& req) {
   return res;
 }
 
-Response App::builtin(detail::Builtin b, Request& /*req*/) {
+Response Crocket::builtin(detail::Builtin b, Request& /*req*/) {
   Response res;
   res.set_content_type("application/json");
   res.headers.set("cache-control", "no-store");
@@ -362,7 +362,7 @@ Response App::builtin(detail::Builtin b, Request& /*req*/) {
   return res;
 }
 
-int App::listen(ListenOptions opts) {
+int Crocket::launch(LaunchOptions opts) {
   auto ig = ignite();
   std::vector<std::string> problems = ig ? std::vector<std::string>{} : ig.error().problems;
   bool tls = !opts.tls_cert.empty() || !opts.tls_key.empty();
@@ -383,7 +383,7 @@ int App::listen(ListenOptions opts) {
 }
 
 namespace detail {
-void shutdown_app(App& app) {
+void shut_down(Crocket& app) {
   auto& fs = app.core().fairings;
   for (auto it = fs.rbegin(); it != fs.rend(); ++it) {
     try {
@@ -398,11 +398,11 @@ void shutdown_app(App& app) {
 
 // ---- LocalClient -------------------------------------------------------------
 
-LocalClient::LocalClient(App& app) : app_(app) {
+LocalClient::LocalClient(Crocket& app) : app_(app) {
   if (auto r = app_.ignite(); !r) throw std::runtime_error(r.error().message());
 }
 
-LocalClient::Call::Call(App& app, http::Method m, std::string_view target) : app_(app) {
+LocalClient::Call::Call(Crocket& app, http::Method m, std::string_view target) : app_(app) {
   req_.method = m;
   req_.method_text = http::method_name(m);
   auto q = target.find('?');

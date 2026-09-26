@@ -8,4 +8,4 @@ namespace bad {
 auto get(Blob b) -> std::string { return std::to_string(b.x); }
 }  // namespace bad
 
-int main() { App{}.mount("/", reflect_routes<^^bad>()); }
+int main() { Crocket{}.mount("/", reflect_routes<^^bad>()); }

@@ -8,4 +8,4 @@ namespace bad {
 auto hello(std::string_view name, std::uint8_t years) -> std::string { return std::string(name) + std::to_string(years); }
 }  // namespace bad
 
-int main() { App{}.mount("/", reflect_routes<^^bad>()); }
+int main() { Crocket{}.mount("/", reflect_routes<^^bad>()); }

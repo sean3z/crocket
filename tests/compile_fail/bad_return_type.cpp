@@ -8,4 +8,4 @@ namespace bad {
 auto get() -> NotAResponse { return {}; }
 }  // namespace bad
 
-int main() { App{}.mount("/", reflect_routes<^^bad>()); }
+int main() { Crocket{}.mount("/", reflect_routes<^^bad>()); }

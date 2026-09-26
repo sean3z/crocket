@@ -1,6 +1,6 @@
 #pragma once
 // Request / Response as the framework sees them. The engine fills a Request,
-// the App turns it into a Response. Handlers normally never touch either:
+// Crocket turns it into a Response. Handlers normally never touch either:
 // they take extractors and return responders. `const Request&` and
 // `Response&` parameters exist as an escape hatch.
 

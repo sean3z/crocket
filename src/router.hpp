@@ -1,7 +1,7 @@
 #pragma once
 // Route matching. Candidates for a request are ordered by explicit rank, then
 // specificity (a literal segment beats a capture at the first difference),
-// then mount order. The App tries them in order; a path capture that fails to
+// then mount order. Crocket tries them in order; a path capture that fails to
 // parse forwards to the next candidate.
 
 #include "crocket/app.hpp"

@@ -115,7 +115,7 @@ struct FromRequest<State<T>> {
   static constexpr std::string_view kind = "state";
   static constexpr bool consumes_body = false;
   static std::expected<State<T>, ApiError> extract(Request& r) {
-    // Ignite guarantees presence; the null check guards misuse outside App.
+    // Ignite guarantees presence; the null check guards misuse outside Crocket.
     T* p = r.state_registry ? r.state_registry->template get<T>() : nullptr;
     if (!p) return std::unexpected(ApiError::internal("State<T> requested but not managed"));
     return State<T>(*p);

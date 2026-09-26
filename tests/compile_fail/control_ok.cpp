@@ -7,4 +7,4 @@ namespace good {
 auto hello(std::string_view name, std::uint8_t age) -> std::string { return std::string(name) + std::to_string(age); }
 }  // namespace good
 
-int main() { App{}.mount("/", reflect_routes<^^good>()); }
+int main() { Crocket{}.mount("/", reflect_routes<^^good>()); }

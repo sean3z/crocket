@@ -1,7 +1,7 @@
 # The wire engine
 
 crocket's framework layer (routing, extractors, responders, fairings) knows nothing
-about sockets. `App::handle(Request) -> Response` is the whole contract, and the
+about sockets. `Crocket::handle(Request) -> Response` is the whole contract, and the
 in-process `LocalClient` drives exactly that function. The engine in
 `src/engine_lws.cpp` adapts libwebsockets v4.3.5 to it. It is the only translation
 unit that includes `<libwebsockets.h>`, and lws is linked `PRIVATE`, so application
@@ -10,12 +10,12 @@ code never sees lws types.
 ## Threading model
 
 One event-loop thread runs `lws_service` and owns every lws object. Handlers run on a
-worker pool of `ListenOptions::workers` threads (0 means `max(4, hardware_concurrency)`).
+worker pool of `LaunchOptions::workers` threads (0 means `max(4, hardware_concurrency)`).
 Handlers may block, for example on `Pool::checkout`, without stalling I/O for other
 connections. The two sides communicate through two queues:
 
 - **Jobs:** the event loop pushes a closure owning the `Request`. A worker runs
-  `App::handle`, which includes fairings, routing, extractors and the handler.
+  `Crocket::handle`, which includes fairings, routing, extractors and the handler.
 - **Completions:** the worker pushes `{txn, Response}` and calls `lws_cancel_service`.
   That call is the one lws function documented as safe from other threads. It wakes the
   loop with `LWS_CALLBACK_EVENT_WAIT_CANCELLED`, which drains the queue.
@@ -34,7 +34,7 @@ keep-alive the slot is reused for the next request after `lws_http_transaction_c
 
 | lws callback | engine action |
 |---|---|
-| `HTTP` | Build `Request` from lws tokens and call `App::prepare` to fix the request id and deadline. Arm a timer for the deadline. Reject early (see limits), otherwise wait for the body or dispatch. |
+| `HTTP` | Build `Request` from lws tokens and call `Crocket::prepare` to fix the request id and deadline. Arm a timer for the deadline. Reject early (see limits), otherwise wait for the body or dispatch. |
 | `HTTP_BODY` | Append to the body and enforce `max_body_bytes`. |
 | `HTTP_BODY_COMPLETION` | Dispatch to a worker. |
 | `EVENT_WAIT_CANCELLED` | Pull completions and request writeable. |
@@ -72,7 +72,7 @@ Response writing:
 | `max_in_flight` requests already dispatched | 503 `server.busy` |
 | Deadline (`request_timeout`) reached | 504 `deadline.exceeded` |
 
-All of these go through `App::reject`, so they get a request id, a JSON error body, a
+All of these go through `Crocket::reject`, so they get a request id, a JSON error body, a
 completion log line and metrics like any other response. The handler never runs.
 
 When the 413 is sent before the body arrives, lws discards the rest of the body
@@ -112,7 +112,7 @@ not in the public headers. It is pinned with v4.3.5; revisit it when upgrading.
 
 ## TLS, ALPN and HTTP/2
 
-TLS is on when both `tls_cert` and `tls_key` are set. `App::listen` checks both files
+TLS is on when both `tls_cert` and `tls_key` are set. `Crocket::launch` checks both files
 are readable before starting and fails ignite if not.
 
 - With `http2 = true` (the default), ALPN offers `h2,http/1.1`.

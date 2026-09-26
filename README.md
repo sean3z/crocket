@@ -12,10 +12,10 @@ auto hello(std::string_view name, std::uint8_t age) -> std::string;
 
 }  // namespace api
 
-App{}
+crocket::build()
   .attach(Logger{})
   .mount("/", reflect_routes<^^api>())
-  .listen({.host = "0.0.0.0", .port = 8000});
+  .launch({.host = "0.0.0.0", .port = 8000});
 ```
 
 ## Why reflection?
@@ -73,8 +73,8 @@ If you know [Rocket](https://rocket.rs), almost every concept carries over. The 
 |---|---|
 | `#[get("/hello/<name>/<age>")]` | `[[= http::get("/hello/{name}/{age}")]]` |
 | `routes![a, b, c]` | `reflect_routes<^^api>()`: every annotated function in a namespace or class |
-| `rocket::build().mount("/", ...)` | `App{}.mount("/", ...)` |
-| `#[launch]` | `App::listen({...})` |
+| `rocket::build().mount("/", ...)` | `crocket::build().mount("/", ...)` |
+| `#[launch]` | `.launch({...})` |
 | `FromParam` | `crocket::FromParam<T>` |
 | Forwarding and `rank = N` | Forwarding and `{.rank = N}` |
 | Request guards (`FromRequest`) | Extractors: `crocket::FromRequest<T>` |
@@ -363,7 +363,7 @@ sentinels, a route that needs state nobody manages **fails at ignite**, before t
 server accepts a single connection:
 
 ```cpp
-App{}.mount("/", reflect_routes<^^api>()).ignite();
+crocket::build().mount("/", reflect_routes<^^api>()).ignite();
 ```
 ```
 ignite failed:
@@ -371,7 +371,7 @@ ignite failed:
 ```
 
 Ignite also rejects conflicting routes and anything a fairing's `on_ignite` flags.
-`listen` adds one more check: TLS certificate and key files must exist and be readable.
+`launch` adds one more check: TLS certificate and key files must exist and be readable.
 Every problem is reported at once, not just the first.
 
 Managed state is destroyed in reverse `manage` order at shutdown, after requests have
@@ -485,7 +485,7 @@ struct NotFoundPage {
   }
 };
 
-App{}.attach(Timer{}).attach(Maintenance{}).attach(RequireKeyInProd{false}).attach(NotFoundPage{});
+crocket::build().attach(Timer{}).attach(Maintenance{}).attach(RequireKeyInProd{false}).attach(NotFoundPage{});
 ```
 
 Fairings run concurrently on worker threads, so keep any shared state thread-safe.
@@ -538,7 +538,7 @@ routing, extractors, responders and error mapping. It plays the role of Rocket's
 `local::blocking::Client`.
 
 ```cpp
-App app = make_app();
+Crocket app = make_app();
 LocalClient client(app);
 
 auto res = client.post("/users").bearer("alice").json(R"({"email":"a@example.com"})").dispatch();
@@ -563,12 +563,12 @@ cfg.max_in_flight   = 1024;       // 503 server.busy
 cfg.drain_timeout   = 5s;         // graceful shutdown budget
 cfg.debug_routes    = true;       // GET /__routes lists every route
 
-return App{cfg}
+return crocket::build(cfg)
     .manage(std::move(pool))
     .attach(Logger{})
     .attach(Metrics{})
     .mount("/api", reflect_routes<^^api>())
-    .listen({.port = 8443, .tls_cert = "cert.pem", .tls_key = "key.pem"});   // h2 via ALPN
+    .launch({.port = 8443, .tls_cert = "cert.pem", .tls_key = "key.pem"});   // h2 via ALPN
 ```
 
 What you get:
@@ -589,10 +589,10 @@ The threading model and limits are in [docs/ENGINE.md](docs/ENGINE.md).
 defaults when unset or `release`, and throws `std::invalid_argument` for anything else:
 
 ```cpp
-return App{Config::from_env()}   // CROCKET_PROFILE=dev ./my_app
+return crocket::build(Config::from_env()) // CROCKET_PROFILE=dev ./my_app
     .attach(Logger{})
     .mount("/", reflect_routes<^^api>())
-    .listen({.port = 8000});
+    .launch({.port = 8000});
 ```
 
 Compared with the release defaults, the dev profile:
@@ -601,10 +601,10 @@ Compared with the release defaults, the dev profile:
   see the cause in the client without reading logs. Release never sends it.
 - **Logs are readable lines** from `Logger`, coloured on a terminal unless `NO_COLOR`
   is set: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
-- **`listen()` prints every route** before it starts.
+- **`launch()` prints every route** before it starts.
 - **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
   breakpoint), and the drain on shutdown is one second.
-- **An empty `ListenOptions::host` binds `127.0.0.1`** instead of `0.0.0.0`.
+- **An empty `LaunchOptions::host` binds `127.0.0.1`** instead of `0.0.0.0`.
 
 ### Not (yet) in crocket
 

@@ -12,4 +12,4 @@ namespace bad {
 auto put(std::uint64_t id, Json<Widget> w) -> std::string { return w->name + std::to_string(id); }
 }  // namespace bad
 
-int main() { App{}.mount("/", reflect_routes<^^bad>()); }
+int main() { Crocket{}.mount("/", reflect_routes<^^bad>()); }

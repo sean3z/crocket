@@ -57,7 +57,7 @@ std::string local_time_now() {
 
 void Logger::on_ignite(Ignite& ig) {
   text_ = ig.config().profile == Profile::Dev;
-  if (text_) {  // listen() prints the route banner
+  if (text_) {  // launch() prints the route banner
     const char* no_colour = std::getenv("NO_COLOR");
     colour_ = to_stderr_ && isatty(STDERR_FILENO) && !(no_colour && *no_colour);
     return;

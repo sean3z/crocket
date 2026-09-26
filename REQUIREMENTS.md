@@ -40,13 +40,13 @@ Launch:
 
 ```cpp
 int main() {
-  App{}
+  crocket::build()
     .manage(DbPool::connect(cfg))
     .attach(Logger{})
     .attach(Cors::deny())
     .attach(Metrics{})
     .mount("/api", reflect_routes<^^api>())
-    .listen({.host = "0.0.0.0", .port = 443,
+    .launch({.host = "0.0.0.0", .port = 443,
              .tls_cert = "fullchain.pem", .tls_key = "privkey.pem"});
 }
 ```
@@ -105,7 +105,7 @@ Sync functions are valid. `Task<T>` / awaitable returns are allowed on the same 
 
 ## Wire
 
-libwebsockets only. FetchContent pins v4.3.5 with HTTP/2 and SSL. TLS cert/key on `ListenOptions`. ALPN selects h1 vs h2 inside lws. Application code does not branch on protocol.
+libwebsockets only. FetchContent pins v4.3.5 with HTTP/2 and SSL. TLS cert/key on `LaunchOptions`. ALPN selects h1 vs h2 inside lws. Application code does not branch on protocol.
 
 ## Compiler and modules
 
@@ -121,4 +121,4 @@ libwebsockets only. FetchContent pins v4.3.5 with HTTP/2 and SSL. TLS cert/key o
 4. `helper` in `api` is not a route.
 5. Path `{age}` with parameter `years` fails to compile, naming both identifiers.
 6. Missing `.manage(Db)` while a route takes `State<Db>` fails ignite.
-7. TLS listen serves HTTPS; HTTP/2 is available when the client ALPN-negotiates `h2`.
+7. TLS launch serves HTTPS; HTTP/2 is available when the client ALPN-negotiates `h2`.

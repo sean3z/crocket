@@ -246,8 +246,8 @@ auto bulk(Json<std::vector<Widget>> ws) -> std::string { return std::to_string(w
 
 bool contains(std::string_view hay, std::string_view needle) { return hay.find(needle) != std::string_view::npos; }
 
-App make_app(LogCapture& log, Metrics* metrics_out = nullptr, Config cfg = Config{.debug_routes = true}) {
-  App app{std::move(cfg)};
+Crocket make_app(LogCapture& log, Metrics* metrics_out = nullptr, Config cfg = Config{.debug_routes = true}) {
+  Crocket app{std::move(cfg)};
   app.manage(Db{}).manage(test_auth()).manage(Greeter{"Hi"}).attach(log.logger());
   if (metrics_out) app.attach(*metrics_out);
   app.attach(Cors::allow_origins({"https://ok.example"}))
@@ -261,7 +261,7 @@ App make_app(LogCapture& log, Metrics* metrics_out = nullptr, Config cfg = Confi
 int main() {
   LogCapture log;
   Metrics metrics;
-  App app = make_app(log, &metrics);
+  Crocket app = make_app(log, &metrics);
   LocalClient client(app);
 
   section("1. hello(name, uint8_t age)");
@@ -333,7 +333,7 @@ int main() {
 
   section("6. missing .manage(Db) fails ignite");
   {
-    App bare;
+    Crocket bare;
     bare.mount("/", reflect_routes<^^other>());
     auto ig = bare.ignite();
     CHECK(!ig.has_value());
@@ -341,11 +341,11 @@ int main() {
       CHECK(contains(ig.error().message(), "State<Db>"));
       CHECK(contains(ig.error().message(), "other::needs_db"));
     }
-    App fixed;
+    Crocket fixed;
     fixed.manage(Db{}).mount("/", reflect_routes<^^other>());
     CHECK(fixed.ignite().has_value());
     // Auth needs a managed Authenticator, checked the same way.
-    App no_auth;
+    Crocket no_auth;
     no_auth.manage(Db{}).manage(Greeter{"x"}).mount("/", reflect_routes<^^api>());
     auto ig2 = no_auth.ignite();
     CHECK(!ig2 && contains(ig2.error().message(), "State<crocket::Authenticator>"));
@@ -353,11 +353,11 @@ int main() {
 
   section("ignite: conflicting verb+path");
   {
-    App conflict;
+    Crocket conflict;
     conflict.mount("/", reflect_routes<^^dup>());
     auto ig = conflict.ignite();
     CHECK(!ig && contains(ig.error().message(), "route conflict"));
-    App twice;
+    Crocket twice;
     twice.mount("/", reflect_routes<^^other>()).mount("/", reflect_routes<^^other>()).manage(Db{});
     CHECK(!twice.ignite());
   }
@@ -448,7 +448,7 @@ int main() {
     CHECK(contains(routes.body, R"("handler":"api::create")"));
     CHECK(contains(routes.body, R"({"name":"body","source":"json")"));
     CHECK(contains(routes.body, R"("rank":2)"));
-    App prod;
+    Crocket prod;
     LocalClient pc(prod);
     CHECK_EQ(pc.get("/__routes").dispatch().status, 404);  // debug-only
   }
@@ -473,7 +473,7 @@ int main() {
     auto foreign = client.get("/hello/a/1").header("origin", "https://evil.example").dispatch();
     CHECK(!foreign.headers.contains("access-control-allow-origin"));
 
-    App deny_app;
+    Crocket deny_app;
     deny_app.attach(Cors::deny()).mount("/", reflect_routes<^^other>()).manage(Db{});
     LocalClient dc(deny_app);
     auto d = dc.options("/needs-db").header("origin", "https://ok.example").header("access-control-request-method", "GET").dispatch();
@@ -553,7 +553,7 @@ int main() {
 
   section("json::from_path: one struct for POST and PUT");
   {
-    App rapp;
+    Crocket rapp;
     rapp.mount("/v1", reflect_routes<^^resources>());
     LocalClient rc(rapp);
     // POST: no {id} capture, so the server owns id.
@@ -613,7 +613,7 @@ int main() {
     CHECK(Config{}.profile == Profile::Release);
 
     LogCapture dev_log;
-    App dev_app = make_app(dev_log, nullptr, Config::dev());
+    Crocket dev_app = make_app(dev_log, nullptr, Config::dev());
     LocalClient dev(dev_app);
     auto boom = dev.get("/boom").dispatch();
     CHECK_EQ(boom.status, 500);

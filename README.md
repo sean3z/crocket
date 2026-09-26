@@ -660,7 +660,9 @@ don't need it.
 ./dev check        # release build plus the full ctest, before calling a change done
 ```
 
-`./dev help` lists every command. Builds go to `build-dev/` (Debug) and `build/`
+`./dev help` lists every command. CI (`.github/workflows/ci.yml`) runs `./dev setup`,
+`./dev gcc` and `./dev check` in an `ubuntu:26.04` container on every push to `main`
+and every pull request, and caches the GCC build. Builds go to `build-dev/` (Debug) and `build/`
 (release), configured from `CMakePresets.json`. `./dev` picks the compiler in this
 order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 

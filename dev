@@ -6,8 +6,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 
 APT_PACKAGES=(g++-16 cmake ninja-build ccache lld libssl-dev pkg-config
-              git curl openssl gdb inotify-tools
-              make m4 bzip2 gpgv)   # the last line is for ./dev gcc
+              git curl ca-certificates openssl gdb inotify-tools
+              make m4 bzip2 xz-utils file gpgv)   # the last line is for ./dev gcc
 GCC_VERSION=16.2.0
 WATCH_DIRS=(include src examples tests CMakeLists.txt)
 

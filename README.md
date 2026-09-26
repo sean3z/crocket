@@ -35,16 +35,20 @@ See [REQUIREMENTS.md](REQUIREMENTS.md) and [docs/ENGINE.md](docs/ENGINE.md).
 
 ## Using crocket
 
-Add crocket to a CMake project with FetchContent, from a vendored copy or a git
-submodule (or `GIT_REPOSITORY` and `GIT_TAG` for a hosted copy):
+Add crocket to a CMake project with FetchContent:
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(crocket SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/crocket)
+FetchContent_Declare(crocket
+  GIT_REPOSITORY https://github.com/sean3z/crocket.git
+  GIT_TAG main)   # pin a release tag or commit once there is one
 FetchContent_MakeAvailable(crocket)
 
 target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
+
+For a vendored copy or a git submodule, use
+`FetchContent_Declare(crocket SOURCE_DIR path/to/crocket)` instead.
 
 Linking `crocket::crocket` adds `-std=c++26 -freflection` to your target. crocket's
 own examples and tests are not built, and libwebsockets stays private: it is not

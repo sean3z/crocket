@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Ubuntu 26.04 in a container: the toolchain ./dev expects, whatever the runner image is.
+    container: ubuntu:26.04
+    timeout-minutes: 150
+    env:
+      CCACHE_DIR: /github/home/.cache/ccache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: ./dev setup
+
+      # Ubuntu's g++-16 is a pre-release snapshot that can't build crocket, so
+      # ./dev gcc builds GCC 16.2. That takes about half an hour on a hosted runner;
+      # the result is cached until the key changes.
+      - name: Restore GCC 16.2
+        id: gcc
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.local/gcc-16.2
+          key: gcc-16.2.0-ubuntu-26.04-v1
+
+      - name: Build GCC 16.2
+        if: steps.gcc.outputs.cache-hit != 'true'
+        run: ./dev gcc
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/ccache
+          key: ccache-${{ github.sha }}
+          restore-keys: ccache-
+
+      - name: Release build and all tests
+        run: ./dev check

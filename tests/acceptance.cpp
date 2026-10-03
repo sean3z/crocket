@@ -130,6 +130,11 @@ struct Page {
 [[= http::get("/search")]]
 auto search(Query<Page> p) -> std::string { return std::format("page={} q={}", p->page, p->q.value_or("-")); }
 
+[[= http::get("/headers")]]
+auto headers(Header<"x-tenant"> tenant, Header<"X-Retry", std::optional<int>> retry) -> std::string {
+  return std::format("tenant={} retry={}", *tenant, retry->value_or(-1));
+}
+
 [[= http::get("/async/{n}")]]
 auto async_double(int n) -> Task<std::string> {
   auto inner = [](int x) -> Task<int> { co_return x * 2; };
@@ -399,6 +404,20 @@ int main() {
     auto bad = client.get("/search?page=two").dispatch();
     CHECK_EQ(bad.status, 422);
     CHECK_EQ(bad.error_code, std::string_view("query.invalid"));
+  }
+
+  section("header extractor");
+  {
+    CHECK_EQ(client.get("/headers").header("X-Tenant", "acme").dispatch().body, std::string("tenant=acme retry=-1"));
+    CHECK_EQ(client.get("/headers").header("x-tenant", "acme").header("x-retry", "3").dispatch().body,
+             std::string("tenant=acme retry=3"));
+    auto missing = client.get("/headers").dispatch();
+    CHECK_EQ(missing.status, 400);
+    CHECK_EQ(missing.error_code, std::string_view("header.missing"));
+    CHECK(contains(missing.body, "x-tenant"));
+    auto bad = client.get("/headers").header("x-tenant", "acme").header("x-retry", "soon").dispatch();
+    CHECK_EQ(bad.status, 400);
+    CHECK_EQ(bad.error_code, std::string_view("header.invalid"));
   }
 
   section("errors: uncaught exception never leaks what()");

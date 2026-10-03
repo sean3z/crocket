@@ -272,6 +272,77 @@ struct Query {
   T& operator*() { return value; }
 };
 
+/// A string literal as a template argument: Header<"x-api-key">.
+template <std::size_t N>
+struct FixedString {
+  char data[N]{};
+  consteval FixedString(const char (&s)[N]) {
+    for (std::size_t i = 0; i < N; ++i) data[i] = s[i];
+  }
+  [[nodiscard]] constexpr std::string_view view() const { return {data, N - 1}; }
+};
+
+namespace detail {
+consteval bool is_header_name(std::string_view s) {
+  if (s.empty()) return false;
+  for (char c : s) {  // RFC 9110 token characters
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              std::string_view("!#$%&'*+-.^_`|~").contains(c);
+    if (!ok) return false;
+  }
+  return true;
+}
+}  // namespace detail
+
+/// Header<"name", T>: the value of request header `name` (case-insensitive),
+/// parsed with FromParam<T>. T = std::optional<U> makes the header optional.
+/// A missing required header is 400 header.missing; a value that does not
+/// parse is 400 header.invalid.
+template <FixedString Name, class T = std::string>
+struct Header {
+  static_assert(detail::is_header_name(Name.view()), "crocket: Header<\"name\">: not a valid HTTP header name");
+  static constexpr std::string_view name = Name.view();
+
+  T value;
+  T* operator->() { return &value; }
+  const T* operator->() const { return &value; }
+  T& operator*() { return value; }
+  const T& operator*() const { return value; }
+};
+
+template <FixedString Name, class T>
+struct FromRequest<Header<Name, T>> {
+  static constexpr std::string_view kind = "header";
+  static constexpr bool consumes_body = false;
+  static std::expected<Header<Name, T>, ApiError> extract(Request& r) {
+    constexpr std::string_view name = Name.view();
+    auto raw = r.header(name);
+    if constexpr (json::is_optional<T>::value) {
+      using Inner = typename T::value_type;
+      static_assert(PathParam<Inner>, "Header<\"name\", T> type must be parseable with FromParam");
+      if (!raw) return Header<Name, T>{std::nullopt};
+      auto v = FromParam<Inner>::parse(*raw);
+      if (!v) return bad(*raw);
+      return Header<Name, T>{std::move(*v)};
+    } else {
+      static_assert(PathParam<T>, "Header<\"name\", T> type must be parseable with FromParam");
+      if (!raw)
+        return std::unexpected(
+            ApiError::bad_request("header.missing", "missing required header '" + std::string(name) + "'"));
+      auto v = FromParam<T>::parse(*raw);
+      if (!v) return bad(*raw);
+      return Header<Name, T>{std::move(*v)};
+    }
+  }
+
+ private:
+  static std::unexpected<ApiError> bad(std::string_view raw) {
+    return std::unexpected(ApiError{400, "header.invalid",
+                                    "header '" + std::string(Name.view()) + "' is not valid",
+                                    "value: '" + std::string(raw) + "'"});
+  }
+};
+
 template <class T>
   requires std::is_aggregate_v<T>
 struct FromRequest<Query<T>> {

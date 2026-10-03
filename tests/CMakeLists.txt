@@ -21,6 +21,7 @@ crocket_compile_fail(unknown_extractor "parameter 'w' of type 'Widget' is not a 
 crocket_compile_fail(bad_return_type "NotAResponse")
 crocket_compile_fail(from_path_not_optional
   "json::from_path\\]\\] member 'id' of Widget must be std::optional<P>")
+crocket_compile_fail(bad_header_name "not a valid HTTP header name")
 crocket_compile_fail(bad_template "capture .\\{id. must be a whole segment of the form \\{name\\}")
 
 # Control: the valid twin must compile (guards against the harness "passing"

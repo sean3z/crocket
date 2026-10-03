@@ -182,6 +182,7 @@ crocket's request guards. They run before the handler, and if one fails, its
 |---|---|---|
 | `Json<T>` | Request body decoded into `T` via reflection | 415 `json.unsupported_media_type`, 422 `json.invalid` / `json.path_mismatch` / `json.read_only` |
 | `Query<T>` | Query string mapped onto the members of `T` | 422 `query.invalid` |
+| `Header<"name", T>` | Header `name` parsed as `T` (default `std::string`; `std::optional<U>` if it may be absent) | 400 `header.missing` / `header.invalid` |
 | `Auth` | Bearer token verified by the managed `Authenticator` | 401 `auth.missing` / `auth.invalid` / verifier's code |
 | `State<T>` | The managed `T` | (checked at ignite, never at request time) |
 | `Deadline` | Absolute deadline plus a `std::stop_token` | (none) |
@@ -229,6 +230,17 @@ auto create(Json<NewUser> body, Auth auth) -> Result<Created<User>, ApiError>;
 [[= http::get("/search")]]
 auto search(Query<Page> p) -> std::string {           // /search?page=2&q=rust
   return std::format("page {} of results for {}", p->page, p->q.value_or("*"));
+}
+```
+
+Single headers are read the same way, by name in the type:
+
+```cpp
+[[= http::get("/reports")]]
+auto reports(Header<"x-tenant"> tenant,                       // required: 400 header.missing
+             Header<"x-page-size", std::optional<int>> size)  // optional, parsed like a path value
+    -> std::string {
+  return std::format("{} {}", *tenant, size->value_or(50));
 }
 ```
 

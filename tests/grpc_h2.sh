@@ -73,6 +73,10 @@ call "$H2C" SayHello "$WORK/empty.bin" --http2-prior-knowledge
 expect "empty name -> INVALID_ARGUMENT (3)" "3" "$(header grpc-status)"
 call "$H2C" Nope "$WORK/empty.bin" --http2-prior-knowledge
 expect "unknown method -> UNIMPLEMENTED (12)" "12" "$(header grpc-status)"
+call "$H2C" Tenant "$WORK/empty.bin" --http2-prior-knowledge -H 'x-tenant: acme'
+expect_match "custom metadata reaches the handler" "acme" "$(tr -d '\0' <"$WORK/b")"
+expect "the plaintext h2 port also serves HTTP/1.1" "200" \
+  "$(curl -s --http1.1 -o /dev/null -w '%{http_code}' "$H2C/healthz")"
 
 call "$H2C" SayHello "$WORK/big.bin" --http2-prior-knowledge
 expect "300 KB request over many DATA frames, 300 KB reply past the flow-control window" "0" "$(header grpc-status)"
@@ -92,10 +96,13 @@ expect "grpc-status 0" "0" "$(header grpc-status)"
 expect_match "reply message" "Hello, Ada!" "$(tr -d '\0' <"$WORK/b")"
 call "$TLS" SayHello "$WORK/big.bin" -k --http2
 expect "large reply over TLS" "300019" "$(wc -c <"$WORK/b" | tr -d ' ')"
+call "$TLS" Tenant "$WORK/empty.bin" -k --http2 -H 'x-tenant: acme'
+expect_match "custom metadata over TLS" "acme" "$(tr -d '\0' <"$WORK/b")"
 
 echo "[logs]"
-errors=$(grep -h '^\[' "$WORK/h2c.log" "$WORK/tls.log" | grep -v 'LRS_DEAD_SOCKET')
-expect "no libwebsockets errors" "" "$errors"
+# Every line is a JSON log line or the listening banner; anything else came from the wire library.
+errors=$(grep -hv -e '^{' -e '^crocket: listening' "$WORK/h2c.log" "$WORK/tls.log")
+expect "no engine errors" "" "$errors"
 
 if ((FAILS)); then
   echo "--- h2c log"; cat "$WORK/h2c.log"

@@ -4,7 +4,7 @@
 //   #include <crocket/crocket.hpp>
 //   using namespace crocket;
 //
-// Nothing here includes libwebsockets.
+// Nothing here includes the wire engine (h2o).
 
 #include "crocket/app.hpp"
 #include "crocket/extract.hpp"

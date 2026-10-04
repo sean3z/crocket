@@ -3,25 +3,62 @@
 crocket's framework layer (routing, extractors, responders, fairings) knows nothing
 about sockets. `Crocket::handle(Request) -> Response` is the whole contract, and the
 in-process `LocalClient` drives exactly that function. The engine in
-`src/engine_lws.cpp` adapts libwebsockets v4.3.5 to it. It is the only translation
-unit that includes `<libwebsockets.h>`, and lws is linked `PRIVATE`, so application
-code never sees lws types.
+`src/engine_h2o.cpp` adapts [h2o](https://github.com/h2o/h2o) to it. It is the only
+translation unit that includes `<h2o.h>`, and h2o is linked `PRIVATE`, so application
+code never sees h2o types.
+
+h2o is built from its own CMake as the static library `libh2o-evloop` (h2o's own event
+loop, no libuv). `cmake/h2o.cmake` pins it and switches off everything crocket does not
+use: mruby, brotli, zstd, io_uring, dtrace and the shared library.
+
+## Updating h2o
+
+h2o has had no release tag since 2.2.6 (2019). Fastly runs its master branch in
+production, so crocket pins a master commit, plus the SHA-256 of that commit's GitHub
+tarball:
+
+```cmake
+set(CROCKET_H2O_COMMIT cac7e6568ad98a848f099ecd0a18b881f632479a)  # 2026-09-10
+set(CROCKET_H2O_SHA256 be4a7792211ab0d70513e5a2eea4e360b223dd1f8e43af4eacac214d1fba011b)
+```
+
+To move to the newest h2o:
+
+```bash
+./dev h2o-update            # latest master
+./dev h2o-update <ref>      # a branch, tag, or short or full commit
+```
+
+The command resolves the ref through the GitHub API, downloads and hashes the tarball,
+rewrites the two lines, prints a compare link for the upstream changes, then runs
+`./dev check` (release build and the full test suite). If the check fails, the new pin
+stays in place so you can investigate; `git checkout cmake/h2o.cmake` reverts it.
+
+What to look at in the upstream compare, because the engine relies on it:
+
+- `h2o_req_t` fields: `entity`, `proceed_req`, `write_req`, `content_length`,
+  `path_normalized`, `res.trailers`, `http1_is_persistent`.
+- The streaming request-body contract in `include/h2o.h`
+  (`h2o_handler_t::supports_request_streaming`).
+- `h2o_httpclient_error_is_eos`, which the engine passes to `proceed_req` to end a
+  request body early.
+
+To build offline, set `FETCHCONTENT_SOURCE_DIR_H2O` to an h2o checkout.
 
 ## Threading model
 
-One event-loop thread runs `lws_service` and owns every lws object. Handlers run on a
+One event-loop thread runs `h2o_evloop_run` and owns every h2o object. Handlers run on a
 worker pool of `LaunchOptions::workers` threads (0 means `max(4, hardware_concurrency)`).
 Handlers may block, for example on `Pool::checkout`, without stalling I/O for other
 connections. The two sides communicate through two queues:
 
 - **Jobs:** the event loop pushes a closure owning the `Request`. A worker runs
   `Crocket::handle`, which includes fairings, routing, extractors and the handler.
-- **Completions:** the worker pushes `{txn, Response}` and calls `lws_cancel_service`.
-  That call is the one lws function documented as safe from other threads. It wakes the
-  loop with `LWS_CALLBACK_EVENT_WAIT_CANCELLED`, which drains the queue.
+- **Completions:** the worker posts `{txn, Response}` with `h2o_multithread_send_message`.
+  That writes to an eventfd the loop watches, so the loop wakes and responds.
 
-Workers never touch a `wsi`. Each transaction gets a monotonically increasing id, and a
-completion whose id is no longer live is dropped. That happens when the client
+Workers never touch an `h2o_req_t`. Each transaction gets a monotonically increasing id,
+and a completion whose id is no longer live is dropped. That happens when the client
 disconnected or the deadline already produced a 504.
 
 `Task<T>` handlers are awaited with `sync_wait` on the worker. Coroutines that resume on
@@ -29,48 +66,63 @@ other threads work, but a waiting worker is occupied until the task finishes.
 
 ## Per-transaction flow
 
-An h1 request and an h2 stream each have their own `wsi` and per-session slot. On h1
-keep-alive the slot is reused for the next request after `lws_http_transaction_completed`.
+h2o gives every HTTP/1.1 request and every HTTP/2 stream its own `h2o_req_t`. The engine
+registers one handler for every path and keeps a `Session` per request. The session is
+tied to the request's memory pool (`h2o_mem_alloc_shared`), so h2o's release of the
+request, after the response is sent or when the client goes away, is the one place the
+session is freed.
 
-| lws callback | engine action |
+| Event | Engine action |
 |---|---|
-| `HTTP` | Build `Request` from lws tokens and call `Crocket::prepare` to fix the request id and deadline. Arm a timer for the deadline. Reject early (see limits), otherwise wait for the body or dispatch. |
-| `HTTP_BODY` | Append to the body and enforce `max_body_bytes`. Dispatch to a worker once the body is complete (see below). |
-| `HTTP_BODY_COMPLETION` | Dispatch an h2 body that has neither a `Content-Length` nor gRPC framing. Otherwise the engine has already counted the body complete, or is still waiting for the rest. |
-| `EVENT_WAIT_CANCELLED` | Pull completions and request writeable. |
-| `HTTP_WRITEABLE` | Write status and headers, then the body in chunks of up to 16 KiB (`LWS_WRITE_HTTP_FINAL` on the last), then trailers when there are any, then complete the transaction. |
-| `TIMER` | The deadline passed: request stop on the token and answer 504 `deadline.exceeded`. |
-| `CLOSED_HTTP` / `HTTP_DROP_PROTOCOL` | Request stop on the token and forget the transaction. |
+| `on_req` | Build `Request` from h2o's parsed request and call `Crocket::prepare` to fix the request id and deadline. Arm the deadline timer. Reject early (see limits), otherwise take the body or dispatch. |
+| `on_body` (`write_req.cb`) | Append the next piece of the body and enforce `max_body_bytes`. Dispatch at the end of the body, otherwise ask h2o for more. |
+| completion message | Respond: status, headers and body in one `h2o_send`, and trailers over h2. |
+| deadline timer | Request stop on the token and answer 504 `deadline.exceeded`. |
+| request released | Request stop on the token and forget the transaction. |
 
 Request construction:
 
-- **Path and query:** lws has already percent-decoded and normalised the path, and has
-  split and decoded the query string into `URI_ARGS` fragments. The engine does not
-  decode again.
-- **Method:** over h1 it comes from the per-method URI token; over h2 from `:method`.
-  Over h2 the `host` header is filled from `:authority`.
-- **`protocol`:** `"h2"` when the stream's network wsi differs from the stream wsi,
-  otherwise `"http/1.1"`.
-- **`tls`, `remote_addr`:** taken from the network connection.
-- **Body length:** the engine counts the body itself rather than trust lws 4.3.5's
-  `HTTP_BODY_COMPLETION` on h2. That callback never comes when DATA frames arrive with
-  the HEADERS and lws replays them from a buffer, because the replay decrements a
-  different counter from the one lws checks. Without a `Content-Length`, it comes too
-  early: on the first piece of the END_STREAM frame. So a body with a `Content-Length` is
-  complete at that many bytes, and a gRPC body at the length its frame announces. Only
-  an h2 POST with neither relies on lws. `tls_h2.sh` and `grpc_h2.sh` cover all three.
+- **Path and query:** h2o has removed dot segments and percent-decoded the path
+  (`path_normalized`). The query string is split and decoded by `detail::parse_query`.
+  A path that decodes to a NUL byte is 400 `http.invalid`.
+- **Headers:** every request header reaches the handler over both protocols, custom ones
+  included. Over h2 the `host` header is filled from `:authority`.
+- **`protocol`:** `"h2"` for HTTP/2 requests, otherwise `"http/1.1"`.
+- **`tls`, `remote_addr`:** whether the listener has TLS, and the peer's numeric address.
 
-Response writing:
+### Request bodies
 
-- Header names are already lowercase, which h2 requires.
-- `content-length` is computed by the engine, except for gRPC and for responses with
-  trailers: a length would make lws end the stream with the body, before the trailers.
-  `connection`, `transfer-encoding` and `keep-alive` from handlers are dropped.
-- **h2 flow control:** each DATA write is capped at the peer's send window
-  (`lws_get_peer_write_allowance`). At zero the engine asks for WRITEABLE again, and lws
-  calls back when the peer's WINDOW_UPDATE arrives. Writing past the window is a
-  FLOW_CONTROL_ERROR that kills the whole connection, which used to happen to any h2
-  response over 64 KiB.
+The handler declares `supports_request_streaming`, so h2o calls `on_req` as soon as the
+headers are in, instead of buffering the whole body itself. A body that arrived with the
+headers is complete at once (`proceed_req` is null). Otherwise the body arrives in pieces:
+h2o hands one over in `req->entity`, and the engine releases it with
+`proceed_req(req, nullptr)`, which asks for the next. h2o allows exactly one such call per
+piece, so the session tracks whether it holds one. The call runs from a zero-delay timer,
+never inside one of h2o's own callbacks.
+
+This is how crocket keeps enforcing `max_body_bytes` itself: the 413 carries the usual
+JSON error body, log line and metrics, and is `RESOURCE_EXHAUSTED` for gRPC. h2o's own
+limit is off.
+
+When the engine answers before the body is in (413, or a 504 during a slow upload):
+
+- **h2:** it ends the request body with `h2o_httpclient_error_is_eos`, so h2o resets the
+  stream with `NO_ERROR` once the response is out (RFC 9113, section 8.1).
+- **h1:** it keeps reading and dropping the body so the connection can take the next
+  request. Past 8 MiB it stops, and the connection is closed after the response.
+
+HTTP/2 bodies are read until END_STREAM, so gRPC needs no framing of its own. Chunked
+HTTP/1.1 uploads are decoded by h2o and accepted.
+
+### Responses
+
+- Header names are written as given (lowercase); h2o writes its own `Content-Length` and
+  `Connection` headers with HTTP/1.1 capitalisation.
+- `content-length` is set from the body, except for gRPC and for responses with trailers:
+  without a length the stream stays open for the trailers. `connection`,
+  `transfer-encoding` and `keep-alive` from handlers are dropped.
+- h2o handles flow control: the body goes out in one `h2o_send` and h2o writes it as the
+  peer's window allows.
 - **Trailers** (`Response::trailers`) go out over h2 as a final HEADERS frame with
   END_STREAM. They are dropped over HTTP/1.1.
 - **gRPC** (`content-type: application/grpc`) is always sent with `:status 200`; the
@@ -78,24 +130,28 @@ Response writing:
   metrics. Errors are trailers-only: one HEADERS frame carrying `grpc-status`.
 - 1xx, 204 and 304 responses carry neither a body nor a length.
 - HEAD sends the GET response's headers, including its `content-length`, and no body.
+- No `Server` header is sent.
 
 ## Limits
 
 | Condition | Response |
 |---|---|
-| Request headers larger than `max_header_bytes` (the lws header buffer, clamped to 1024..65535) | Connection closed by lws |
-| `Content-Length` over `max_body_bytes`, or more body than declared | 413 `body.too_large` |
-| Malformed `Content-Length` | 400 `http.invalid` |
-| `Transfer-Encoding` without `Content-Length` (chunked upload) | 411 `body.length_required` |
-| An h2 POST without `Content-Length` (how gRPC sends) | Read until END_STREAM, or until the gRPC message is complete; 413 past `max_body_bytes` |
+| Request headers larger than `max_header_bytes` (names plus values, default 8 KiB) | 431 `headers.too_large` |
+| `Content-Length` over `max_body_bytes`, or a body that grows past it | 413 `body.too_large` |
 | `max_in_flight` requests already dispatched | 503 `server.busy` |
 | Deadline (`request_timeout`) reached | 504 `deadline.exceeded` |
 
 All of these go through `Crocket::reject`, so they get a request id, a JSON error body, a
 completion log line and metrics like any other response. The handler never runs.
 
-When the 413 is sent before the body arrives, lws discards the rest of the body
-(`LRS_DISCARD_BODY`) so an h1 connection stays usable.
+Requests h2o cannot parse never reach the engine. h2o answers them itself with a plain
+400 (h1: a malformed request line or `Content-Length`, or more than 100 headers or
+about 400 KiB of them) or an h2 protocol error. They get no crocket log line.
+
+h2o's own timeouts still apply to connections: 10 s to receive an HTTP/1.1 request
+(`http1.req_timeout`) and 10 s of idleness on an HTTP/2 connection. Neither runs while a
+request is with a handler: h2o counts an h2 stream as "blocked by the server" from the
+moment it starts, and an h1 request has no read timeout while it is processed.
 
 ## Deadlines and cancellation
 
@@ -104,7 +160,7 @@ token is triggered in two cases:
 
 - **Deadline timer fires.** The client gets 504 immediately, whatever the handler is
   doing.
-- **Client disconnects**, including an h2 `RST_STREAM`.
+- **Client disconnects**, including an h2 `RST_STREAM`: h2o releases the request.
 
 `Pool::checkout` waits on the token, so a request blocked on a busy pool is released at
 once. Handlers doing their own long work should poll `Deadline::expired()`
@@ -114,58 +170,24 @@ A handler that ignores the token keeps running after its 504. Its late response 
 discarded, but it still passes through `on_response` fairings. The request id then
 appears in two log lines: the 504 and the late outcome, which is not sent.
 
-### h2 connection keepalive
-
-lws closes an idle h2 network connection after the vhost `keepalive_timeout` (5 s). It
-treats "no frames received" as idle even when a stream is waiting on a slow handler, and
-would drop the whole connection under that handler.
-
-To prevent this, the engine marks each h2 stream "immortal" with `lws_mux_mark_immortal`
-when it dispatches the request. Not earlier: during an upload data is flowing, and lws
-re-arms a body timeout for every DATA frame and logs an error each time on an immortal
-stream. That suspends the connection's idle timer while the stream is
-open, and lws restores it when the stream closes. The engine's own deadline timer still
-bounds each request.
-
-`lws_mux_mark_immortal` is internal to lws: it is exported from the static library but
-not in the public headers. It is pinned with v4.3.5; revisit it when upgrading.
-`tests/tls_h2.sh` covers it with a 6 s handler over h2.
+gRPC's `grpc-timeout` header can shorten the deadline, over both h2 with prior knowledge
+and TLS.
 
 ## TLS, ALPN and HTTP/2
 
 TLS is on when both `tls_cert` and `tls_key` are set. `Crocket::launch` checks both files
-are readable before starting and fails ignite if not.
+are readable before starting and fails ignite if not. The engine loads them into an
+OpenSSL context with TLS 1.2 as the minimum.
 
-- With `http2 = true` (the default), ALPN offers `h2,http/1.1`.
+- With `http2 = true` (the default), ALPN offers `h2` and `http/1.1`.
 - With `http2 = false`, ALPN offers only `http/1.1`.
-- Plain-text listeners serve HTTP/1.1, or with `h2_prior_knowledge = true` only HTTP/2
-  with prior knowledge (`LWS_SERVER_OPTION_H2_PRIOR_KNOWLEDGE`), which is how gRPC clients
-  connect without TLS. There is no `Upgrade: h2c`.
-
-lws logs two ordinary h2 events at error level, so the engine's log sink drops them:
-`skint`, a stream waiting for the peer's WINDOW_UPDATE; and `lws_set_timeout: on immortal
-stream`, lws re-arming a body timeout after the engine has already counted the whole
-body in.
+- A plain-text listener serves HTTP/1.1. With `h2_prior_knowledge = true` it also serves
+  HTTP/2 with prior knowledge, which is how gRPC clients connect without TLS, and
+  `Upgrade: h2c`. HTTP/1.1 clients can still use the same port.
 
 `tests/tls_h2.sh` verifies ALPN selection with curl, runs the handler suite over both
-protocols and checks 20 concurrent h2 streams on one connection.
-
-### Known limitation: custom request headers over h2
-
-lws 4.3.5 stores headers it has no token for (custom headers) only for HTTP/1.1; the
-h2 HPACK path drops them. The code is under `!wsi->mux_substream` in
-`lib/roles/http/parsers.c`.
-
-Standard headers, including `authorization`, `content-type`, `te` and `origin`, work over
-both protocols. The visible consequences over h2:
-
-- A client-supplied `X-Request-Id` is ignored, and the server generates one. It is still
-  returned in the `x-request-id` response header and appears in logs and error bodies.
-- `Header<"x-...">` extractors for custom headers see the header as missing.
-- gRPC's `grpc-timeout` and custom metadata do not arrive, so the configured
-  `request_timeout` applies to gRPC calls.
-
-Over HTTP/1.1 all of these work.
+protocols, including custom headers, `X-Request-Id`, CORS preflight and the 431, and
+checks 20 concurrent h2 streams on one connection.
 
 ## Graceful shutdown
 
@@ -173,20 +195,30 @@ On SIGINT or SIGTERM:
 
 1. Mark the app draining. `/readyz` returns 503, and h1 responses carry
    `connection: close`.
-2. Close the listen socket with `lws_context_deprecate`. New connections are refused;
-   existing ones continue.
-3. Service the loop until no transaction is open or `drain_timeout` passes. A helper
-   thread wakes the loop every 100 ms to check the clock.
+2. Close the listen socket. New connections are refused; existing ones continue. Ask h2o
+   to shut down its connections (`h2o_context_request_shutdown`): h2 connections get
+   GOAWAY and idle h1 connections close.
+3. Run the loop until no transaction is open or `drain_timeout` passes.
 4. Request stop on anything still open, discard queued jobs that never started, and give
    running handlers 1 s to finish. If a handler is still running, log it and
    `std::quick_exit(1)`. Destroying managed state under a running handler would be
    undefined behaviour.
-5. Destroy the lws context, then call `detail::shutdown_app`. That runs `on_shutdown`
+5. Give h2o up to 1 s to finish writing and close the remaining connections, then
+   destroy the h2o context, and call `detail::shut_down`. That runs `on_shutdown`
    fairings in reverse attach order, then destroys managed state in reverse
-   `manage` order, which drops pools.
+   `manage` order, which drops pools. If a connection is still open at that point the
+   h2o context is left for process exit rather than destroyed under it.
 
 The exit code is 0 if everything drained, 2 if the drain timed out, and 1 if handlers had
 to be abandoned.
 
-The signal handler only sets a flag and calls `lws_cancel_service`, which writes one byte
-to the context's wakeup descriptor. Worker threads block SIGINT and SIGTERM.
+The signal handler only sets a flag and writes to an eventfd the loop watches. Worker
+threads block SIGINT and SIGTERM. SIGPIPE is ignored while the engine runs, because a
+peer closing during a write is an ordinary error.
+
+## Binary size
+
+h2o's core references parts crocket never calls, such as HTTP/3 and proxying. h2o is
+compiled with `-ffunction-sections -fdata-sections`, so an application that links with
+`-Wl,--gc-sections` drops them. The stripped `crocket_serve` example is about 1.4 MB
+without it and 1.1 MB with it.

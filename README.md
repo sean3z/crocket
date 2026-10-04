@@ -2,7 +2,7 @@
 
 A C++ web framework in the same spirit as [Rocket](https://rocket.rs) for Rust. Not a port.
 
-Handlers are functions. Path captures and extractors are arguments. The return value is the response. Routes are declared with C++26 annotations and discovered with reflection. The wire layer is libwebsockets (HTTP/1.1, HTTP/2, TLS).
+Handlers are functions. Path captures and extractors are arguments. The return value is the response. Routes are declared with C++26 annotations and discovered with reflection. The wire layer is [h2o](https://github.com/h2o/h2o) (HTTP/1.1, HTTP/2, TLS).
 
 ```cpp
 namespace api {
@@ -51,17 +51,18 @@ For a vendored copy or a git submodule, use
 `FetchContent_Declare(crocket SOURCE_DIR path/to/crocket)` instead.
 
 Linking `crocket::crocket` adds `-std=c++26 -freflection` to your target. crocket's
-own examples and tests are not built, and libwebsockets stays private: it is not
-linked into your headers or your CMake cache.
+own examples and tests are not built, and h2o stays private: it is not in your
+headers or your CMake cache.
 
 You need:
 
 - **GCC 16.2 or later.** Ubuntu 26.04's `g++-16` package is too old (see
   [Building](#building)). Clang is not tested yet.
 - **CMake 3.28 or later**, and Ninja or Make.
-- **OpenSSL development headers** (`libssl-dev`), because libwebsockets is built with TLS.
-- **Network access on the first configure**, to fetch libwebsockets v4.3.5 from GitHub.
-  Set `FETCHCONTENT_SOURCE_DIR_LIBWEBSOCKETS` to a local checkout to build offline.
+- **OpenSSL and zlib development headers** (`libssl-dev`, `zlib1g-dev`), and `perl`,
+  which h2o's build runs to generate a header.
+- **Network access on the first configure**, to fetch h2o (a 7 MB tarball) from GitHub.
+  Set `FETCHCONTENT_SOURCE_DIR_H2O` to a local checkout to build offline.
 
 There are no `install()` rules yet, so `find_package(crocket)` does not work.
 
@@ -246,9 +247,7 @@ auto reports(Header<"x-tenant"> tenant,                       // required: 400 h
 }
 ```
 
-Over HTTP/2, only headers libwebsockets knows reach the handler (`authorization`,
-`content-type`, `user-agent`, ...). Custom ones such as `x-tenant` work over HTTP/1.1
-only; see [docs/ENGINE.md](docs/ENGINE.md#known-limitation-custom-request-headers-over-h2).
+Every request header reaches the handler, over HTTP/1.1 and HTTP/2 alike.
 
 JSON mapping is driven by reflection, with no derive or registration step. It handles:
 
@@ -603,13 +602,11 @@ crocket::build()
   Extractor failures, limits and deadlines map the same way, and an unknown method is
   `UNIMPLEMENTED`.
 - **Deadlines:** a `grpc-timeout` header can shorten `request_timeout` but not extend it.
-  Over h2 this does not work yet, because lws drops headers it has no token for (see
-  [docs/ENGINE.md](docs/ENGINE.md#known-limitation-custom-request-headers-over-h2)).
-  The same applies to custom metadata and `Header<"x-...">`.
+- **Metadata:** custom metadata arrives as request headers, so `Header<"x-...">` reads it.
 
 gRPC needs HTTP/2. Over TLS it is negotiated with ALPN. A gRPC client on an insecure
-channel speaks h2 without TLS, which `LaunchOptions::h2_prior_knowledge` serves; that
-port then no longer accepts HTTP/1.1.
+channel speaks h2 without TLS, which `LaunchOptions::h2_prior_knowledge` serves. The
+same port keeps serving HTTP/1.1.
 
 The `.proto` for clients in other languages comes from the same declarations:
 
@@ -730,8 +727,8 @@ Rocket features without an equivalent today:
 
 The toolchain used for development is GCC 16.2 (`-std=c++26 -freflection`, added
 automatically as a `PUBLIC` compile option of the `crocket` target), CMake 4.2 and
-Ninja on Ubuntu 26.04. You also need OpenSSL development headers, because lws is built
-with TLS.
+Ninja on Ubuntu 26.04. You also need OpenSSL and zlib development headers and `perl`
+for h2o (`./dev setup` installs them).
 
 GCC 16.2 or later is required. Ubuntu 26.04's `g++-16` package is a pre-release
 snapshot (`16-20260322`) whose reflection bugs break any translation unit that mounts
@@ -740,8 +737,10 @@ routes. Its errors start with `accessing uninitialized member 'crocket::detail::
 CMake links with lld when it can, then mold, then the default linker. Each candidate
 is tried with a real test link, because mold 2.40 cannot link with GCC 16.
 
-libwebsockets 4.3.5 declares a `cmake_minimum_required` that CMake 4 rejects. The
-top-level `CMakeLists.txt` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` before fetching it.
+h2o is pinned to a commit in `cmake/h2o.cmake`, because it has had no release tag since
+2019. `./dev h2o-update` moves the pin to the newest h2o and runs the full test suite;
+see [docs/ENGINE.md](docs/ENGINE.md#updating-h2o). An application that links with
+`-Wl,--gc-sections` drops the parts of h2o crocket never calls, about 300 KB.
 
 Options:
 
@@ -772,10 +771,10 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 |---|---|
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile and header validation. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
-| `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or lws cache entries leak into the application. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, h2 bodies larger than the flow-control window, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight and 431. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
-| `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
+| `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
 ## `crocket_serve` configuration
 
@@ -787,6 +786,7 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 | `CROCKET_HOST` | `0.0.0.0` (`127.0.0.1` in dev) | Address to listen on |
 | `CROCKET_PORT` | `8000` | Port to listen on |
 | `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | unset | Enable TLS; both must be set |
+| `CROCKET_REQUEST_TIMEOUT` | `10` (an hour in dev) | Request deadline in seconds |
 | `CROCKET_DEBUG_ROUTES` | unset | Set to any value to expose `GET /__routes` |
 
 ## Differences from REQUIREMENTS.md
@@ -798,15 +798,14 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
   Malformed JSON is 422 `json.invalid` as specified.
 - `Task<T>` handlers are awaited synchronously on a worker thread (see
   [docs/ENGINE.md](docs/ENGINE.md)).
-- Over HTTP/2, a client-supplied `X-Request-Id` is not visible, because of a
-  libwebsockets 4.3.5 limitation, so a new id is generated. See
-  [docs/ENGINE.md](docs/ENGINE.md).
 
 ## License
 
 crocket is released under the [MIT license](LICENSE).
 
-It links [libwebsockets](https://libwebsockets.org) statically into your program.
-libwebsockets is MIT-licensed, with a few files under BSD licenses, so a binary you
-distribute must also include its license notice (`LICENSE` in the libwebsockets
-source). OpenSSL is linked dynamically under the Apache License 2.0.
+It links [h2o](https://github.com/h2o/h2o) statically into your program. h2o is
+MIT-licensed, and so are the libraries it bundles into it (picotls, quicly,
+picohttpparser, hiredis, libyrmcds, libgkc and cloexec). A binary you distribute must
+include their notices: `LICENSE` in the h2o source, and each library's license under
+its `deps/` directory. OpenSSL is linked dynamically under the Apache License 2.0, and
+zlib under the zlib license.

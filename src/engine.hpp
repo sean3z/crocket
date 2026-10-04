@@ -1,6 +1,6 @@
 #pragma once
-// Private seam between Crocket and the wire engine. Only engine_lws.cpp includes
-// libwebsockets.
+// Private seam between Crocket and the wire engine. Only engine_h2o.cpp includes
+// h2o.
 #include "crocket/app.hpp"
 
 namespace crocket::detail {

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 
-APT_PACKAGES=(g++-16 cmake ninja-build ccache lld libssl-dev pkg-config
+APT_PACKAGES=(g++-16 cmake ninja-build ccache lld libssl-dev zlib1g-dev perl pkg-config
               git curl openssl gdb inotify-tools
               make m4 bzip2 gpgv)   # the last line is for ./dev gcc
 GCC_VERSION=16.2.0
@@ -33,6 +33,8 @@ ${B}./dev${R} <command> [args]
   check                     Release tree (build/, -O2) plus the full ctest: run
                             this before calling a change done
   clean [dev|release|all]   Delete build trees (default: dev)
+  h2o-update [ref]          Pin h2o to the newest master commit (or a branch, tag
+                            or commit), then run ./dev check
 
 <target> is a CMake target; 'hello' and 'serve' are short for crocket_hello and
 crocket_serve. Examples:  ./dev watch hello     ./dev test -R compile_fail
@@ -163,6 +165,44 @@ cmd_clean() {
   esac
 }
 
+# ---- h2o -------------------------------------------------------------------------
+
+H2O_REPO=h2o/h2o
+H2O_PIN=$ROOT/cmake/h2o.cmake
+
+# Moves the h2o pin in cmake/h2o.cmake to <ref> (default: master), then runs the
+# release build and the full test suite. h2o has no recent release tags, so the
+# pin is a commit plus the SHA-256 of its GitHub tarball.
+cmd_h2o_update() {
+  local ref=${1:-master}
+  for t in curl sha256sum sed; do command -v "$t" >/dev/null || die "missing $t"; done
+  local old; old=$(sed -n 's/^set(CROCKET_H2O_COMMIT \([0-9a-f]*\)).*/\1/p' "$H2O_PIN")
+  [[ -n $old ]] || die "no CROCKET_H2O_COMMIT in ${H2O_PIN#"$ROOT"/}"
+
+  say "resolving h2o '$ref'"
+  local json sha date
+  json=$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$H2O_REPO/commits/$ref") ||
+    die "GitHub has no h2o commit, branch or tag named '$ref'"
+  sha=$(sed -n 's/^  "sha": "\([0-9a-f]\{40\}\)",$/\1/p' <<<"$json" | head -1)
+  date=$(sed -n 's/^ *"date": "\([0-9-]\{10\}\)T.*/\1/p' <<<"$json" | tail -1)  # committer date
+  [[ -n $sha ]] || die "could not read the commit id from GitHub's answer"
+  if [[ $sha == "$old" ]]; then ok "h2o is already pinned to $sha ($ref)"; return; fi
+
+  say "downloading h2o $sha ($date)"
+  local tmp; tmp=$(mktemp)
+  curl -fsSL -o "$tmp" "https://github.com/$H2O_REPO/archive/$sha.tar.gz" || { rm -f "$tmp"; die "download failed"; }
+  local sum; sum=$(sha256sum "$tmp" | cut -d' ' -f1)
+  rm -f "$tmp"
+
+  sed -i -e "s/^set(CROCKET_H2O_COMMIT [0-9a-f]*).*/set(CROCKET_H2O_COMMIT $sha)  # $date/" \
+         -e "s/^set(CROCKET_H2O_SHA256 [0-9a-f]*)/set(CROCKET_H2O_SHA256 $sum)/" "$H2O_PIN"
+  ok "pinned h2o $sha ($date) in ${H2O_PIN#"$ROOT"/}"
+  say "upstream changes: https://github.com/$H2O_REPO/compare/$old...$sha"
+  say "release build and full test suite"
+  cmd_check || die "h2o $sha fails ./dev check; the new pin is left in place to investigate (git checkout ${H2O_PIN#"$ROOT"/} reverts it)"
+  ok "h2o $sha passes ./dev check; commit ${H2O_PIN#"$ROOT"/} to keep it"
+}
+
 # ---- watch -------------------------------------------------------------------
 
 cmd_watch() {
@@ -229,6 +269,7 @@ cmd=${1:-help}
 shift || true
 case $cmd in
   setup|gcc|build|run|watch|test|check|clean) "cmd_$cmd" "$@" ;;
+  h2o-update) cmd_h2o_update "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 1 ;;
 esac

@@ -3,6 +3,10 @@ add_executable(crocket_acceptance acceptance.cpp)
 target_link_libraries(crocket_acceptance PRIVATE crocket)
 add_test(NAME acceptance COMMAND crocket_acceptance)
 
+add_executable(crocket_grpc_test grpc.cpp)
+target_link_libraries(crocket_grpc_test PRIVATE crocket)
+add_test(NAME grpc COMMAND crocket_grpc_test)
+
 # Acceptance 5 and friends: programs that must NOT compile. Each is an
 # EXCLUDE_FROM_ALL object library; the test builds it and expects failure with
 # a diagnostic matching the regex (both identifiers for the capture mismatch).
@@ -22,6 +26,9 @@ crocket_compile_fail(bad_return_type "NotAResponse")
 crocket_compile_fail(from_path_not_optional
   "json::from_path\\]\\] member 'id' of Widget must be std::optional<P>")
 crocket_compile_fail(bad_header_name "not a valid HTTP header name")
+crocket_compile_fail(proto_duplicate_field "members 'size' and 'colour' both have field number 2")
+crocket_compile_fail(proto_unmapped_type "member 'grade' of proto message Widget has type char, which has no protobuf mapping")
+crocket_compile_fail(rpc_two_messages "rpc bad::both: parameters 'a' and 'b' are both request messages")
 crocket_compile_fail(bad_template "capture .\\{id. must be a whole segment of the form \\{name\\}")
 
 # Control: the valid twin must compile (guards against the harness "passing"
@@ -37,6 +44,12 @@ if(CURL AND OPENSSL AND CROCKET_BUILD_EXAMPLES)
   add_test(NAME tls_h2 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tls_h2.sh $<TARGET_FILE:crocket_serve>
            $<TARGET_FILE:crocket_hello>)
   set_tests_properties(tls_h2 PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+endif()
+
+# gRPC over real sockets: h2 prior knowledge and TLS, driven by curl.
+if(CURL AND OPENSSL AND CROCKET_BUILD_EXAMPLES)
+  add_test(NAME grpc_h2 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/grpc_h2.sh $<TARGET_FILE:crocket_grpc>)
+  set_tests_properties(grpc_h2 PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 endif()
 
 # An application that pulls crocket in with FetchContent builds and runs.

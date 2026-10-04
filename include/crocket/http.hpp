@@ -13,6 +13,18 @@
 
 namespace crocket {
 
+namespace detail {
+/// std::to_string for compile-time diagnostics (libstdc++'s is not constexpr).
+constexpr std::string decimal(long long v) {
+  if (v == 0) return "0";
+  bool neg = v < 0;
+  unsigned long long u = neg ? 0ULL - static_cast<unsigned long long>(v) : static_cast<unsigned long long>(v);
+  std::string s;
+  for (; u; u /= 10) s.insert(s.begin(), char('0' + u % 10));
+  return neg ? "-" + s : s;
+}
+}  // namespace detail
+
 namespace http {
 
 enum class Method : std::uint8_t { Get, Head, Post, Put, Patch, Delete, Options, Unknown };
@@ -160,6 +172,7 @@ class Headers {
   [[nodiscard]] auto begin() const { return items_.begin(); }
   [[nodiscard]] auto end() const { return items_.end(); }
   [[nodiscard]] std::size_t size() const { return items_.size(); }
+  [[nodiscard]] bool empty() const { return items_.empty(); }
 
   static bool iequals(std::string_view a, std::string_view b) {
     return std::ranges::equal(a, b, [](char x, char y) { return ascii_lower(x) == ascii_lower(y); });

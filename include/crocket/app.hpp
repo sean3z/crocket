@@ -50,7 +50,14 @@ struct LaunchOptions {
   unsigned workers = 0;                  // 0 = hardware concurrency
   std::size_t max_header_bytes = 8192;   // lws header buffer (max 65535)
   bool http2 = true;                     // offer h2 via ALPN when TLS is on
+  /// Without TLS, speak HTTP/2 only ("prior knowledge"), as gRPC clients do on
+  /// an insecure channel. HTTP/1.1 clients cannot connect to such a port.
+  bool h2_prior_knowledge = false;
 };
+
+/// What a mount serves. Http mounts take a path prefix ("/api"); Grpc mounts
+/// take a protobuf package ("helloworld", or "" for none).
+enum class Mode : std::uint8_t { Http, Grpc };
 
 /// One handler parameter as shown by /__routes.
 struct ParamInfo {
@@ -73,6 +80,9 @@ struct RouteDef {
   std::vector<detail::StateDep> needs;
   detail::Invoker invoke = nullptr;
   detail::Builtin builtin = detail::Builtin::None;
+  Mode mode = Mode::Http;
+  std::string_view service;  // gRPC: "Greeter"
+  std::string_view rpc;      // gRPC: "SayHello"
 };
 
 using Routes = std::vector<RouteDef>;
@@ -143,7 +153,12 @@ struct Core {
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
   std::vector<ReadyCheck> ready_checks;
-  std::vector<std::pair<std::string, Routes>> mounts;
+  struct Mount {
+    std::string base;
+    Routes routes;
+    Mode mode;
+  };
+  std::vector<Mount> mounts;
   std::vector<std::string> build_errors;  // reported at ignite
   Routes routes;                          // final table, built at ignite
   std::shared_ptr<Router> router;         // built at ignite
@@ -203,8 +218,12 @@ class Crocket {
   template <class F>
   Crocket&& attach(F fairing) && { return std::move(attach(std::move(fairing))); }
 
-  Crocket& mount(std::string_view base, Routes routes) &;
-  Crocket&& mount(std::string_view base, Routes routes) && { return std::move(mount(base, std::move(routes))); }
+  /// Serve `routes` under `base`. Mode::Grpc serves [[= grpc::rpc]] methods
+  /// with `base` as the protobuf package: POST /<package>.<Service>/<Method>.
+  Crocket& mount(std::string_view base, Routes routes, Mode mode = Mode::Http) &;
+  Crocket&& mount(std::string_view base, Routes routes, Mode mode = Mode::Http) && {
+    return std::move(mount(base, std::move(routes), mode));
+  }
 
   Crocket& configure(Config cfg) &;
   Crocket&& configure(Config cfg) && { return std::move(configure(std::move(cfg))); }
@@ -272,6 +291,8 @@ class LocalClient {
   Call patch(std::string_view target) { return {app_, http::Method::Patch, target}; }
   Call del(std::string_view target) { return {app_, http::Method::Delete, target}; }
   Call options(std::string_view target) { return {app_, http::Method::Options, target}; }
+  /// A unary gRPC call: `client.grpc("/helloworld.Greeter/SayHello", proto::encode(req))`.
+  Call grpc(std::string_view path, std::string_view message);
 
  private:
   Crocket& app_;

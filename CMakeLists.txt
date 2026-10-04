@@ -3,7 +3,7 @@ project(crocket VERSION 0.1.0 LANGUAGES C CXX)
 
 # Examples and tests are for working on crocket; a project that pulls crocket
 # in with FetchContent or add_subdirectory doesn't build them.
-option(CROCKET_BUILD_EXAMPLES "Build crocket_hello and crocket_serve" ${PROJECT_IS_TOP_LEVEL})
+option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve and crocket_grpc" ${PROJECT_IS_TOP_LEVEL})
 option(CROCKET_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 
 set(CMAKE_CXX_STANDARD 26)
@@ -70,6 +70,7 @@ add_library(crocket STATIC
   src/json.cpp
   src/http.cpp
   src/fairings.cpp
+  src/grpc.cpp
   src/engine_lws.cpp)
 add_library(crocket::crocket ALIAS crocket)
 target_include_directories(crocket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -85,6 +86,8 @@ if(CROCKET_BUILD_EXAMPLES)
   target_link_libraries(crocket_hello PRIVATE crocket)
   add_executable(crocket_serve examples/serve.cpp)
   target_link_libraries(crocket_serve PRIVATE crocket)
+  add_executable(crocket_grpc examples/grpc.cpp)
+  target_link_libraries(crocket_grpc PRIVATE crocket)
 endif()
 
 if(CROCKET_BUILD_TESTS)

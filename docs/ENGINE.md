@@ -35,10 +35,10 @@ keep-alive the slot is reused for the next request after `lws_http_transaction_c
 | lws callback | engine action |
 |---|---|
 | `HTTP` | Build `Request` from lws tokens and call `Crocket::prepare` to fix the request id and deadline. Arm a timer for the deadline. Reject early (see limits), otherwise wait for the body or dispatch. |
-| `HTTP_BODY` | Append to the body and enforce `max_body_bytes`. |
-| `HTTP_BODY_COMPLETION` | Dispatch to a worker. |
+| `HTTP_BODY` | Append to the body and enforce `max_body_bytes`. Dispatch to a worker once the body is complete (see below). |
+| `HTTP_BODY_COMPLETION` | Dispatch an h2 body that has neither a `Content-Length` nor gRPC framing. Otherwise the engine has already counted the body complete, or is still waiting for the rest. |
 | `EVENT_WAIT_CANCELLED` | Pull completions and request writeable. |
-| `HTTP_WRITEABLE` | Write status and headers, then the body in 16 KiB chunks (`LWS_WRITE_HTTP_FINAL` on the last), then complete the transaction. |
+| `HTTP_WRITEABLE` | Write status and headers, then the body in chunks of up to 16 KiB (`LWS_WRITE_HTTP_FINAL` on the last), then trailers when there are any, then complete the transaction. |
 | `TIMER` | The deadline passed: request stop on the token and answer 504 `deadline.exceeded`. |
 | `CLOSED_HTTP` / `HTTP_DROP_PROTOCOL` | Request stop on the token and forget the transaction. |
 
@@ -52,12 +52,30 @@ Request construction:
 - **`protocol`:** `"h2"` when the stream's network wsi differs from the stream wsi,
   otherwise `"http/1.1"`.
 - **`tls`, `remote_addr`:** taken from the network connection.
+- **Body length:** the engine counts the body itself rather than trust lws 4.3.5's
+  `HTTP_BODY_COMPLETION` on h2. That callback never comes when DATA frames arrive with
+  the HEADERS and lws replays them from a buffer, because the replay decrements a
+  different counter from the one lws checks. Without a `Content-Length`, it comes too
+  early: on the first piece of the END_STREAM frame. So a body with a `Content-Length` is
+  complete at that many bytes, and a gRPC body at the length its frame announces. Only
+  an h2 POST with neither relies on lws. `tls_h2.sh` and `grpc_h2.sh` cover all three.
 
 Response writing:
 
 - Header names are already lowercase, which h2 requires.
-- `content-length` is always computed by the engine. `connection`, `transfer-encoding`
-  and `keep-alive` from handlers are dropped.
+- `content-length` is computed by the engine, except for gRPC and for responses with
+  trailers: a length would make lws end the stream with the body, before the trailers.
+  `connection`, `transfer-encoding` and `keep-alive` from handlers are dropped.
+- **h2 flow control:** each DATA write is capped at the peer's send window
+  (`lws_get_peer_write_allowance`). At zero the engine asks for WRITEABLE again, and lws
+  calls back when the peer's WINDOW_UPDATE arrives. Writing past the window is a
+  FLOW_CONTROL_ERROR that kills the whole connection, which used to happen to any h2
+  response over 64 KiB.
+- **Trailers** (`Response::trailers`) go out over h2 as a final HEADERS frame with
+  END_STREAM. They are dropped over HTTP/1.1.
+- **gRPC** (`content-type: application/grpc`) is always sent with `:status 200`; the
+  outcome is in `grpc-status`. `Response::status` keeps the HTTP equivalent for logs and
+  metrics. Errors are trailers-only: one HEADERS frame carrying `grpc-status`.
 - 1xx, 204 and 304 responses carry neither a body nor a length.
 - HEAD sends the GET response's headers, including its `content-length`, and no body.
 
@@ -69,6 +87,7 @@ Response writing:
 | `Content-Length` over `max_body_bytes`, or more body than declared | 413 `body.too_large` |
 | Malformed `Content-Length` | 400 `http.invalid` |
 | `Transfer-Encoding` without `Content-Length` (chunked upload) | 411 `body.length_required` |
+| An h2 POST without `Content-Length` (how gRPC sends) | Read until END_STREAM, or until the gRPC message is complete; 413 past `max_body_bytes` |
 | `max_in_flight` requests already dispatched | 503 `server.busy` |
 | Deadline (`request_timeout`) reached | 504 `deadline.exceeded` |
 
@@ -102,7 +121,9 @@ treats "no frames received" as idle even when a stream is waiting on a slow hand
 would drop the whole connection under that handler.
 
 To prevent this, the engine marks each h2 stream "immortal" with `lws_mux_mark_immortal`
-when the request arrives. That suspends the connection's idle timer while the stream is
+when it dispatches the request. Not earlier: during an upload data is flowing, and lws
+re-arms a body timeout for every DATA frame and logs an error each time on an immortal
+stream. That suspends the connection's idle timer while the stream is
 open, and lws restores it when the stream closes. The engine's own deadline timer still
 bounds each request.
 
@@ -117,7 +138,14 @@ are readable before starting and fails ignite if not.
 
 - With `http2 = true` (the default), ALPN offers `h2,http/1.1`.
 - With `http2 = false`, ALPN offers only `http/1.1`.
-- Plain-text listeners serve HTTP/1.1 only; there is no h2c.
+- Plain-text listeners serve HTTP/1.1, or with `h2_prior_knowledge = true` only HTTP/2
+  with prior knowledge (`LWS_SERVER_OPTION_H2_PRIOR_KNOWLEDGE`), which is how gRPC clients
+  connect without TLS. There is no `Upgrade: h2c`.
+
+lws logs two ordinary h2 events at error level, so the engine's log sink drops them:
+`skint`, a stream waiting for the peer's WINDOW_UPDATE; and `lws_set_timeout: on immortal
+stream`, lws re-arming a body timeout after the engine has already counted the whole
+body in.
 
 `tests/tls_h2.sh` verifies ALPN selection with curl, runs the handler suite over both
 protocols and checks 20 concurrent h2 streams on one connection.
@@ -128,10 +156,16 @@ lws 4.3.5 stores headers it has no token for (custom headers) only for HTTP/1.1;
 h2 HPACK path drops them. The code is under `!wsi->mux_substream` in
 `lib/roles/http/parsers.c`.
 
-Standard headers, including `authorization`, `content-type` and `origin`, work over both
-protocols. The visible consequence is that a client-supplied `X-Request-Id` is honoured
-over HTTP/1.1, while over h2 the server generates one. The generated id is still returned
-in the `x-request-id` response header and appears in logs and error bodies.
+Standard headers, including `authorization`, `content-type`, `te` and `origin`, work over
+both protocols. The visible consequences over h2:
+
+- A client-supplied `X-Request-Id` is ignored, and the server generates one. It is still
+  returned in the `x-request-id` response header and appears in logs and error bodies.
+- `Header<"x-...">` extractors for custom headers see the header as missing.
+- gRPC's `grpc-timeout` and custom metadata do not arrive, so the configured
+  `request_timeout` applies to gRPC calls.
+
+Over HTTP/1.1 all of these work.
 
 ## Graceful shutdown
 

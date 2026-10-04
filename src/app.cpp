@@ -1,13 +1,16 @@
 #include "crocket/app.hpp"
+#include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
 #include "engine.hpp"
 #include "router.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <set>
 #include <tuple>
 
@@ -35,10 +38,10 @@ Crocket::Crocket(Crocket&&) noexcept = default;
 Crocket& Crocket::operator=(Crocket&&) noexcept = default;
 Crocket::~Crocket() = default;
 
-Crocket& Crocket::mount(std::string_view base, Routes routes) & {
+Crocket& Crocket::mount(std::string_view base, Routes routes, Mode mode) & {
   if (core_->ignited)
     core_->build_errors.push_back("mount(\"" + std::string(base) + "\") after ignite");
-  core_->mounts.emplace_back(std::string(base), std::move(routes));
+  core_->mounts.push_back({std::string(base), std::move(routes), mode});
   return *this;
 }
 
@@ -75,6 +78,42 @@ void print_banner(const Routes& routes) {
   }
 }
 
+/// "helloworld", "acme.billing.v1", or "" (no package).
+bool valid_package(std::string_view p) {
+  if (p.empty()) return true;
+  bool start = true;
+  for (char c : p) {
+    if (c == '.') {
+      if (start) return false;
+      start = true;
+      continue;
+    }
+    bool alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    if (!alpha && !(c >= '0' && c <= '9' && !start)) return false;
+    start = false;
+  }
+  return !start;
+}
+
+/// gRPC's Timeout: up to 8 digits and a unit (H, M, S, m, u, n).
+std::optional<Clock::duration> parse_grpc_timeout(std::string_view t) {
+  if (t.size() < 2 || t.size() > 9) return std::nullopt;
+  std::int64_t n = 0;
+  auto digits = t.substr(0, t.size() - 1);
+  auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n);
+  if (ec != std::errc{} || p != digits.data() + digits.size() || n < 0) return std::nullopt;
+  using namespace std::chrono;
+  switch (t.back()) {
+    case 'H': return duration_cast<Clock::duration>(hours(n));
+    case 'M': return duration_cast<Clock::duration>(minutes(n));
+    case 'S': return duration_cast<Clock::duration>(seconds(n));
+    case 'm': return duration_cast<Clock::duration>(milliseconds(n));
+    case 'u': return duration_cast<Clock::duration>(microseconds(n));
+    case 'n': return duration_cast<Clock::duration>(nanoseconds(n));
+    default: return std::nullopt;
+  }
+}
+
 RouteDef builtin_route(std::string path, std::string_view handler, detail::Builtin b) {
   RouteDef d;
   d.method = http::Method::Get;
@@ -93,7 +132,25 @@ std::expected<void, IgniteError> Crocket::ignite() {
 
   // 1. Assemble the route table: mount prefixes + built-ins.
   Routes routes;
-  for (auto& [base_in, list] : c.mounts) {
+  for (auto& [base_in, list, mode] : c.mounts) {
+    if (mode == Mode::Grpc) {
+      const std::string& package = base_in;
+      if (!valid_package(package)) {
+        errors.push_back("gRPC mount \"" + package + "\": the first argument of a Mode::Grpc mount is a protobuf "
+                         "package such as \"helloworld\" or \"acme.v1\" (or \"\" for none), not a path");
+        continue;
+      }
+      for (auto r : list) {
+        if (r.mode != Mode::Grpc) {
+          errors.push_back(describe(r) + " is an HTTP route mounted with Mode::Grpc; mount its scope without Mode::Grpc");
+          continue;
+        }
+        r.path = "/" + (package.empty() ? std::string() : package + ".") + std::string(r.service) + "/" +
+                 std::string(r.rpc);
+        routes.push_back(std::move(r));
+      }
+      continue;
+    }
     std::string base = base_in;
     if (base.empty() || base.front() != '/') {
       errors.push_back("mount base \"" + base + "\" must start with '/'");
@@ -105,6 +162,11 @@ std::expected<void, IgniteError> Crocket::ignite() {
     }
     while (base.size() > 1 && base.back() == '/') base.pop_back();
     for (auto r : list) {
+      if (r.mode == Mode::Grpc) {
+        errors.push_back(std::string(r.handler) + " is a [[= grpc::rpc]] method; mount its scope with Mode::Grpc: "
+                         ".mount(\"<package>\", reflect_routes<...>(), crocket::Mode::Grpc)");
+        continue;
+      }
       if (base != "/") r.path = r.path == "/" ? base : base + r.path;
       std::vector<http::Segment> segs;
       if (auto err = http::parse_template(r.path, segs); !err.empty())
@@ -164,7 +226,12 @@ void Crocket::prepare(Request& req) const {
     auto hdr = req.header("x-request-id");
     req.request_id = (hdr && valid_request_id(*hdr)) ? std::string(*hdr) : detail::generate_request_id();
   }
-  if (req.deadline.at == Clock::time_point::max()) req.deadline.at = req.received + core_->config.request_timeout;
+  if (req.deadline.at == Clock::time_point::max()) {
+    req.deadline.at = req.received + core_->config.request_timeout;
+    // A gRPC client's deadline can only shorten the configured one.
+    if (auto t = req.header("grpc-timeout"))
+      if (auto d = parse_grpc_timeout(*t)) req.deadline.at = std::min(req.deadline.at, req.received + *d);
+  }
   req.state_registry = &core_->state;
   req.dev_profile = core_->config.profile == Profile::Dev;
 }
@@ -207,13 +274,17 @@ Response Crocket::reject(Request& req, const ApiError& err) {
 
 void Crocket::finish(const Request& req, Response& res) {
   // A header built from untrusted input must not split the response.
-  for (auto& [k, v] : res.headers) {
-    if (http::valid_header_name(k) && http::valid_header_value(v)) continue;
-    auto what = http::valid_header_name(k) ? "response header '" + k + "'" : std::string("a response header name");
+  auto bad_header = [&]() -> std::optional<std::string> {
+    for (auto* hs : {&res.headers, &res.trailers})
+      for (auto& [k, v] : *hs)
+        if (!http::valid_header_name(k) || !http::valid_header_value(v))
+          return http::valid_header_name(k) ? "response header '" + k + "'" : std::string("a response header name");
+    return std::nullopt;
+  }();
+  if (bad_header) {
     res = Response{};
-    write_error(ApiError::internal(what + " contains a character not allowed in HTTP headers (CR, LF, NUL, ...)"),
+    write_error(ApiError::internal(*bad_header + " contains a character not allowed in HTTP headers (CR, LF, NUL, ...)"),
                 req, res);
-    break;
   }
   res.headers.set("x-request-id", req.request_id);
   auto& fs = core_->fairings;
@@ -279,6 +350,10 @@ Response Crocket::run_routes(Request& req) {
   }
   req.route_template = {};
   req.handler = {};
+  if (grpc::is_grpc_request(req)) {
+    write_error(grpc::error(grpc::Code::Unimplemented, "grpc.unimplemented", "unknown method " + req.path), req, res);
+    return res;
+  }
   auto allowed = core_->router->allowed(req.path);
   if (!allowed.empty()) {
     std::string allow;
@@ -400,6 +475,12 @@ void shut_down(Crocket& app) {
 
 LocalClient::LocalClient(Crocket& app) : app_(app) {
   if (auto r = app_.ignite(); !r) throw std::runtime_error(r.error().message());
+}
+
+LocalClient::Call LocalClient::grpc(std::string_view path, std::string_view message) {
+  Call c{app_, http::Method::Post, path};
+  c.header("content-type", "application/grpc").header("te", "trailers").body(grpc::frame(message));
+  return c;
 }
 
 LocalClient::Call::Call(Crocket& app, http::Method m, std::string_view target) : app_(app) {

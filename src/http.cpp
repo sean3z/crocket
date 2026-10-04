@@ -1,4 +1,5 @@
 #include "crocket/app.hpp"
+#include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
 
 #include <chrono>
@@ -9,6 +10,10 @@
 namespace crocket {
 
 void write_error(const ApiError& e, const Request& rq, Response& rs) {
+  if (grpc::is_grpc_request(rq)) {
+    grpc::detail::write_status(e, rq, rs);
+    return;
+  }
   rs.status = e.status;
   rs.error_code = e.code;
   rs.error_detail = e.detail;

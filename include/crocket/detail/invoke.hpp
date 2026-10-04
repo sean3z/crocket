@@ -15,7 +15,7 @@
 
 namespace crocket::detail {
 
-enum class BindKind : std::uint8_t { Path, Extract, RawRequest, RawResponse };
+enum class BindKind : std::uint8_t { Path, Extract, RawRequest, RawResponse, Message };  // Message: gRPC only
 
 /// How one handler parameter gets its value. Structural (lives in an NTTP).
 struct Binding {

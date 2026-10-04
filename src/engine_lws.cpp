@@ -11,13 +11,14 @@
 //   (worker)                      Crocket::handle -> completion queue -> lws_cancel_service
 //   LWS_CALLBACK_EVENT_WAIT_CANCELLED   pull completions, request writeable
 //   LWS_CALLBACK_HTTP_WRITEABLE   status+headers, then body in chunks, then
-//                                 lws_http_transaction_completed
+//                                 trailers (h2 only), then lws_http_transaction_completed
 //   LWS_CALLBACK_TIMER            deadline hit: cancel token, answer 504
 //   LWS_CALLBACK_CLOSED_HTTP      peer went away: cancel token, forget the txn
 //
 // See docs/ENGINE.md.
 
 #include "engine.hpp"
+#include "crocket/grpc.hpp"
 
 #include <libwebsockets.h>
 
@@ -43,6 +44,8 @@
 // keepalive idle timer (vhost keepalive_timeout, default 5 s) while the stream is
 // open; lws undoes it when the stream closes. Without it, a handler that runs
 // longer than keepalive_timeout gets its whole h2 connection closed under it.
+// It is marked once the body is in: lws re-arms a body timeout for every DATA
+// frame of an upload and logs an error each time if the stream is immortal.
 // Pinned to libwebsockets v4.3.5; revisit on upgrade.
 extern "C" void lws_mux_mark_immortal(struct lws* wsi);
 
@@ -53,6 +56,16 @@ using namespace std::chrono_literals;
 
 std::atomic<bool> g_stop{false};
 std::atomic<lws_context*> g_ctx{nullptr};
+
+/// lws logs two ordinary h2 events at error level; drop those, keep the rest:
+///  - "skint": a stream waiting for the peer's WINDOW_UPDATE (flow control);
+///  - "on immortal stream": lws re-arming its body timeout on a stream the
+///    engine already marked immortal, because it counted the whole body in
+///    before lws finished the last frame.
+extern "C" void on_lws_log(int level, const char* line) {
+  if (std::strstr(line, ": skint\n") || std::strstr(line, "lws_set_timeout: on immortal stream")) return;
+  lwsl_emit_stderr(level, line);
+}
 
 extern "C" void on_signal(int) {
   g_stop.store(true);
@@ -69,6 +82,8 @@ struct Session {
   Request meta;  // the request without its body, for early/late rejections
   std::string body;
   std::size_t expected_body = 0;
+  bool open_ended = false;  // h2 body without a Content-Length: ends with the stream
+  bool grpc_body = false;   // ...framed as one gRPC message, which says its own length
   std::shared_ptr<std::stop_source> stop = std::make_shared<std::stop_source>();
 
   Response res;
@@ -233,6 +248,24 @@ Request Engine::build_request(lws* wsi, const char* uri, std::size_t len) {
 
 // ---- event loop handlers -------------------------------------------------------------
 
+/// Whether `body` holds at least the one length-prefixed message it announces.
+bool grpc_message_complete(std::string_view body) {
+  if (body.size() < 5) return false;
+  std::size_t n = 0;
+  for (int i = 1; i <= 4; ++i) n = (n << 8) | static_cast<unsigned char>(body[i]);
+  return body.size() >= 5 + n;
+}
+
+/// The engine counts body bytes itself instead of trusting lws 4.3.5's
+/// BODY_COMPLETION on h2, which (a) never comes when DATA arrived with the
+/// HEADERS and was replayed from a buffer, as the replay decrements a different
+/// counter than the one checked, and (b) comes too early without a
+/// Content-Length, on the first piece of the END_STREAM frame.
+bool body_complete(const Session& s) {
+  if (s.grpc_body) return grpc_message_complete(s.body);
+  return !s.open_ended && s.body.size() >= s.expected_body;
+}
+
 int Engine::on_http(lws* wsi, Pss* pss, const char* uri, std::size_t len) {
   if (pss->s) forget(pss);  // defensive: previous transaction never completed
   auto* s = new Session;
@@ -248,7 +281,6 @@ int Engine::on_http(lws* wsi, Pss* pss, const char* uri, std::size_t len) {
 
   // Our deadline replaces lws' own idle timeouts for this transaction.
   lws_set_timeout(wsi, NO_PENDING_TIMEOUT, 0);
-  if (lws* net = lws_get_network_wsi(wsi); net && net != wsi) lws_mux_mark_immortal(wsi);
   auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(s->meta.deadline.remaining());
   lws_set_timer_usecs(wsi, std::max<lws_usec_t>(1, remaining.count()));
 
@@ -269,12 +301,17 @@ int Engine::on_http(lws* wsi, Pss* pss, const char* uri, std::size_t len) {
     respond_now(s, {413, "body.too_large", "request body too large", {}});
     return 0;
   }
-  if (want == 0) {
+  // An h2 body needs no Content-Length (gRPC clients never send one): a POST
+  // without it reads until END_STREAM, which lws reports as BODY_COMPLETION.
+  bool open_ended = !cl && s->meta.protocol == std::string_view("h2") && s->meta.method == http::Method::Post;
+  if (want == 0 && !open_ended) {
     dispatch(s);  // no body expected (a content-length: 0 completion is ignored)
     return 0;
   }
-  s->expected_body = want;
-  s->body.reserve(want);
+  s->expected_body = open_ended ? cfg_.max_body_bytes : want;
+  s->open_ended = open_ended;
+  s->grpc_body = open_ended && grpc::is_grpc_request(s->meta);
+  if (!open_ended) s->body.reserve(want);
   s->phase = Phase::Body;
   return 0;
 }
@@ -287,12 +324,17 @@ int Engine::on_body(Pss* pss, const char* data, std::size_t len) {
     return 0;
   }
   s->body.append(data, len);
+  if (body_complete(*s)) dispatch(s);
   return 0;
 }
 
 int Engine::on_body_complete(Pss* pss) {
   Session* s = pss->s;
-  if (s && s->phase == Phase::Body) dispatch(s);
+  if (!s || s->phase != Phase::Body) return 0;
+  // Only an open-ended body that is not gRPC needs lws to say where it ends;
+  // otherwise on_body counts, and a completion before the count is premature.
+  if (s->open_ended && !s->grpc_body) dispatch(s);
+  else if (body_complete(*s)) dispatch(s);
   return 0;
 }
 
@@ -302,6 +344,7 @@ void Engine::dispatch(Session* s) {
     return;
   }
   s->phase = Phase::Running;
+  if (lws* net = lws_get_network_wsi(s->wsi); net && net != s->wsi) lws_mux_mark_immortal(s->wsi);
   Request rq = s->meta;
   rq.body = std::move(s->body);
   outstanding_.fetch_add(1);
@@ -366,64 +409,94 @@ void Engine::on_timer(Pss* pss) {
 
 constexpr bool status_has_body(int st) { return !(st < 200 || st == 204 || st == 304); }
 
+
+/// Writes `fields` as one HEADERS frame (h2). `status` adds :status first.
+int write_header_block(lws* wsi, const Session& s, const Headers& fields, int status, bool draining, bool body_allowed,
+                       bool content_length, lws_write_protocol flags) {
+  const Response& r = s.res;
+  std::size_t cap = 512;
+  for (auto& [k, v] : fields) cap += k.size() + v.size() + 8;
+  std::vector<unsigned char> buf(LWS_PRE + cap);
+  unsigned char* start = buf.data() + LWS_PRE;
+  unsigned char* p = start;
+  unsigned char* end = buf.data() + buf.size() - 1;
+  bool h1 = s.meta.protocol == std::string_view("http/1.1");
+
+  if (status && lws_add_http_header_status(wsi, unsigned(status), &p, end)) return -1;
+  for (auto& [k, v] : fields) {
+    if (k == "content-length" || k == "connection" || k == "transfer-encoding" || k == "keep-alive") continue;
+    // Crocket::finish rejects these; a fairing's on_response runs after it, so check again.
+    if (!http::valid_header_name(k) || !http::valid_header_value(v)) {
+      std::fprintf(stderr, "crocket: request %s: dropped a response header with a character not allowed in HTTP "
+                   "headers (set by an on_response fairing)\n", s.meta.request_id.c_str());
+      continue;
+    }
+    std::string name = k + ":";
+    if (lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>(name.c_str()),
+                                    reinterpret_cast<const unsigned char*>(v.data()), int(v.size()), &p, end))
+      return -1;
+  }
+  if (status && h1 && draining) {
+    static constexpr unsigned char kName[] = "connection:";
+    if (lws_add_http_header_by_name(wsi, kName, reinterpret_cast<const unsigned char*>("close"), 5, &p, end))
+      return -1;
+  }
+  if (status && body_allowed && content_length && lws_add_http_header_content_length(wsi, r.body.size(), &p, end))
+    return -1;
+  if (lws_finalize_http_header(wsi, &p, end)) return -1;
+  return lws_write(wsi, start, std::size_t(p - start), flags) < 0 ? -1 : 0;
+}
+
 int Engine::on_writeable(lws* wsi, Pss* pss) {
   Session* s = pss->s;
   if (!s || s->phase != Phase::Writing) return 0;
   Response& r = s->res;
-  bool body_allowed = status_has_body(r.status);
+  // gRPC carries its outcome in grpc-status; HTTP status is always 200.
+  auto ct = r.headers.get("content-type");
+  bool grpc = ct && grpc::is_grpc_content_type(*ct);
+  int status = grpc ? 200 : r.status;
+  bool body_allowed = status_has_body(status);
   if (!body_allowed) r.body.clear();
   bool send_body = body_allowed && !s->head_only && !r.body.empty();
+  bool send_trailers = !r.trailers.empty() && s->meta.protocol == std::string_view("h2");
 
   if (!s->headers_sent) {
     lws_set_timer_usecs(wsi, LWS_SET_TIMER_USEC_CANCEL);
-    std::size_t cap = 512;
-    for (auto& [k, v] : r.headers) cap += k.size() + v.size() + 8;
-    std::vector<unsigned char> buf(LWS_PRE + cap);
-    unsigned char* start = buf.data() + LWS_PRE;
-    unsigned char* p = start;
-    unsigned char* end = buf.data() + buf.size() - 1;
-    bool h1 = s->meta.protocol == std::string_view("http/1.1");
-
-    if (lws_add_http_header_status(wsi, unsigned(r.status), &p, end)) return -1;
-    for (auto& [k, v] : r.headers) {
-      if (k == "content-length" || k == "connection" || k == "transfer-encoding" || k == "keep-alive") continue;
-      // Crocket::finish rejects these; a fairing's on_response runs after it, so check again.
-      if (!http::valid_header_name(k) || !http::valid_header_value(v)) {
-        std::fprintf(stderr, "crocket: request %s: dropped a response header with a character not allowed in HTTP "
-                     "headers (set by an on_response fairing)\n", s->meta.request_id.c_str());
-        continue;
-      }
-      std::string name = k + ":";
-      if (lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>(name.c_str()),
-                                      reinterpret_cast<const unsigned char*>(v.data()), int(v.size()), &p, end))
-        return -1;
-    }
-    if (h1 && app_.core().stats.draining.load()) {
-      static constexpr unsigned char kName[] = "connection:";
-      if (lws_add_http_header_by_name(wsi, kName, reinterpret_cast<const unsigned char*>("close"), 5, &p, end))
-        return -1;
-    }
-    if (body_allowed && lws_add_http_header_content_length(wsi, r.body.size(), &p, end)) return -1;
-    if (lws_finalize_http_header(wsi, &p, end)) return -1;
-    int flags = LWS_WRITE_HTTP_HEADERS | (send_body ? 0 : LWS_WRITE_H2_STREAM_END);
-    if (lws_write(wsi, start, std::size_t(p - start), static_cast<lws_write_protocol>(flags)) < 0) return -1;
+    // A Content-Length would make lws end the stream with the body, before the trailers.
+    int flags = LWS_WRITE_HTTP_HEADERS | (send_body || send_trailers ? 0 : LWS_WRITE_H2_STREAM_END);
+    if (write_header_block(wsi, *s, r.headers, status, app_.core().stats.draining.load(), body_allowed,
+                           !grpc && !send_trailers, static_cast<lws_write_protocol>(flags)))
+      return -1;
     s->headers_sent = true;
-    if (send_body) {
+    if (send_body || send_trailers) {
       lws_callback_on_writable(wsi);
       return 0;
     }
-  } else if (send_body) {
+  } else if (send_body && s->sent < r.body.size()) {
     constexpr std::size_t kChunk = 16 * 1024;
     std::size_t n = std::min(kChunk, r.body.size() - s->sent);
+    // h2: never send past the peer's flow-control window (65535 bytes until it
+    // grants more); doing so is a FLOW_CONTROL_ERROR that kills the connection.
+    if (auto credit = lws_get_peer_write_allowance(wsi); credit >= 0) {
+      if (credit == 0) {  // lws calls back once the peer's WINDOW_UPDATE arrives
+        lws_callback_on_writable(wsi);
+        return 0;
+      }
+      n = std::min(n, std::size_t(credit));
+    }
     std::vector<unsigned char> buf(LWS_PRE + n);
     std::memcpy(buf.data() + LWS_PRE, r.body.data() + s->sent, n);
     bool last = s->sent + n == r.body.size();
-    if (lws_write(wsi, buf.data() + LWS_PRE, n, last ? LWS_WRITE_HTTP_FINAL : LWS_WRITE_HTTP) < 0) return -1;
+    auto mode = last && !send_trailers ? LWS_WRITE_HTTP_FINAL : LWS_WRITE_HTTP;
+    if (lws_write(wsi, buf.data() + LWS_PRE, n, mode) < 0) return -1;
     s->sent += n;
-    if (!last) {
+    if (!last || send_trailers) {
       lws_callback_on_writable(wsi);
       return 0;
     }
+  } else if (send_trailers) {
+    auto flags = static_cast<lws_write_protocol>(LWS_WRITE_HTTP_HEADERS | LWS_WRITE_H2_STREAM_END);
+    if (write_header_block(wsi, *s, r.trailers, 0, false, false, false, flags)) return -1;
   }
 
   forget(pss);
@@ -517,7 +590,7 @@ lws_protocols g_protocols[] = {
 };
 
 int Engine::run() {
-  lws_set_log_level(LLL_ERR, nullptr);
+  lws_set_log_level(LLL_ERR, on_lws_log);
 
   bool tls = !opts_.tls_cert.empty() && !opts_.tls_key.empty();
   lws_context_creation_info info{};
@@ -533,6 +606,8 @@ int Engine::run() {
     info.ssl_cert_filepath = opts_.tls_cert.c_str();
     info.ssl_private_key_filepath = opts_.tls_key.c_str();
     info.alpn = opts_.http2 ? "h2,http/1.1" : "http/1.1";
+  } else if (opts_.h2_prior_knowledge) {
+    info.options |= LWS_SERVER_OPTION_H2_PRIOR_KNOWLEDGE;
   }
 
   unsigned n = opts_.workers ? opts_.workers : std::max(4u, std::thread::hardware_concurrency());
@@ -560,8 +635,9 @@ int Engine::run() {
   sigaction(SIGINT, &sa, &old_int);
   sigaction(SIGTERM, &sa, &old_term);
 
+  const char* h2 = tls && opts_.http2 ? ", h2 via ALPN" : !tls && opts_.h2_prior_knowledge ? ", h2 only (prior knowledge)" : "";
   std::fprintf(stderr, "crocket: listening on %s://%s:%u (%u workers%s)\n", tls ? "https" : "http",
-               opts_.host.c_str(), unsigned(opts_.port), n, tls && opts_.http2 ? ", h2 via ALPN" : "");
+               opts_.host.c_str(), unsigned(opts_.port), n, h2);
 
   while (!g_stop.load())
     if (lws_service(ctx_, 0) < 0) break;

@@ -68,6 +68,15 @@ for proto in --http2 --http1.1; do
   expect "query + metrics" "200" "$(curl -sk $proto -o /dev/null -w '%{http_code}' "$BASE/metrics?x=1")"
 done
 
+echo "[h2 bodies past the 64 KiB flow-control window]"
+name=$(head -c 300000 /dev/zero | tr '\0' n)
+printf '{"email":"big@example.com","name":"%s"}' "$name" >"$WORK/big.json"
+for how in "--data-binary @$WORK/big.json" "--data-binary @-"; do  # with, then without, Content-Length
+  size=$(curl -sk --http2 -o "$WORK/big.out" -w '%{http_code} %{size_download}' -X POST "$BASE/api/users" \
+         -H 'authorization: Bearer alice' -H 'content-type: application/json' $how <"$WORK/big.json")
+  expect_match "300 KB upload and echo ($([[ $how == *@- ]] && echo "no Content-Length" || echo "Content-Length"))" "^201 3000[0-9]{2}$" "$size"
+done
+
 echo "[h2 connection lifetime and concurrency]"
 # lws closes an h2 connection after keepalive_timeout (5 s) unless active
 # streams are marked immortal; a 6 s handler catches a regression.

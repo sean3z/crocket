@@ -21,6 +21,7 @@ struct ApiError {
   std::string_view code = "internal";  // stable, dotted: "auth.expired"
   std::string message = "internal error";
   std::string detail = {};
+  int grpc_status = -1;  // explicit gRPC status code; -1 derives it from `status`
 
   static ApiError not_found(std::string msg = "not found") { return {404, "not_found", std::move(msg), {}}; }
   static ApiError bad_request(std::string_view code, std::string msg) { return {400, code, std::move(msg), {}}; }
@@ -107,9 +108,13 @@ struct Request {
 };
 
 struct Response {
+  // For a gRPC response (content-type application/grpc) the wire status is
+  // always 200 and the outcome travels in grpc-status; `status` then holds the
+  // HTTP equivalent of that outcome, so logs and metrics read the same either way.
   int status = 200;
   Headers headers;
   std::string body;
+  Headers trailers;  // sent after the body; HTTP/2 only (gRPC needs them)
 
   // Observability, never sent to the client.
   std::string_view error_code;    // set for error responses

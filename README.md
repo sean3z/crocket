@@ -89,8 +89,10 @@ If you know [Rocket](https://rocket.rs), almost every concept carries over. The 
 | `rocket::local::blocking::Client` | `LocalClient` |
 | `Shutdown` and grace period | SIGINT/SIGTERM drain with `drain_timeout` |
 
-Two things crocket adds that Rocket has no direct equivalent for:
+Three things crocket adds that Rocket has no direct equivalent for:
 - **Controllers:** classes whose member functions are routes, run on a managed instance.
+- **gRPC:** unary methods next to your HTTP routes, with protobuf messages that are
+  plain structs and a `.proto` generated from them (see [gRPC and protobuf](#grpc-and-protobuf)).
 - **A production kit in the box:** request ids, structured logs, Prometheus metrics,
   `/healthz` and `/readyz`, deadlines with cancellation, and resource pools.
 
@@ -243,6 +245,10 @@ auto reports(Header<"x-tenant"> tenant,                       // required: 400 h
   return std::format("{} {}", *tenant, size->value_or(50));
 }
 ```
+
+Over HTTP/2, only headers libwebsockets knows reach the handler (`authorization`,
+`content-type`, `user-agent`, ...). Custom ones such as `x-tenant` work over HTTP/1.1
+only; see [docs/ENGINE.md](docs/ENGINE.md#known-limitation-custom-request-headers-over-h2).
 
 JSON mapping is driven by reflection, with no derive or registration step. It handles:
 
@@ -543,6 +549,88 @@ token. The token fires when the deadline passes or the client disconnects.
 - **At the deadline** the client gets 504 `deadline.exceeded` regardless of what the
   handler is doing.
 
+### gRPC and protobuf
+
+Unary gRPC methods are functions too. Messages are plain structs, encoded as proto3 by
+reflection, so the C++ declarations are the schema: there is no `.proto` to keep in sync
+and no generated code.
+
+```cpp
+struct HelloRequest {
+  std::string name;                                     // field 1
+  std::optional<std::string> title;                     // field 2
+  [[= proto::field(4)]] std::vector<std::string> tags;  // field 4 (3 was retired)
+};
+struct HelloReply { std::string message; };
+
+namespace greeter {
+
+[[= grpc::rpc]]
+auto say_hello(HelloRequest req, Auth auth) -> Result<HelloReply> {
+  if (req.name.empty()) return std::unexpected(ApiError::bad_request("hello.name", "name is required"));
+  return HelloReply{"Hello, " + req.name};
+}
+
+}  // namespace greeter
+
+crocket::build()
+    .mount("helloworld", reflect_routes<^^greeter>(), Mode::Grpc)  // POST /helloworld.Greeter/SayHello
+    .mount("/api", reflect_routes<^^api>())                         // HTTP routes on the same port
+    .launch({.port = 50051, .h2_prior_knowledge = true});
+```
+
+- **Mounting:** `Mode::Grpc` makes the first argument of `mount` a protobuf package
+  (`"helloworld"`, `"acme.v1"`, or `""` for none) instead of a path. The service is the
+  namespace or class and the method the function, both in PascalCase
+  (`greeter::say_hello` is `helloworld.Greeter/SayHello`). Mounting gRPC methods without
+  `Mode::Grpc`, or HTTP routes with it, fails ignite.
+- **Field numbers** follow declaration order from 1. `[[= proto::field(n)]]` pins a member
+  to `n`, and the members after it continue from `n + 1`. Duplicate or reserved numbers
+  are compile errors. Renumbering breaks existing clients, so pin numbers before
+  reordering or removing members.
+- **Types:** `bool`, `intN_t`, `uintN_t`, `float`, `double`, `std::string`, `proto::Bytes`,
+  enums, nested structs, and `std::optional`, `std::vector` and `std::map` of those.
+  Unknown fields are skipped when decoding.
+- **Parameters:** at most one request message (none means `google.protobuf.Empty`), plus
+  any extractor that does not read the body: `Auth`, `State<T>`, `Deadline`, `Header<...>`
+  and so on.
+- **Returns:** a message, `Result<T>`, `std::optional<T>` (empty is `NOT_FOUND`), `void`
+  (`Empty`), or a `Task` of one of those. Only unary calls are supported: no streaming.
+- **Errors:** an `ApiError` becomes a gRPC status derived from its HTTP status (401
+  `UNAUTHENTICATED`, 404 `NOT_FOUND`, 422 `INVALID_ARGUMENT`, 504 `DEADLINE_EXCEEDED`, ...),
+  with `message` in `grpc-message` and the dotted code in a `crocket-error-code` trailer.
+  `grpc::error(grpc::Code::AlreadyExists, "user.exists", "...")` picks the code exactly.
+  Extractor failures, limits and deadlines map the same way, and an unknown method is
+  `UNIMPLEMENTED`.
+- **Deadlines:** a `grpc-timeout` header can shorten `request_timeout` but not extend it.
+  Over h2 this does not work yet, because lws drops headers it has no token for (see
+  [docs/ENGINE.md](docs/ENGINE.md#known-limitation-custom-request-headers-over-h2)).
+  The same applies to custom metadata and `Header<"x-...">`.
+
+gRPC needs HTTP/2. Over TLS it is negotiated with ALPN. A gRPC client on an insecure
+channel speaks h2 without TLS, which `LaunchOptions::h2_prior_knowledge` serves; that
+port then no longer accepts HTTP/1.1.
+
+The `.proto` for clients in other languages comes from the same declarations:
+
+```cpp
+std::fputs(grpc::proto_file<^^greeter>("helloworld").c_str(), stdout);
+```
+
+It prints a `service Greeter` block and every message and enum the methods use. Enum
+values get their enum's prefix, as proto3 requires (`Mood::grumpy` is `MOOD_GRUMPY`), and
+a missing zero value is added as `<ENUM>_UNSPECIFIED`. `examples/grpc.cpp` is a complete
+service: `crocket_grpc --proto` prints its schema, and grpcurl can call it.
+
+To test without sockets, `LocalClient::grpc` sends one framed message and
+`grpc::read_reply<T>` decodes the answer:
+
+```cpp
+auto res = client.grpc("/helloworld.Greeter/SayHello", proto::encode(HelloRequest{.name = "Ada"})).dispatch();
+assert(grpc::read_reply<HelloReply>(res)->message == "Hello, Ada");
+assert(grpc::status_of(client.grpc("/helloworld.Greeter/Nope", "").dispatch()).code == grpc::Code::Unimplemented);
+```
+
 ### Testing
 
 `LocalClient` dispatches requests through the full pipeline without sockets: fairings,
@@ -586,6 +674,8 @@ return crocket::build(cfg)
 What you get:
 
 - **Protocols:** HTTP/1.1, HTTPS, and HTTP/2 when the client negotiates it over TLS.
+  Unary gRPC over HTTP/2, either with TLS or on a plain-text port with
+  `h2_prior_knowledge = true`.
 - **Built-in routes:** `GET /healthz` and `GET /readyz`.
 - **Request ids:** an `x-request-id` on every response, honouring the client's value
   when valid.
@@ -683,7 +773,9 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile and header validation. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or lws cache entries leak into the application. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, h2 bodies larger than the flow-control window, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
+| `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
 ## `crocket_serve` configuration
 

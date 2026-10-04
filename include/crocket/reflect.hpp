@@ -13,8 +13,12 @@
 // Controllers: static member functions are ordinary handlers; non-static
 // member functions run on the managed instance (`.manage(Controller{...})`),
 // which ignite requires.
+//
+// Functions annotated [[= grpc::rpc]] instead become gRPC methods of the
+// service named after the scope (see grpc.hpp); mount them with Mode::Grpc.
 
 #include "crocket/app.hpp"
+#include "crocket/grpc.hpp"
 
 #include <meta>
 #include <ranges>
@@ -33,6 +37,10 @@ inline constexpr bool body_consumer_v = [] {
   if constexpr (Extractor<T>) return bool(FromRequest<T>::consumes_body);
   else return false;
 }();
+template <class T>
+inline constexpr bool request_message_v = grpc::detail::request_message_v<T>;
+template <class R>
+inline constexpr bool valid_reply_v = grpc::detail::valid_reply_v<R>;
 template <class R>
 inline constexpr bool valid_result_v = [] {
   using U = std::remove_cvref_t<R>;
@@ -62,7 +70,8 @@ consteval std::string type_name(std::meta::info t) { return std::string(std::met
 consteval std::vector<std::meta::info> route_functions(std::meta::info scope) {
   std::vector<std::meta::info> out;
   for (auto m : std::meta::members_of(scope, std::meta::access_context::current()))
-    if (std::meta::is_function(m) && !std::meta::annotations_of_with_type(m, ^^http::Route).empty())
+    if (std::meta::is_function(m) &&
+        (!std::meta::annotations_of_with_type(m, ^^http::Route).empty() || grpc::detail::is_rpc(m)))
       out.push_back(m);
   return out;
 }
@@ -71,13 +80,63 @@ consteval http::Route route_of(std::meta::info fn) {
   return std::meta::extract<http::Route>(std::meta::annotations_of_with_type(fn, ^^http::Route)[0]);
 }
 
+/// Bindings for a [[= grpc::rpc]] method, or a diagnostic.
+consteval std::string analyze_rpc(std::meta::info fn, std::vector<Binding>& out) {
+  std::string where = "crocket: rpc " + qualified_name(fn);
+  if (std::meta::annotations_of_with_type(fn, ^^grpc::Rpc).size() != 1)
+    return where + " has more than one grpc::rpc annotation";
+  if (!std::meta::annotations_of_with_type(fn, ^^http::Route).empty())
+    return where + " has both [[= grpc::rpc]] and an HTTP route annotation; a function is one or the other";
+
+  std::string message;  // the request message parameter, once seen
+  auto params = std::meta::parameters_of(fn);
+  for (std::size_t i = 0; i < params.size(); ++i) {
+    auto p = params[i];
+    if (!std::meta::has_identifier(p))
+      return where + ": parameter #" + decimal(static_cast<long long>(i + 1)) +
+             " has no name (or different names across declarations); handler parameters must be named";
+    std::string_view pname = std::meta::identifier_of(p);
+    auto t = std::meta::type_of(p);
+    auto u = std::meta::remove_cvref(t);
+    if (u == (^^Request) && std::meta::is_lvalue_reference_type(t)) {
+      out.push_back({BindKind::RawRequest, -1, std::define_static_string(pname)});
+    } else if (u == (^^Response)) {
+      return where + ": parameter '" + std::string(pname) +
+             "': Response& is not available in a gRPC method; return the reply (Result<T> for errors)";
+    } else if (holds(^^extractor_v, u)) {
+      if (holds(^^body_consumer_v, u))
+        return where + ": parameter '" + std::string(pname) + "' of type '" + type_name(t) +
+               "' reads the request body, which in a gRPC method is the request message; take the message "
+               "struct instead";
+      out.push_back({BindKind::Extract, -1, std::define_static_string(pname)});
+    } else if (holds(^^request_message_v, u)) {
+      if (!message.empty())
+        return where + ": parameters '" + message + "' and '" + std::string(pname) +
+               "' are both request messages; a unary RPC takes one";
+      message = pname;
+      out.push_back({BindKind::Message, -1, std::define_static_string(pname)});
+    } else {
+      return where + ": parameter '" + std::string(pname) + "' of type '" + type_name(t) +
+             "' is neither a request message (an aggregate struct) nor an extractor (no FromRequest<" +
+             type_name(u) + ">)";
+    }
+  }
+
+  auto ret = std::meta::return_type_of(fn);
+  if (!holds(^^valid_reply_v, ret))
+    return where + ": return type '" + type_name(ret) +
+           "' is not a gRPC reply (use a message struct, Result<T>, std::optional<T>, void, or a Task of one)";
+  return {};
+}
+
 /// Computes the parameter bindings for `fn`, or returns a diagnostic.
 consteval std::string analyze(std::meta::info fn, std::vector<Binding>& out) {
   out.clear();
+  if (grpc::detail::is_rpc(fn)) return analyze_rpc(fn, out);
   auto anns = std::meta::annotations_of_with_type(fn, ^^http::Route);
   std::string where = "crocket: handler " + qualified_name(fn);
   if (anns.size() != 1)
-    return where + " has " + std::to_string(anns.size()) +
+    return where + " has " + decimal(static_cast<long long>(anns.size())) +
            " route annotations; one route per function (use two functions for two verbs)";
 
   auto route = std::meta::extract<http::Route>(anns[0]);
@@ -98,7 +157,7 @@ consteval std::string analyze(std::meta::info fn, std::vector<Binding>& out) {
   for (std::size_t i = 0; i < params.size(); ++i) {
     auto p = params[i];
     if (!std::meta::has_identifier(p))
-      return where + ": parameter #" + std::to_string(i + 1) +
+      return where + ": parameter #" + decimal(static_cast<long long>(i + 1)) +
              " has no name (or different names across declarations); handler parameters must be named";
     std::string_view pname = std::meta::identifier_of(p);
     auto t = std::meta::type_of(p);
@@ -168,10 +227,12 @@ consteval std::vector<Binding> bindings_for(std::meta::info fn) {
 }
 
 template <class T>
-void describe_param(RouteDef& d, std::string_view name, std::string_view type, bool is_path) {
+void describe_param(RouteDef& d, std::string_view name, std::string_view type, BindKind kind) {
   using U = std::remove_cvref_t<T>;
-  if (is_path) {
+  if (kind == BindKind::Path) {
     d.params.push_back({name, "path", type});
+  } else if (kind == BindKind::Message) {
+    d.params.push_back({name, "message", type});
   } else if constexpr (std::is_same_v<U, Request>) {
     d.params.push_back({name, "request", type});
   } else if constexpr (std::is_same_v<U, Response>) {
@@ -196,25 +257,35 @@ Routes reflect_routes() {
     static_assert(problem.empty(), problem);
     if constexpr (problem.empty()) {
       static constexpr auto bindings = std::define_static_array(r::bindings_for(fn));
-      constexpr http::Route route = r::route_of(fn);
       RouteDef d;
-      d.method = route.method;
-      d.path = route.path;
-      d.rank = route.rank;
       d.handler = std::define_static_string(r::qualified_name(fn));
+      if constexpr (grpc::detail::is_rpc(fn)) {
+        static_assert(std::meta::has_identifier(Scope), "crocket: gRPC methods need a named namespace or class");
+        d.mode = Mode::Grpc;
+        d.method = http::Method::Post;
+        d.service = grpc::detail::service_name(Scope);
+        d.rpc = grpc::detail::method_name(fn);
+        d.path = "/" + std::string(d.service) + "/" + std::string(d.rpc);  // mount() adds the package
+        d.invoke = &grpc::detail::invoke<&[:fn:], bindings.data()>;
+      } else {
+        constexpr http::Route route = r::route_of(fn);
+        d.method = route.method;
+        d.path = route.path;
+        d.rank = route.rank;
+        d.invoke = &detail::invoke<&[:fn:], bindings.data()>;
+      }
       constexpr auto params = std::define_static_array(std::meta::parameters_of(fn));
       template for (constexpr std::size_t i : std::define_static_array(std::views::iota(std::size_t{0}, params.size()))) {
         constexpr auto p = params[i];
         using T = [:std::meta::type_of(p):];
         r::describe_param<T>(d, std::meta::identifier_of(p),
                              std::define_static_string(std::meta::display_string_of(std::meta::type_of(p))),
-                             bindings[i].kind == detail::BindKind::Path);
+                             bindings[i].kind);
       }
       if constexpr (std::meta::is_class_member(fn) && !std::meta::is_static_member(fn)) {
         using C = [:std::meta::parent_of(fn):];
         d.needs.push_back(detail::state_dep<C>());
       }
-      d.invoke = &detail::invoke<&[:fn:], bindings.data()>;
       out.push_back(std::move(d));
     }
   }

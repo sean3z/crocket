@@ -48,10 +48,10 @@ struct LaunchOptions {
   std::string tls_cert = {};
   std::string tls_key = {};
   unsigned workers = 0;                  // 0 = hardware concurrency
-  std::size_t max_header_bytes = 8192;   // lws header buffer (max 65535)
+  std::size_t max_header_bytes = 8192;   // names + values; 431 headers.too_large
   bool http2 = true;                     // offer h2 via ALPN when TLS is on
-  /// Without TLS, speak HTTP/2 only ("prior knowledge"), as gRPC clients do on
-  /// an insecure channel. HTTP/1.1 clients cannot connect to such a port.
+  /// Without TLS, also accept HTTP/2 with prior knowledge (and Upgrade: h2c), as
+  /// gRPC clients use on an insecure channel. HTTP/1.1 keeps working on the port.
   bool h2_prior_knowledge = false;
 };
 

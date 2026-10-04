@@ -53,6 +53,12 @@ auto say_hello(HelloRequest req, State<Counter> counter) -> Result<HelloReply> {
 [[= grpc::rpc]]
 auto whoami(Auth auth) -> HelloReply { return {auth.subject}; }  // UNAUTHENTICATED without a token
 
+/// Custom metadata arrives as request headers (grpcurl -H 'x-tenant: acme').
+[[= grpc::rpc]]
+auto tenant(Header<"x-tenant", std::optional<std::string>> tenant) -> HelloReply {
+  return {tenant->value_or("(none)")};
+}
+
 }  // namespace greeter
 
 int main(int argc, char** argv) {

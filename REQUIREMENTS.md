@@ -10,9 +10,9 @@ Public API target is C++26 reflection and annotations. Compilers: GCC with C++26
 2. Route metadata lives on the function (`[[= http::get("/users/{id}")]]`). Mount a **namespace or controller**, not a handwritten list of functions.
 3. Application-level `attach` (fairings) and `manage` (typed singletons). CORS, logging, metrics, and pools are not copied onto every handler.
 4. Production behavior is built in: request ids, structured errors, route-template logs and metrics, deadlines, readiness, ignite checks, drain on shutdown.
-5. One wire engine: **libwebsockets** (HTTP/1.1, HTTP/2, TLS). Handlers never include lws.
+5. One wire engine: **h2o** (HTTP/1.1, HTTP/2, TLS). Handlers never include h2o.
 
-Non-goals: ORM, plugin ABI, websockets (unless lws makes a thin add-on cheap later), hot reload, scanning an entire translation unit for routes, reflection on the request path.
+Non-goals: ORM, plugin ABI, websockets (unless h2o makes a thin add-on cheap later), hot reload, scanning an entire translation unit for routes, reflection on the request path.
 
 ## Handler model
 
@@ -105,7 +105,7 @@ Sync functions are valid. `Task<T>` / awaitable returns are allowed on the same 
 
 ## Wire
 
-libwebsockets only. FetchContent pins v4.3.5 with HTTP/2 and SSL. TLS cert/key on `LaunchOptions`. ALPN selects h1 vs h2 inside lws. Application code does not branch on protocol.
+h2o only (`libh2o-evloop`, static). FetchContent pins a commit, which `./dev h2o-update` moves to the newest h2o. TLS cert/key on `LaunchOptions`. ALPN selects h1 vs h2 inside h2o. Application code does not branch on protocol.
 
 ## Compiler and modules
 

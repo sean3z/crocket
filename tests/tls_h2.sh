@@ -27,7 +27,8 @@ wait_up() { # url
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$WORK/key.pem" -out "$WORK/cert.pem" >/dev/null 2>&1 || { echo "openssl failed"; exit 1; }
 
-CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" \
+# A 15 s deadline leaves room for the 11 s handler below.
+CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 \
   "$SERVE" >"$WORK/serve.log" 2>&1 &
 SRV_PID=$!
 wait_up "$BASE/healthz" || { echo "server did not start"; cat "$WORK/serve.log"; exit 1; }
@@ -57,7 +58,7 @@ for proto in --http2 --http1.1; do
   expect "missing user -> 404" "404" "$(curl -sk $proto -o /dev/null -w '%{http_code}' "$BASE/api/users/999")"
   expect "async handler" "49" "$(curl -sk $proto "$BASE/api/square/7")"
   expect "controller" "crocket-serve 0.1.0" "$(curl -sk $proto "$BASE/version")"
-  h=$(curl -sk $proto -I "$BASE/version" | tr -d '\r')
+  h=$(curl -sk $proto -I "$BASE/version" | tr -d '\r' | tr 'A-Z' 'a-z')  # h1 header names may be capitalised
   expect_match "HEAD -> 200 with content-length" "content-length: 19" "$h"
   expect "405 for wrong verb" "405" "$(curl -sk $proto -o /dev/null -w '%{http_code}' -X DELETE "$BASE/version")"
   gen=$(curl -sk $proto -D - -o /dev/null "$BASE/healthz" | tr -d '\r' | sed -n 's/^x-request-id: //p')
@@ -66,7 +67,30 @@ for proto in --http2 --http1.1; do
   expect "body over limit -> 413" "413" "$(printf '%s' "$big" | curl -sk $proto -o /dev/null -w '%{http_code}' \
         -X POST "$BASE/api/users" -H 'content-type: application/json' --data-binary @-)"
   expect "query + metrics" "200" "$(curl -sk $proto -o /dev/null -w '%{http_code}' "$BASE/metrics?x=1")"
+
+  # Headers the HTTP layer has no special name for must reach handlers on both protocols.
+  expect "custom request header" "acme" "$(curl -sk $proto -H 'x-tenant: acme' "$BASE/api/tenant")"
+  rid=$(curl -sk $proto -D - -o /dev/null -H 'x-request-id: trace-456' "$BASE/healthz" | tr -d '\r' |
+        sed -n 's/^x-request-id: //Ip')
+  expect "X-Request-Id honoured" "trace-456" "$rid"
+  h=$(curl -sk $proto -D - -o /dev/null -X OPTIONS "$BASE/api/users" -H 'origin: https://app.example.com' \
+      -H 'access-control-request-method: POST' -H 'access-control-request-headers: content-type' |
+      tr -d '\r' | tr 'A-Z' 'a-z')
+  expect_match "CORS preflight -> 204" "^http/[0-9.]+ 204" "$h"
+  expect_match "CORS preflight allows the origin" "access-control-allow-origin: https://app.example.com" "$h"
+  expect "CORS preflight from an unknown origin -> 403" "403" \
+    "$(curl -sk $proto -o /dev/null -w '%{http_code}' -X OPTIONS "$BASE/api/users" -H 'origin: https://evil.example' \
+       -H 'access-control-request-method: POST')"
+  expect "oversized headers -> 431" "431" \
+    "$(curl -sk $proto -o /dev/null -w '%{http_code}' -H "x-big: $(head -c 9000 /dev/zero | tr '\0' b)" "$BASE/healthz")"
 done
+
+echo "[http/1.1 bodies]"
+expect "chunked upload" "201" \
+  "$(printf '{"email":"chunked@example.com"}' | curl -sk --http1.1 -o /dev/null -w '%{http_code}' -X POST \
+     "$BASE/api/users" -H 'authorization: Bearer alice' -H 'content-type: application/json' \
+     -H 'transfer-encoding: chunked' --data-binary @-)"
+
 
 echo "[h2 bodies past the 64 KiB flow-control window]"
 name=$(head -c 300000 /dev/zero | tr '\0' n)
@@ -78,10 +102,10 @@ for how in "--data-binary @$WORK/big.json" "--data-binary @-"; do  # with, then 
 done
 
 echo "[h2 connection lifetime and concurrency]"
-# lws closes an h2 connection after keepalive_timeout (5 s) unless active
-# streams are marked immortal; a 6 s handler catches a regression.
-expect "h2 handler longer than lws keepalive" "200" \
-  "$(curl -sk --http2 -o /dev/null -w '%{http_code}' "$BASE/api/slow/6000")"
+# The h2 idle timeout (10 s) must not close a connection while a stream waits
+# on a handler; an 11 s handler catches a regression.
+expect "h2 handler longer than the idle timeout" "200" \
+  "$(curl -sk --http2 -o /dev/null -w '%{http_code}' "$BASE/api/slow/11000")"
 codes=$(for i in $(seq 1 20); do printf -- "-o /dev/null $BASE/api/slow/200 "; done |
         xargs curl -sk --http2 --parallel --parallel-max 20 -w '%{http_code}\n' | sort | uniq -c | xargs)
 expect "20 concurrent h2 streams" "20 200" "$codes"
@@ -118,6 +142,16 @@ wait_up "http://127.0.0.1:8000/" || fail "hello did not start"
 expect "hello" "Hello, 42 year old named Rocketeer!" "$(curl -s http://127.0.0.1:8000/hello/Rocketeer/42)"
 expect "age 400 -> 404" "404" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/hello/Rocketeer/400)"
 expect "percent-decoded capture" "Hello, 36 year old named Ada L!" "$(curl -s 'http://127.0.0.1:8000/hello/Ada%20L/36')"
+# A 413 sent before the body is read leaves an http/1.1 connection usable: the
+# engine reads and drops the rest of the body. curl closes a connection after an
+# early response itself, so this speaks HTTP/1.1 over a plain socket.
+raw=$(exec 3<>/dev/tcp/127.0.0.1/8000
+      printf 'POST /hello/a/1 HTTP/1.1\r\nhost: x\r\ncontent-length: 1100000\r\n\r\n' >&3
+      head -c 1100000 /dev/zero >&3
+      printf 'GET /hello/Ada/36 HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n' >&3
+      timeout 5 cat <&3)
+expect_match "413, then the next request on the same connection" "413 .*Hello, 36 year old named Ada!" \
+  "$(tr -d '\r\n' <<<"$raw")"
 kill -INT $HELLO_PID; wait $HELLO_PID
 expect "hello exits 0 on SIGINT" "0" "$?"
 

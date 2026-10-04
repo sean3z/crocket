@@ -115,6 +115,10 @@ auto slow(std::uint32_t ms, Deadline d) -> Result<std::string, ApiError> {
   return std::format("slept {} ms", ms);
 }
 
+/// A custom request header, read the same way over HTTP/1.1 and HTTP/2.
+[[= http::get("/tenant")]]
+auto tenant(Header<"x-tenant"> tenant) -> std::string { return *tenant; }
+
 /// Async handler: same annotation, awaitable result.
 [[= http::get("/square/{n}")]]
 auto square(std::int64_t n) -> Task<Json<std::int64_t>> { co_return Json<std::int64_t>{n * n}; }
@@ -156,6 +160,7 @@ int main() {
     cfg.request_timeout = 10s;
     cfg.drain_timeout = 5s;
   }
+  if (auto t = env("CROCKET_REQUEST_TIMEOUT"); !t.empty()) cfg.request_timeout = std::chrono::seconds(std::stoi(t));
   if (!env("CROCKET_DEBUG_ROUTES").empty()) cfg.debug_routes = true;
 
   LaunchOptions launch;

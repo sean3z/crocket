@@ -1,6 +1,6 @@
 #pragma once
 // HTTP vocabulary shared by handlers, the router, and the engine.
-// Nothing in this header knows about libwebsockets.
+// Nothing in this header knows about the wire engine.
 
 #include <meta>
 #include <algorithm>

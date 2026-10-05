@@ -4,6 +4,8 @@
 
 #include <crocket/crocket.hpp>
 
+#include <zlib.h>
+
 #include <atomic>
 #include <cstdlib>
 #include <cstdio>
@@ -131,6 +133,25 @@ auto framed(Response& rs) -> std::string {
   return "embeddable";
 }
 
+struct Report {
+  std::string name;
+  int age;
+};
+
+[[= http::get("/report")]]
+auto report(Accept accept) -> std::variant<Json<Report>, std::string> {
+  Report r{"Ada", 36};
+  if (accept.best({"application/json", "text/plain"}) == "text/plain") return std::format("{} {}", r.name, r.age);
+  return Json{r};
+}
+
+[[= http::get("/big")]]
+auto big() -> std::string {
+  std::string s;
+  for (int i = 0; i < 200; ++i) s += std::format("line {} of a long, repetitive text\n", i);
+  return s;
+}
+
 [[= http::get("/whoami")]]
 auto whoami(Client client) -> std::string { return client.addr + " " + std::string(client.scheme); }
 
@@ -193,12 +214,12 @@ class Greeter {
   std::string greeting_;
 };
 
-namespace dup {
+namespace dupes {
 [[= http::get("/x/{a}")]]
 auto a(int a) -> std::string { return std::to_string(a); }
 [[= http::get("/x/{b}")]]
 auto b(int b) -> std::string { return std::to_string(b); }
-}  // namespace dup
+}  // namespace dupes
 
 // ---- helpers -------------------------------------------------------------------
 
@@ -382,7 +403,7 @@ int main() {
   section("ignite: conflicting verb+path");
   {
     Crocket conflict;
-    conflict.mount("/", reflect_routes<^^dup>());
+    conflict.mount("/", reflect_routes<^^dupes>());
     auto ig = conflict.ignite();
     CHECK(!ig && contains(ig.error().message(), "route conflict"));
     Crocket twice;
@@ -858,6 +879,87 @@ int main() {
                  .header("if-range", "Thu, 01 Jan 2026 00:00:00 GMT").dispatch().status, 200);
     // A fresh copy beats a range.
     CHECK_EQ(client.get("/doc").header("range", "bytes=0-0").header("if-none-match", etag).dispatch().status, 304);
+  }
+
+  section("content negotiation");
+  {
+    auto best = [](std::string_view header, std::initializer_list<std::string_view> offered) {
+      return std::string(Accept(header).best(offered));
+    };
+    CHECK_EQ(best("", {"application/json", "text/csv"}), std::string("application/json"));
+    CHECK_EQ(best("text/csv", {"application/json", "text/csv"}), std::string("text/csv"));
+    CHECK_EQ(best("text/*;q=0.5, application/json", {"text/csv", "application/json"}), std::string("application/json"));
+    CHECK_EQ(best("*/*;q=0.1, text/csv", {"application/json", "text/csv"}), std::string("text/csv"));
+    CHECK_EQ(best("text/csv;q=0.5, application/json;q=0.5", {"application/json", "text/csv"}),
+             std::string("application/json"));  // a tie goes to the server's order
+    CHECK_EQ(best("TEXT/CSV ; Q=0.9 ; charset=utf-8, */*;q=0.1", {"application/json", "text/csv"}), std::string("text/csv"));
+    CHECK_EQ(best("text/*, text/csv;q=0", {"text/csv", "text/plain"}), std::string("text/plain"));  // most specific wins
+    CHECK_EQ(best("image/png", {"application/json", "text/csv"}), std::string("application/json"));
+    CHECK(!Accept("image/png").accepts("application/json"));
+    CHECK(Accept("").accepts("application/json"));
+    CHECK(!Accept("application/json;q=0").accepts("application/json"));
+    CHECK(Accept("garbage, */*").accepts("text/csv"));
+
+    auto json = client.get("/report").header("accept", "application/json").dispatch();
+    CHECK_EQ(json.body, std::string(R"({"name":"Ada","age":36})"));
+    CHECK_EQ(*json.headers.get("vary"), std::string_view("accept"));
+    auto text = client.get("/report").header("accept", "text/plain, application/json;q=0.5").dispatch();
+    CHECK_EQ(text.body, std::string("Ada 36"));
+    CHECK(contains(*text.headers.get("content-type"), "text/plain"));
+    CHECK(std::string(*text.headers.get("etag")) != std::string(*json.headers.get("etag")));
+    CHECK(!client.get("/hello/Ada/36").dispatch().headers.contains("vary"));
+  }
+
+  section("compression");
+  {
+    auto gunzip = [](std::string_view in) {
+      z_stream z{};
+      inflateInit2(&z, 15 + 16);
+      std::string out(in.size() * 20 + 64, '\0');
+      z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(in.data()));
+      z.avail_in = uInt(in.size());
+      z.next_out = reinterpret_cast<Bytef*>(out.data());
+      z.avail_out = uInt(out.size());
+      int rc = inflate(&z, Z_FINISH);
+      out.resize(z.total_out);
+      inflateEnd(&z);
+      return rc == Z_STREAM_END ? out : std::string("<bad gzip>");
+    };
+    auto plain = client.get("/big").dispatch().body;
+    // Off unless configured.
+    CHECK(!client.get("/big").header("accept-encoding", "gzip").dispatch().headers.contains("content-encoding"));
+
+    LogCapture zlog;
+    Crocket zapp = make_app(zlog, nullptr, Config{.compress = true});
+    LocalClient zc(zapp);
+    auto gz = zc.get("/big").header("accept-encoding", "gzip, deflate, br").dispatch();
+    CHECK_EQ(*gz.headers.get("content-encoding"), std::string_view("gzip"));
+    CHECK_EQ(*gz.headers.get("vary"), std::string_view("accept-encoding"));
+    CHECK(gz.body.size() < plain.size() / 4);
+    CHECK_EQ(gunzip(gz.body), plain);
+    for (auto no : {"", "br", "gzip;q=0", "identity", "*, gzip;q=0"}) {
+      auto r = zc.get("/big").header("accept-encoding", no).dispatch();
+      CHECK(!r.headers.contains("content-encoding"));
+      CHECK_EQ(r.body, plain);
+      CHECK_EQ(*r.headers.get("vary"), std::string_view("accept-encoding"));  // caches must keep them apart
+    }
+    CHECK(zc.get("/big").header("accept-encoding", "*").dispatch().headers.contains("content-encoding"));
+    CHECK(zc.get("/big").header("accept-encoding", "x-gzip;q=0.5").dispatch().headers.contains("content-encoding"));
+    CHECK(zc.head("/big").header("accept-encoding", "gzip").dispatch().headers.contains("content-encoding"));
+    // Each encoding has its own ETag, and revalidates against it.
+    auto identity = zc.get("/big").dispatch();
+    CHECK(std::string(*gz.headers.get("etag")) != std::string(*identity.headers.get("etag")));
+    auto again = zc.get("/big").header("accept-encoding", "gzip").header("if-none-match", *gz.headers.get("etag")).dispatch();
+    CHECK_EQ(again.status, 304);
+    // Small bodies, ranges and non-text stay as they are.
+    auto small = zc.get("/hello/Ada/36").header("accept-encoding", "gzip").dispatch();
+    CHECK(!small.headers.contains("content-encoding") && !small.headers.contains("vary"));
+    CHECK(!zc.get("/doc").header("accept-encoding", "gzip").dispatch().headers.contains("content-encoding"));
+    // Vary lists both when a negotiated response is compressed too.
+    Crocket both = make_app(zlog, nullptr, Config{.compress = true});
+    LocalClient bc(both);
+    auto neg = bc.get("/report").header("accept", "text/plain").header("accept-encoding", "gzip").dispatch();
+    CHECK_EQ(*neg.headers.get("vary"), std::string_view("accept"));  // under 1 KiB: not compressed
   }
 
   section("dev profile: details in error bodies only in dev");

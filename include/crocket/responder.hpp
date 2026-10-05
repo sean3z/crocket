@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <variant>
 
 namespace crocket {
 
@@ -150,6 +151,14 @@ struct Responder<Cacheable<T>> {
     if (!rs.error_code.empty()) return;
     if (c.cache.last_modified) rs.headers.set("last-modified", http::date(*c.cache.last_modified));
     if (c.cache.ranges) rs.headers.set("accept-ranges", "bytes");
+  }
+};
+
+/// One of several responses, e.g. per content type: `std::variant<Json<Report>, Csv>`.
+template <detail::Payload... Ts>
+struct Responder<std::variant<Ts...>> {
+  static void respond(std::variant<Ts...>&& v, const Request& rq, Response& rs) {
+    std::visit([&]<class A>(A&& alt) { detail::respond_value(std::forward<A>(alt), rq, rs); }, std::move(v));
   }
 };
 

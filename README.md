@@ -191,6 +191,7 @@ crocket's request guards. They run before the handler, and if one fails, its
 | `Deadline` | Absolute deadline plus a `std::stop_token` | (none) |
 | `RequestId` | The request's id | (none) |
 | `Client` | The client's address and scheme (see [Behind a proxy](#behind-a-proxy)) | (none) |
+| `Accept` | The media types the client prefers (see [Content negotiation](#content-negotiation)) | (none) |
 | `const Request&` / `Response&` | Raw access, when you need it | (none) |
 
 A custom guard is a `FromRequest` specialization. This is Rocket's `ApiKey` example in
@@ -438,6 +439,7 @@ The return type is the response. Built-in responders:
 | `Created<T>`, `Accepted<T>` | 201 / 202, with an optional `Location` header |
 | `Status<T>` | Runtime status plus payload |
 | `NoContent` | 204 |
+| `std::variant<A, B, ...>` | Whichever alternative the handler returned, e.g. one per content type |
 | `Cacheable<T>` | `T` with `Last-Modified` and byte ranges (see [Caching and ranges](#caching-and-ranges)) |
 | `Response` | Exactly what you built |
 | `Task<T>` | Any of the above, produced asynchronously |
@@ -502,6 +504,42 @@ auto report(std::uint64_t id, State<Store> store) -> Cacheable<std::string> {
   `-500`) as `206 Partial Content`. A range past the end is 416 `range.unsatisfiable`,
   and a request for several ranges gets the whole body. `If-Range` makes the range
   conditional on the client still having the current version.
+
+### Content negotiation
+
+To offer one resource in several formats, take `Accept` and return a `std::variant` of
+the responses:
+
+```cpp
+[[= http::get("/reports/{id}")]]
+auto report(std::uint64_t id, Accept accept, State<Store> store) -> std::variant<Json<Report>, Csv> {
+  auto r = store->find(id);
+  if (accept.best({"application/json", "text/csv"}) == "text/csv") return Csv{r.rows()};
+  return Json{r};
+}
+```
+
+`best()` returns the offer the client prefers, by q-value and with `text/*` and `*/*`
+ranges, ties going to the earlier offer. With no `Accept` header, or one that accepts none
+of the offers, it returns the first offer, so the handler always has an answer.
+`accepts("text/csv")` tells whether the client takes a type at all, for a handler that
+would rather answer 406. Responses from a handler that takes `Accept` carry
+`Vary: Accept`, so caches keep the formats apart.
+
+### Compression
+
+```cpp
+cfg.compress = true;
+```
+
+With `compress` on, text responses (`text/*`, JSON, XML, JavaScript, SVG) of 1 KiB or
+more are gzipped for clients whose `Accept-Encoding` allows it, and carry
+`Vary: Accept-Encoding`. Responses with byte ranges and `Cache-Control: no-transform`
+are sent as they are. Each encoding gets its own `ETag`, so 304s work for both.
+
+Compression is off by default. A response that mixes a secret (a CSRF token, say) with
+text the requester controls can leak the secret through compressed sizes (the BREACH
+attack), so turn it on where responses do not mix the two.
 
 ### Errors
 
@@ -972,11 +1010,11 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 | Test | What it checks |
 |---|---|
-| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
+| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s, ranges, content negotiation and gzip. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, and security headers. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, and gzip only for clients that accept it. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
@@ -992,6 +1030,7 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 | `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | unset | Enable TLS; both must be set |
 | `CROCKET_REQUEST_TIMEOUT` | `10` (an hour in dev) | Request deadline in seconds |
 | `CROCKET_DEBUG_ROUTES` | unset | Set to any value to expose `GET /__routes` |
+| `CROCKET_COMPRESS` | unset | Set to any value to gzip responses |
 
 ## Differences from REQUIREMENTS.md
 

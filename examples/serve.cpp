@@ -4,6 +4,7 @@
 //   ./build/crocket_serve                                 # http://0.0.0.0:8000
 //   CROCKET_PORT=8443 CROCKET_TLS_CERT=cert.pem CROCKET_TLS_KEY=key.pem ./build/crocket_serve
 //   CROCKET_DEBUG_ROUTES=1 ./build/crocket_serve          # exposes GET /__routes
+//   CROCKET_COMPRESS=1 ./build/crocket_serve              # gzip responses
 //
 //   curl localhost:8000/api/users/1
 //   curl -X POST localhost:8000/api/users -H 'authorization: Bearer alice' \
@@ -162,6 +163,7 @@ int main() {
   }
   if (auto t = env("CROCKET_REQUEST_TIMEOUT"); !t.empty()) cfg.request_timeout = std::chrono::seconds(std::stoi(t));
   if (!env("CROCKET_DEBUG_ROUTES").empty()) cfg.debug_routes = true;
+  if (!env("CROCKET_COMPRESS").empty()) cfg.compress = true;
 
   LaunchOptions launch;
   launch.host = env("CROCKET_HOST");  // empty: 0.0.0.0, or 127.0.0.1 in dev

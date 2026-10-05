@@ -21,6 +21,7 @@
 #include <concepts>
 #include <expected>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -279,6 +280,41 @@ struct FromRequest<Client> {
   static constexpr std::string_view kind = "client";
   static constexpr bool consumes_body = false;
   static std::expected<Client, ApiError> extract(Request& r) { return Client{r.remote_addr, r.scheme}; }
+};
+
+/// The Accept header: which media types the client takes, and how much it
+/// prefers each (q-values, with "text/*" and "*/*" ranges). A handler taking
+/// Accept answers with Vary: Accept.
+///
+///   auto report(Accept accept) -> std::variant<Json<Report>, Csv> {
+///     if (accept.best({"application/json", "text/csv"}) == "text/csv") return Csv{...};
+///     return Json{...};
+///   }
+class Accept {
+ public:
+  explicit Accept(std::string_view header = {});
+  /// The offer the client prefers, ties going to the earlier offer. With no
+  /// Accept header, or when the client accepts none of them, the first offer.
+  [[nodiscard]] std::string_view best(std::initializer_list<std::string_view> offered) const;
+  /// Whether the client takes `type` at all ("text/csv").
+  [[nodiscard]] bool accepts(std::string_view type) const;
+
+ private:
+  [[nodiscard]] double quality(std::string_view type) const;
+  struct Range {
+    std::string type, subtype;
+    double q;
+  };
+  std::vector<Range> ranges_;  // empty: no Accept header, anything goes
+};
+template <>
+struct FromRequest<Accept> {
+  static constexpr std::string_view kind = "accept";
+  static constexpr bool consumes_body = false;
+  static std::expected<Accept, ApiError> extract(Request& r) {
+    r.vary.push_back("accept");
+    return Accept(r.header("accept").value_or(""));
+  }
 };
 
 /// Query<T>: maps query parameters onto the public members of aggregate T by

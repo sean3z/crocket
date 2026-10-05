@@ -3,6 +3,7 @@
 #include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
 #include "engine.hpp"
+#include "compress.hpp"
 #include "conditional.hpp"
 #include "identity.hpp"
 #include "router.hpp"
@@ -316,6 +317,9 @@ void Crocket::finish(const Request& req, Response& res) {
                 req, res);
   }
   res.headers.set("x-request-id", req.request_id);
+  for (auto h : req.vary) detail::add_vary(res, h);
+  // Compressed before the ETag is computed, so each encoding has its own.
+  if (core_->config.compress) detail::compress(req, res);
   detail::conditional(req, res);
   auto& fs = core_->fairings;
   for (auto it = fs.rbegin(); it != fs.rend(); ++it) {

@@ -36,9 +36,11 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/h2o.cmake)
 
 # ---- crocket ---------------------------------------------------------------
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)  # gzip responses; h2o needs it too
 
 add_library(crocket STATIC
   src/app.cpp
+  src/compress.cpp
   src/conditional.cpp
   src/identity.cpp
   src/router.cpp
@@ -57,7 +59,7 @@ target_compile_options(crocket PRIVATE -Wall -Wextra)
 # includes them.
 target_include_directories(crocket SYSTEM PRIVATE ${CROCKET_H2O_INCLUDE_DIRS})
 target_compile_definitions(crocket PRIVATE ${CROCKET_H2O_DEFINITIONS})
-target_link_libraries(crocket PRIVATE libh2o-evloop PUBLIC Threads::Threads)
+target_link_libraries(crocket PRIVATE libh2o-evloop ZLIB::ZLIB PUBLIC Threads::Threads)
 
 if(CROCKET_BUILD_EXAMPLES)
   add_executable(crocket_hello examples/hello.cpp)

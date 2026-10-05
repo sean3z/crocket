@@ -50,6 +50,7 @@ struct Config {
   /// profile also allows localhost.
   std::vector<std::string> allowed_hosts = {};
   json::ReadOptions json = {};                        // limits for Json<T> bodies
+  bool compress = false;  // gzip text responses of 1 KiB or more for clients that accept it
 
   /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
   /// breakpoint), a one-second drain, and listening on 127.0.0.1.

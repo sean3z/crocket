@@ -28,7 +28,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$WORK/key.pem" -out "$WORK/cert.pem" >/dev/null 2>&1 || { echo "openssl failed"; exit 1; }
 
 # A 15 s deadline leaves room for the 11 s handler below.
-CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 \
+CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 CROCKET_COMPRESS=1 \
   "$SERVE" >"$WORK/serve.log" 2>&1 &
 SRV_PID=$!
 wait_up "$BASE/healthz" || { echo "server did not start"; cat "$WORK/serve.log"; exit 1; }
@@ -87,6 +87,11 @@ for proto in --http2 --http1.1; do
   expect "If-None-Match -> 304 with no body" "304 0" \
     "$(curl -sk $proto --max-time 5 -o /dev/null -w '%{http_code} %{size_download}' -H "if-none-match: $etag" "$BASE/healthz")"
   expect_match "security headers" "x-content-type-options: nosniff" "$(curl -sk $proto -D - -o /dev/null "$BASE/healthz")"
+  expect_match "gzip for clients that accept it" "content-encoding: gzip" \
+    "$(curl -sk $proto --compressed -D - -o "$WORK/metrics" "$BASE/metrics" | tr -d '\r')"
+  expect_match "gzip body decodes" "crocket_http_requests_total" "$(cat "$WORK/metrics")"
+  expect_match "no gzip for clients that do not" "^0$" \
+    "$(curl -sk $proto -D - -o /dev/null "$BASE/metrics" | tr -d '\r' | grep -c '^content-encoding')"
   expect "too many headers -> 431" "431" \
     "$(for i in $(seq 1 110); do echo "x-h$i: v"; done | curl -sk $proto -o /dev/null -w '%{http_code}' -H @- "$BASE/healthz")"
 done

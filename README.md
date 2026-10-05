@@ -477,6 +477,33 @@ struct crocket::Responder<Csv> {
 auto report() -> Csv { return {{{"name", "age"}, {"Ada", "36"}}}; }
 ```
 
+### Caching and ranges
+
+Every `200` answer to `GET` or `HEAD` carries an `ETag`, a hash of the body, unless the
+handler set its own. A client that sends it back in `If-None-Match` gets `304 Not
+Modified` with no body, so unchanged responses cost no bandwidth. Nothing needs
+configuring.
+
+Two more headers, set through `Response&`, enable the rest:
+
+```cpp
+[[= http::get("/reports/{id}")]]
+auto report(std::uint64_t id, State<Store> store, Response& rs) -> std::string {
+  auto r = store->find(id);
+  rs.headers.set("last-modified", http::date(r.updated_at));  // If-Modified-Since -> 304
+  rs.headers.set("accept-ranges", "bytes");                   // Range -> 206
+  return r.contents;
+}
+```
+
+- **`Last-Modified`** answers `If-Modified-Since` with 304 when the client's copy is as
+  new. `If-None-Match`, when sent, decides instead. `http::date()` formats the header,
+  and `http::parse_date()` reads one.
+- **`Accept-Ranges: bytes`** serves one byte range (`Range: bytes=0-499`, `500-` or
+  `-500`) as `206 Partial Content`. A range past the end is 416 `range.unsatisfiable`,
+  and a request for several ranges gets the whole body. `If-Range` makes the range
+  conditional on the client still having the current version.
+
 ### Errors
 
 Every error, whether from an extractor, a responder, the router or an exception, is an
@@ -649,6 +676,15 @@ Built-in fairings:
     `expose_headers`, `allow_credentials` and `max_age`.
   - Answers preflights itself, or 403 `cors.denied` for origins not on the list.
   - Refuses at ignite to combine credentials with `*`.
+- **`Shield`:** security headers on every response, attached by default:
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and
+  `Referrer-Policy: no-referrer`, plus `Strict-Transport-Security: max-age=31536000` on
+  https (never for localhost). A header the handler set itself is left alone. Attach
+  your own to change it, or `Shield::none()` to send nothing:
+  ```cpp
+  app.attach(Shield{}.set("content-security-policy", "default-src 'self'").remove("x-frame-options"));
+  ```
 - **`Metrics`:** Prometheus text at `GET /metrics`, labelled by route template.
   - `crocket_http_requests_total` and a duration histogram.
   - `crocket_http_requests_in_flight`.
@@ -887,7 +923,6 @@ Rocket features without an equivalent today:
 | `FileServer` | Not implemented |
 | Typed URIs (`uri!`) | Not implemented |
 | WebSockets, SSE and streaming responses | Not implemented; responses are fully buffered |
-| `Shield` security headers | Write a small `on_response` fairing |
 | Error catchers (`#[catch]`) | `ApiError` plus an `on_response` fairing, as in `NotFoundPage` above |
 | `on_liftoff` | Not implemented |
 | Config profiles (`Rocket.toml` / Figment) | A release and a [dev profile](#dev-profile) chosen with `CROCKET_PROFILE`; other settings are plain structs, read from env or files yourself (see `examples/serve.cpp`) |
@@ -939,11 +974,11 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 | Test | What it checks |
 |---|---|
-| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies and allowed hosts. |
+| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, and 431 for oversized headers and too many headers. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, and security headers. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 

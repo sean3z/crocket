@@ -116,6 +116,20 @@ auto redirect(Query<Target> q, Response& rs) -> void {
 [[= http::get("/boom")]]
 auto boom() -> std::string { throw std::runtime_error("secret database password in what()"); }
 
+[[= http::get("/doc")]]
+auto doc(Response& rs) -> std::string {
+  using namespace std::chrono;
+  rs.headers.set("accept-ranges", "bytes");
+  rs.headers.set("last-modified", http::date(sys_days(2026y / January / 2) + 3h));
+  return "0123456789";
+}
+
+[[= http::get("/framed")]]
+auto framed(Response& rs) -> std::string {
+  rs.headers.set("x-frame-options", "SAMEORIGIN");
+  return "embeddable";
+}
+
 [[= http::get("/whoami")]]
 auto whoami(const Request& rq) -> std::string { return rq.remote_addr + " " + std::string(rq.scheme); }
 
@@ -660,6 +674,8 @@ int main() {
     CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "1.2.3.4:5678"}}), std::string("1.2.3.4 http"));
     CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "[2001:db8::7]:443"}}), std::string("2001:db8::7 http"));
     CHECK_EQ(who("10.0.0.5", {{"x-forwarded-proto", "javascript"}}), std::string("10.0.0.5 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-proto", "https"}}), std::string("10.0.0.5 https"));  // scheme only
+    CHECK_EQ(who("203.0.113.9", {{"x-forwarded-proto", "https"}}), std::string("203.0.113.9 http"));
     CHECK_EQ(who("10.0.0.5", {{"forwarded", "for=1.2.3.4"}}), std::string("10.0.0.5 http"));  // not the configured header
 
     Crocket rfc = make_app(plog, nullptr,
@@ -672,6 +688,8 @@ int main() {
     CHECK_EQ(fwd(R"(For="[2001:db8:cafe::17]:4711";Proto=HTTPS)"), std::string("2001:db8:cafe::17 https"));
     CHECK_EQ(fwd("for=6.6.6.6, for=192.0.2.60;proto=http;by=10.0.0.5"), std::string("192.0.2.60 http"));
     CHECK_EQ(fwd("for=_hidden"), std::string("10.0.0.5 http"));
+    CHECK_EQ(fwd("proto=https"), std::string("10.0.0.5 https"));
+    CHECK_EQ(fwd("for=unknown;proto=https"), std::string("10.0.0.5 https"));
     CHECK_EQ(rc.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "1.2.3.4").dispatch().body,
              std::string("10.0.0.5 http"));
 
@@ -716,6 +734,124 @@ int main() {
     CHECK(!ig && contains(ig.error().message(), R"(allowed_hosts entry "https://api.example.com" is not a host name)"));
     CHECK(!ig && contains(ig.error().message(), R"(allowed_hosts entry "api.example.com:443" has a port)"));
     CHECK(!ig && !contains(ig.error().message(), R"(entry "*")"));
+  }
+
+  section("Shield: security headers by default");
+  {
+    auto r = client.get("/hello/Ada/36").dispatch();
+    CHECK_EQ(*r.headers.get("x-content-type-options"), std::string_view("nosniff"));
+    CHECK_EQ(*r.headers.get("x-frame-options"), std::string_view("DENY"));
+    CHECK_EQ(*r.headers.get("content-security-policy"), std::string_view("default-src 'none'; frame-ancestors 'none'"));
+    CHECK_EQ(*r.headers.get("referrer-policy"), std::string_view("no-referrer"));
+    CHECK(!r.headers.contains("strict-transport-security"));  // not https
+    CHECK(client.get("/nope").dispatch().headers.contains("x-content-type-options"));  // errors too
+    auto framed = client.get("/framed").dispatch();
+    CHECK_EQ(*framed.headers.get("x-frame-options"), std::string_view("SAMEORIGIN"));
+
+    LogCapture slog;
+    Crocket tls_app = make_app(slog, nullptr, Config{.trusted_proxies = {"10.0.0.5"}});
+    LocalClient tc(tls_app);
+    auto https = [&](std::string_view host) {
+      return tc.get("/healthz").remote("10.0.0.5").header("x-forwarded-proto", "https").header("host", host).dispatch();
+    };
+    auto secure = https("api.example.com");
+    CHECK_EQ(*secure.headers.get("strict-transport-security"), std::string_view("max-age=31536000"));
+    CHECK(!https("localhost:8443").headers.contains("strict-transport-security"));
+    CHECK(!https("127.0.0.1:8443").headers.contains("strict-transport-security"));
+
+    Crocket bare = make_app(slog);
+    bare.attach(Shield::none());
+    LocalClient bc(bare);
+    auto none = bc.get("/healthz").dispatch();
+    CHECK(!none.headers.contains("x-content-type-options") && !none.headers.contains("content-security-policy"));
+
+    Crocket custom = make_app(slog);
+    custom.attach(Shield{}.set("Content-Security-Policy", "default-src 'self'").remove("X-Frame-Options"));
+    LocalClient cc(custom);
+    auto c = cc.get("/healthz").dispatch();
+    CHECK_EQ(*c.headers.get("content-security-policy"), std::string_view("default-src 'self'"));
+    CHECK(!c.headers.contains("x-frame-options"));
+    CHECK(c.headers.contains("x-content-type-options"));
+
+    Crocket broken = make_app(slog);
+    broken.attach(Shield{}.set("x-bad", "a\r\nset-cookie: x"));
+    auto ig = broken.ignite();
+    CHECK(!ig && contains(ig.error().message(), "Shield: header 'x-bad'"));
+  }
+
+  section("conditional requests: ETag and Last-Modified");
+  {
+    auto first = client.get("/hello/Ada/36").dispatch();
+    auto etag = std::string(first.headers.get("etag").value_or(""));
+    CHECK_EQ(etag.size(), std::size_t(18));  // a quoted 64-bit hash
+    CHECK(etag.starts_with('"') && etag.ends_with('"'));
+    CHECK_EQ(std::string(*client.get("/hello/Ada/36").dispatch().headers.get("etag")), etag);  // stable
+    CHECK(std::string(*client.get("/hello/Ada/37").dispatch().headers.get("etag")) != etag);
+    CHECK_EQ(std::string(*client.head("/hello/Ada/36").dispatch().headers.get("etag")), etag);
+
+    for (std::string inm : {etag, "W/" + etag, std::string("*"), "\"other\", " + etag}) {
+      auto r = client.get("/hello/Ada/36").header("if-none-match", inm).dispatch();
+      CHECK_EQ(r.status, 304);
+      CHECK(r.body.empty());
+      CHECK_EQ(std::string(*r.headers.get("etag")), etag);
+    }
+    CHECK_EQ(client.get("/hello/Ada/36").header("if-none-match", "\"other\"").dispatch().status, 200);
+    // Only successful GET and HEAD get one.
+    CHECK(!client.get("/nope").dispatch().headers.contains("etag"));
+    CHECK(!client.post("/users").bearer("alice").json(R"({"email":"a@b.c"})").dispatch().headers.contains("etag"));
+
+    auto doc = client.get("/doc").dispatch();
+    CHECK_EQ(*doc.headers.get("last-modified"), std::string_view("Fri, 02 Jan 2026 03:00:00 GMT"));
+    auto ims = [&](std::string_view since) { return client.get("/doc").header("if-modified-since", since).dispatch().status; };
+    CHECK_EQ(ims("Fri, 02 Jan 2026 03:00:00 GMT"), 304);
+    CHECK_EQ(ims("Sat, 03 Jan 2026 00:00:00 GMT"), 304);
+    CHECK_EQ(ims("Thu, 01 Jan 2026 00:00:00 GMT"), 200);
+    CHECK_EQ(ims("yesterday"), 200);
+    // If-None-Match wins over If-Modified-Since.
+    CHECK_EQ(client.get("/doc").header("if-none-match", "\"other\"")
+                 .header("if-modified-since", "Sat, 03 Jan 2026 00:00:00 GMT").dispatch().status, 200);
+
+    using namespace std::chrono;
+    CHECK_EQ(http::date(sys_days(1994y / November / 6) + 8h + 49min + 37s), std::string("Sun, 06 Nov 1994 08:49:37 GMT"));
+    CHECK(http::parse_date("Sun, 06 Nov 1994 08:49:37 GMT") == sys_days(1994y / November / 6) + 8h + 49min + 37s);
+    CHECK(!http::parse_date("Sun, 31 Feb 1994 08:49:37 GMT"));
+    CHECK(!http::parse_date("Sunday, 06-Nov-94 08:49:37 GMT"));
+  }
+
+  section("range requests");
+  {
+    auto range = [&](std::string_view r) { return client.get("/doc").header("range", r).dispatch(); };
+    auto part = range("bytes=2-4");
+    CHECK_EQ(part.status, 206);
+    CHECK_EQ(part.body, std::string("234"));
+    CHECK_EQ(*part.headers.get("content-range"), std::string_view("bytes 2-4/10"));
+    CHECK_EQ(range("bytes=7-").body, std::string("789"));
+    CHECK_EQ(range("bytes=-3").body, std::string("789"));
+    CHECK_EQ(range("bytes=8-100").body, std::string("89"));
+    auto whole = range("bytes=-20");
+    CHECK_EQ(*whole.headers.get("content-range"), std::string_view("bytes 0-9/10"));
+    auto past = range("bytes=10-");
+    CHECK_EQ(past.status, 416);
+    CHECK_EQ(past.error_code, std::string_view("range.unsatisfiable"));
+    CHECK_EQ(*past.headers.get("content-range"), std::string_view("bytes */10"));
+    CHECK_EQ(range("bytes=-0").status, 416);
+    for (auto ignored : {"bytes=0-1,4-5", "bytes=5-2", "items=0-1", "bytes=x-y", "bytes=-"}) {
+      auto r = range(ignored);
+      CHECK_EQ(r.status, 200);
+      CHECK_EQ(r.body, std::string("0123456789"));
+    }
+    // Only for responses that say they accept ranges.
+    CHECK_EQ(client.get("/hello/Ada/36").header("range", "bytes=0-1").dispatch().status, 200);
+    // If-Range: a range of the copy the client has, else the whole new one.
+    auto etag = std::string(*client.get("/doc").dispatch().headers.get("etag"));
+    CHECK_EQ(client.get("/doc").header("range", "bytes=0-0").header("if-range", etag).dispatch().status, 206);
+    CHECK_EQ(client.get("/doc").header("range", "bytes=0-0").header("if-range", "\"stale\"").dispatch().status, 200);
+    CHECK_EQ(client.get("/doc").header("range", "bytes=0-0")
+                 .header("if-range", "Fri, 02 Jan 2026 03:00:00 GMT").dispatch().status, 206);
+    CHECK_EQ(client.get("/doc").header("range", "bytes=0-0")
+                 .header("if-range", "Thu, 01 Jan 2026 00:00:00 GMT").dispatch().status, 200);
+    // A fresh copy beats a range.
+    CHECK_EQ(client.get("/doc").header("range", "bytes=0-0").header("if-none-match", etag).dispatch().status, 304);
   }
 
   section("dev profile: details in error bodies only in dev");

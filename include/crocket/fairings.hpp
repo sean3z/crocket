@@ -69,6 +69,33 @@ class Cors {
   std::chrono::seconds max_age_{600};
 };
 
+/// Security headers on every response, like Rocket's Shield. Crocket attaches
+/// Shield{} at ignite unless a Shield is already attached; attach
+/// Shield::none() to send none of them.
+///
+///   x-content-type-options: nosniff
+///   x-frame-options: DENY
+///   content-security-policy: default-src 'none'; frame-ancestors 'none'
+///   referrer-policy: no-referrer
+///   strict-transport-security: max-age=31536000   (https only, never for localhost)
+///
+/// A header the handler already set is left alone.
+class Shield {
+ public:
+  Shield();
+  static Shield none();
+  /// Sends `value` for header `name`, in place of the default if there is one.
+  Shield& set(std::string_view name, std::string value);
+  /// Stops sending header `name`.
+  Shield& remove(std::string_view name);
+
+  void on_ignite(Ignite& ig);
+  void on_response(const Request& rq, Response& rs);
+
+ private:
+  std::vector<std::pair<std::string, std::string>> headers_;
+};
+
 /// Prometheus metrics labelled by route template (never by raw path):
 ///   crocket_http_requests_total{method,route,status}
 ///   crocket_http_request_duration_seconds{method,route} (histogram)

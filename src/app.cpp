@@ -1,7 +1,9 @@
 #include "crocket/app.hpp"
+#include "crocket/fairings.hpp"
 #include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
 #include "engine.hpp"
+#include "conditional.hpp"
 #include "identity.hpp"
 #include "router.hpp"
 
@@ -213,7 +215,10 @@ std::expected<void, IgniteError> Crocket::ignite() {
 
   c.routes = std::move(routes);
 
-  // 5. Fairings get the last word.
+  // 5. Fairings get the last word. Shield is on unless one is attached already
+  // (Shield::none() turns it off); attached last, its on_response runs first.
+  if (!std::ranges::any_of(c.fairings, [](auto& f) { return dynamic_cast<detail::FairingModel<Shield>*>(f.get()); }))
+    c.fairings.push_back(std::make_unique<detail::FairingModel<Shield>>(Shield{}));
   Ignite ig(c, errors);
   for (auto& f : c.fairings) {
     try {
@@ -311,6 +316,7 @@ void Crocket::finish(const Request& req, Response& res) {
                 req, res);
   }
   res.headers.set("x-request-id", req.request_id);
+  detail::conditional(req, res);
   auto& fs = core_->fairings;
   for (auto it = fs.rbegin(); it != fs.rend(); ++it) {
     try {

@@ -139,7 +139,7 @@ std::vector<Hop> forwarded_hops(const Request& rq) {
         rest.remove_prefix(end == std::string_view::npos ? rest.size() : end);
       }
       if (name == "for") hop.node = value, any = true;
-      else if (name == "proto") hop.proto = value;
+      else if (name == "proto") hop.proto = value, any = true;
       rest = trim(rest);
       if (!rest.empty() && rest.front() == ';') {
         rest.remove_prefix(1);
@@ -159,6 +159,7 @@ std::vector<Hop> x_forwarded_hops(const Request& rq) {
   auto nodes = list(rq, "x-forwarded-for");
   auto protos = list(rq, "x-forwarded-proto");
   std::vector<Hop> hops;
+  if (nodes.empty() && !protos.empty()) hops.push_back({"", protos.back()});  // a proxy that only says the scheme
   for (std::size_t i = 0; i < nodes.size(); ++i) {
     // One proto per hop when the proxies append; otherwise the last one set it.
     std::string_view proto = protos.size() == nodes.size() ? protos[i] : protos.empty() ? "" : protos.back();
@@ -192,10 +193,10 @@ void resolve_client(Request& rq, const std::vector<IpRange>& trusted, ProxyHeade
   // Walk back from the nearest proxy: each trusted hop vouches for the one before
   // it. The client is the first address no trusted proxy is behind.
   for (auto it = hops.rbegin(); it != hops.rend(); ++it) {
+    if (auto s = scheme_of(it->proto)) rq.scheme = *s;  // said by a trusted proxy about its client
     auto ip = parse_node(it->node);
-    if (!ip) break;  // "unknown" or garbage: keep the last address we can vouch for
+    if (!ip) break;  // "unknown", absent or garbage: keep the last address we can vouch for
     rq.remote_addr = format_ip(*ip);
-    if (auto s = scheme_of(it->proto)) rq.scheme = *s;
     if (!trusted_ip(trusted, *ip)) break;
   }
 }

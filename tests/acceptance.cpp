@@ -117,12 +117,13 @@ auto redirect(Query<Target> q, Response& rs) -> void {
 auto boom() -> std::string { throw std::runtime_error("secret database password in what()"); }
 
 [[= http::get("/doc")]]
-auto doc(Response& rs) -> std::string {
+auto doc() -> Cacheable<std::string> {
   using namespace std::chrono;
-  rs.headers.set("accept-ranges", "bytes");
-  rs.headers.set("last-modified", http::date(sys_days(2026y / January / 2) + 3h));
-  return "0123456789";
+  return {"0123456789", {.last_modified = sys_days(2026y / January / 2) + 3h, .ranges = true}};
 }
+
+[[= http::get("/doc.json")]]
+auto doc_json() -> Cacheable<std::vector<int>> { return Cacheable{std::vector{1, 2, 3}, {.ranges = true}}; }
 
 [[= http::get("/framed")]]
 auto framed(Response& rs) -> std::string {
@@ -131,7 +132,7 @@ auto framed(Response& rs) -> std::string {
 }
 
 [[= http::get("/whoami")]]
-auto whoami(const Request& rq) -> std::string { return rq.remote_addr + " " + std::string(rq.scheme); }
+auto whoami(Client client) -> std::string { return client.addr + " " + std::string(client.scheme); }
 
 [[= http::del("/users/{id}")]]
 auto remove(std::uint64_t id, Auth auth) -> Result<void> {
@@ -835,6 +836,11 @@ int main() {
     CHECK_EQ(past.error_code, std::string_view("range.unsatisfiable"));
     CHECK_EQ(*past.headers.get("content-range"), std::string_view("bytes */10"));
     CHECK_EQ(range("bytes=-0").status, 416);
+    // Any payload, JSON included.
+    auto json_part = client.get("/doc.json").header("range", "bytes=0-2").dispatch();
+    CHECK_EQ(json_part.status, 206);
+    CHECK_EQ(json_part.body, std::string("[1,"));
+    CHECK(!client.get("/doc.json").dispatch().headers.contains("last-modified"));
     for (auto ignored : {"bytes=0-1,4-5", "bytes=5-2", "items=0-1", "bytes=x-y", "bytes=-"}) {
       auto r = range(ignored);
       CHECK_EQ(r.status, 200);

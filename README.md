@@ -190,6 +190,7 @@ crocket's request guards. They run before the handler, and if one fails, its
 | `State<T>` | The managed `T` | (checked at ignite, never at request time) |
 | `Deadline` | Absolute deadline plus a `std::stop_token` | (none) |
 | `RequestId` | The request's id | (none) |
+| `Client` | The client's address and scheme (see [Behind a proxy](#behind-a-proxy)) | (none) |
 | `const Request&` / `Response&` | Raw access, when you need it | (none) |
 
 A custom guard is a `FromRequest` specialization. This is Rocket's `ApiKey` example in
@@ -437,6 +438,7 @@ The return type is the response. Built-in responders:
 | `Created<T>`, `Accepted<T>` | 201 / 202, with an optional `Location` header |
 | `Status<T>` | Runtime status plus payload |
 | `NoContent` | 204 |
+| `Cacheable<T>` | `T` with `Last-Modified` and byte ranges (see [Caching and ranges](#caching-and-ranges)) |
 | `Response` | Exactly what you built |
 | `Task<T>` | Any of the above, produced asynchronously |
 
@@ -484,22 +486,19 @@ handler set its own. A client that sends it back in `If-None-Match` gets `304 No
 Modified` with no body, so unchanged responses cost no bandwidth. Nothing needs
 configuring.
 
-Two more headers, set through `Response&`, enable the rest:
+Wrap the payload in `Cacheable` for the rest:
 
 ```cpp
 [[= http::get("/reports/{id}")]]
-auto report(std::uint64_t id, State<Store> store, Response& rs) -> std::string {
+auto report(std::uint64_t id, State<Store> store) -> Cacheable<std::string> {
   auto r = store->find(id);
-  rs.headers.set("last-modified", http::date(r.updated_at));  // If-Modified-Since -> 304
-  rs.headers.set("accept-ranges", "bytes");                   // Range -> 206
-  return r.contents;
+  return {r.contents, {.last_modified = r.updated_at, .ranges = true}};
 }
 ```
 
-- **`Last-Modified`** answers `If-Modified-Since` with 304 when the client's copy is as
-  new. `If-None-Match`, when sent, decides instead. `http::date()` formats the header,
-  and `http::parse_date()` reads one.
-- **`Accept-Ranges: bytes`** serves one byte range (`Range: bytes=0-499`, `500-` or
+- **`last_modified`** is sent as `Last-Modified`, and answers `If-Modified-Since` with
+  304 when the client's copy is as new. `If-None-Match`, when sent, decides instead.
+- **`ranges`** serves one byte range (`Range: bytes=0-499`, `500-` or
   `-500`) as `206 Partial Content`. A range past the end is 416 `range.unsatisfiable`,
   and a request for several ranges gets the whole body. `If-Range` makes the range
   conditional on the client still having the current version.
@@ -851,9 +850,9 @@ limits are in [docs/ENGINE.md](docs/ENGINE.md).
 
 ### Behind a proxy
 
-`Request::remote_addr` and `Request::scheme` describe the client: its address, and
-whether it connected with `https` or `http`. Behind a load balancer, list the proxies
-you run so crocket takes both from the headers they add:
+The `Client` extractor describes the client: its address, and whether it connected with
+`https` or `http`. Behind a load balancer, list the proxies you run so crocket takes both
+from the headers they add:
 
 ```cpp
 Config cfg;
@@ -862,7 +861,7 @@ cfg.proxy_header = ProxyHeader::XForwardedFor;    // the default; or ProxyHeader
 cfg.allowed_hosts = {"api.example.com", "*.example.com"};
 
 [[= http::get("/whoami")]]
-auto whoami(const Request& rq) -> std::string { return rq.remote_addr + " " + std::string(rq.scheme); }
+auto whoami(Client client) -> std::string { return client.addr + " " + std::string(client.scheme); }
 ```
 
 - **Only trusted proxies are believed.** A request from any other address keeps its
@@ -876,7 +875,6 @@ auto whoami(const Request& rq) -> std::string { return rq.remote_addr + " " + st
   host-header injection in links and redirects. Ports are not compared, and
   `*.example.com` matches subdomains but not `example.com` itself. An empty list
   allows every host.
-- The socket's own peer stays in `Request::peer_addr`.
 - Malformed entries in either list fail ignite.
 
 In tests, `LocalClient` sets the peer with `.remote()`:

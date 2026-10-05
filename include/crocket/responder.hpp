@@ -55,6 +55,24 @@ template <class T> using Accepted = WithStatus<202, T>;
 
 struct NoContent {};
 
+/// What a client may use to revalidate or resume a response (see Cacheable).
+struct CacheOptions {
+  /// Sent as Last-Modified; If-Modified-Since then answers 304 when nothing changed.
+  std::optional<std::chrono::system_clock::time_point> last_modified = {};
+  /// Serve byte ranges: Range answers 206 with part of the body.
+  bool ranges = false;
+};
+
+/// A payload plus caching options: `return Cacheable{body, {.last_modified = t, .ranges = true}};`.
+/// Every successful GET gets an ETag and 304s without this.
+template <class T>
+struct Cacheable {
+  T value;
+  CacheOptions cache = {};
+};
+template <class T>
+Cacheable(T, CacheOptions = {}) -> Cacheable<T>;
+
 /// Runtime status + payload, for when the status is data-dependent.
 template <class T>
 struct Status {
@@ -122,6 +140,16 @@ struct Responder<WithStatus<Code, T>> {
       rs.status = Code;
       if (!w.location.empty()) rs.headers.set("location", w.location);
     }
+  }
+};
+
+template <detail::Payload T>
+struct Responder<Cacheable<T>> {
+  static void respond(Cacheable<T>&& c, const Request& rq, Response& rs) {
+    detail::respond_value(std::move(c.value), rq, rs);
+    if (!rs.error_code.empty()) return;
+    if (c.cache.last_modified) rs.headers.set("last-modified", http::date(*c.cache.last_modified));
+    if (c.cache.ranges) rs.headers.set("accept-ranges", "bytes");
   }
 };
 

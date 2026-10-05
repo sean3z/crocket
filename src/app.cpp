@@ -234,6 +234,7 @@ void Crocket::prepare(Request& req) const {
   }
   req.state_registry = &core_->state;
   req.dev_profile = core_->config.profile == Profile::Dev;
+  req.json_options = core_->config.json;
 }
 
 Response Crocket::handle(Request req) {

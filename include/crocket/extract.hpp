@@ -187,16 +187,23 @@ struct FromRequest<Json<T>> {
                                       "expected content-type application/json", std::string(*ct)});
     if (r.body.empty())
       return std::unexpected(ApiError::unprocessable("json.invalid", "request body is empty; expected JSON"));
-    auto doc = json::parse(r.body);
-    if (!doc)
-      return std::unexpected(ApiError::unprocessable(
-          "json.invalid", "malformed JSON at line " + std::to_string(doc.error().line) + ", column " +
-                              std::to_string(doc.error().column) + ": " + doc.error().message));
     Json<T> out{};
-    if (auto ok = json::decode(*doc, out.value); !ok)
-      return std::unexpected(ApiError::unprocessable("json.invalid", ok.error()));
+    if (auto ok = json::read(r.body, out.value, r.json_options); !ok) return std::unexpected(to_api_error(ok.error()));
     if (auto ok = detail::apply_from_path(r, out.value); !ok) return std::unexpected(std::move(ok.error()));
     return out;
+  }
+
+  static ApiError to_api_error(json::Error& e) {
+    using enum json::Errc;
+    std::string_view code = e.code == unknown_field   ? "json.unknown_field"
+                            : e.code == duplicate_key ? "json.duplicate_key"
+                            : e.code == limit         ? "json.limit_exceeded"
+                            : e.code == validation    ? "json.validation"
+                                                      : "json.invalid";
+    ApiError err = ApiError::unprocessable(code, e.describe());
+    if (e.code == validation) err.errors = std::move(e.errors);
+    else if (e.code != syntax) err.errors.push_back({std::move(e.pointer), std::move(e.message)});
+    return err;
   }
 };
 

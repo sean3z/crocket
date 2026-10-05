@@ -297,7 +297,12 @@ int main() {
     CHECK(contains(bad_json.body, "malformed JSON"));
     auto wrong_shape = client.post("/users").bearer("alice").json(R"({"email": 7})").dispatch();
     CHECK_EQ(wrong_shape.status, 422);
-    CHECK(contains(wrong_shape.body, "field 'email'"));
+    CHECK(contains(wrong_shape.body, "field '/email': expected string, got number"));
+    CHECK(contains(wrong_shape.body, R"("errors":[{"pointer":"/email","detail":"expected string, got number"}])"));
+    // RFC 9457 problem details.
+    CHECK_EQ(*wrong_shape.headers.get("content-type"), std::string_view("application/problem+json"));
+    CHECK(contains(wrong_shape.body, R"({"title":"Unprocessable Content","status":422,"detail":)"));
+    CHECK(contains(wrong_shape.body, R"("code":"json.invalid")"));
     auto no_auth = client.post("/users").json(R"({"email":"a@b.c"})").dispatch();
     CHECK_EQ(no_auth.status, 401);
     CHECK_EQ(no_auth.error_code, std::string_view("auth.missing"));
@@ -626,7 +631,7 @@ int main() {
     for (auto path : {"/boom", "/hello/Ada/400"}) {
       auto r = client.get(path).dispatch();
       CHECK(r.status >= 400);
-      CHECK(!contains(r.body, R"("detail")"));
+      CHECK(!contains(r.body, R"("debug")"));
       CHECK(contains(log.last(), R"("detail":)"));
     }
     CHECK(Config{}.profile == Profile::Release);
@@ -636,9 +641,9 @@ int main() {
     LocalClient dev(dev_app);
     auto boom = dev.get("/boom").dispatch();
     CHECK_EQ(boom.status, 500);
-    CHECK(contains(boom.body, R"x("detail":"uncaught exception in api::boom: secret database password in what()")x"));
+    CHECK(contains(boom.body, R"x("debug":"uncaught exception in api::boom: secret database password in what()")x"));
     auto fwd = dev.get("/hello/Ada/400").dispatch();
-    CHECK(contains(fwd.body, R"("detail":"api::hello: capture '{age}' did not parse")"));
+    CHECK(contains(fwd.body, R"("debug":"api::hello: capture '{age}' did not parse")"));
 
     // Readable log lines, no JSON, no colour for a custom sink.
     auto line = dev_log.last();

@@ -3,6 +3,11 @@ add_executable(crocket_acceptance acceptance.cpp)
 target_link_libraries(crocket_acceptance PRIVATE crocket)
 add_test(NAME acceptance COMMAND crocket_acceptance)
 
+# JSON reading, writing, annotations and validation, plus problem+json bodies.
+add_executable(crocket_json_test json.cpp)
+target_link_libraries(crocket_json_test PRIVATE crocket)
+add_test(NAME json COMMAND crocket_json_test)
+
 add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)
@@ -30,6 +35,11 @@ crocket_compile_fail(proto_duplicate_field "members 'size' and 'colour' both hav
 crocket_compile_fail(proto_unmapped_type "member 'grade' of proto message Widget has type char, which has no protobuf mapping")
 crocket_compile_fail(rpc_two_messages "rpc bad::both: parameters 'a' and 'b' are both request messages")
 crocket_compile_fail(bad_template "capture .\\{id. must be a whole segment of the form \\{name\\}")
+crocket_compile_fail(json_name_clash
+  "members 'user_id' and 'legacy_id' of Account both have the JSON name \"userId\"")
+crocket_compile_fail(json_bad_pattern "invalid json::pattern \"\\^\\[A-Z\\]\\{3-\\}\\$\": expected '\\}' at offset 8")
+crocket_compile_fail(json_check_type
+  "json::min/max\\]\\] on member 'name' of Signup needs a number, but the member is std::")
 
 # Control: the valid twin must compile (guards against the harness "passing"
 # because everything fails to build).

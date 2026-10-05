@@ -32,6 +32,7 @@ struct Config {
   std::chrono::milliseconds drain_timeout{10'000};    // graceful shutdown budget
   bool debug_routes = false;                          // expose GET /__routes
   Profile profile = Profile::Release;
+  json::ReadOptions json = {};                        // limits for Json<T> bodies
 
   /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
   /// breakpoint), a one-second drain, and listening on 127.0.0.1.

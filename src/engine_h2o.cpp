@@ -363,8 +363,8 @@ void Engine::dispatch(Session* s) {
         *res = app_.handle(std::move(rq));
       } catch (...) {  // Crocket::handle maps handler exceptions; this is a last resort
         res->status = 500;
-        res->body = R"({"error":{"code":"internal","message":"internal error"}})";
-        res->set_content_type("application/json");
+        res->body = R"({"title":"Internal Server Error","status":500,"detail":"internal error","code":"internal"})";
+        res->set_content_type("application/problem+json");
       }
       h2o_multithread_send_message(&done_rx_.rx, &(new Done{{}, txn, res})->msg);
       outstanding_.fetch_sub(1);

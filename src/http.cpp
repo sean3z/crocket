@@ -17,21 +17,46 @@ void write_error(const ApiError& e, const Request& rq, Response& rs) {
   rs.status = e.status;
   rs.error_code = e.code;
   rs.error_detail = e.detail;
-  rs.set_content_type("application/json");
+  rs.set_content_type("application/problem+json");
   if (e.status == 401 && !rs.headers.contains("www-authenticate"))
     rs.headers.set("www-authenticate", "Bearer");
-  rs.body.clear();
-  rs.body += R"({"error":{"code":)";
-  json::write_string(rs.body, e.code);
-  rs.body += R"(,"message":)";
-  json::write_string(rs.body, e.message);
-  rs.body += R"(,"request_id":)";
-  json::write_string(rs.body, rq.request_id);
-  if (rq.dev_profile && !e.detail.empty()) {
-    rs.body += R"(,"detail":)";
-    json::write_string(rs.body, e.detail);
+  // RFC 9457. "detail" is the client message; ApiError::detail, which is for
+  // logs, appears as "debug" in the dev profile only.
+  auto& b = rs.body;
+  b.clear();
+  b += '{';
+  if (!e.type.empty()) {
+    b += R"("type":)";
+    json::write_string(b, e.type);
+    b += ',';
   }
-  rs.body += "}}";
+  b += R"("title":)";
+  json::write_string(b, detail::reason_phrase(e.status));
+  b += R"(,"status":)";
+  b += std::to_string(e.status);
+  b += R"(,"detail":)";
+  json::write_string(b, e.message);
+  b += R"(,"code":)";
+  json::write_string(b, e.code);
+  b += R"(,"request_id":)";
+  json::write_string(b, rq.request_id);
+  if (!e.errors.empty()) {
+    b += R"(,"errors":[)";
+    for (std::size_t i = 0; i < e.errors.size(); ++i) {
+      if (i) b += ',';
+      b += R"({"pointer":)";
+      json::write_string(b, e.errors[i].pointer);
+      b += R"(,"detail":)";
+      json::write_string(b, e.errors[i].detail);
+      b += '}';
+    }
+    b += ']';
+  }
+  if (rq.dev_profile && !e.detail.empty()) {
+    b += R"(,"debug":)";
+    json::write_string(b, e.detail);
+  }
+  b += '}';
 }
 
 std::string IgniteError::message() const {

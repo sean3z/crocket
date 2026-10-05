@@ -83,6 +83,8 @@ for proto in --http2 --http1.1; do
        -H 'access-control-request-method: POST')"
   expect "oversized headers -> 431" "431" \
     "$(curl -sk $proto -o /dev/null -w '%{http_code}' -H "x-big: $(head -c 9000 /dev/zero | tr '\0' b)" "$BASE/healthz")"
+  expect "too many headers -> 431" "431" \
+    "$(for i in $(seq 1 110); do echo "x-h$i: v"; done | curl -sk $proto -o /dev/null -w '%{http_code}' -H @- "$BASE/healthz")"
 done
 
 echo "[http/1.1 bodies]"

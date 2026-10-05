@@ -173,7 +173,7 @@ class Engine {
   void on_accept(h2o_socket_t* listener, const char* err);
   void forget(Session* s);
 
-  Request build_request(h2o_req_t* req, std::size_t& header_bytes) const;
+  Request build_request(h2o_req_t* req, std::size_t& header_bytes, std::size_t& header_count) const;
   bool take_body(Session* s, h2o_iovec_t chunk);
   void dispatch(Session* s);
   void reject(Session* s, const ApiError& err) { respond(s, app_.reject(s->meta, err)); }
@@ -222,7 +222,7 @@ class Engine {
 
 // ---- request construction ---------------------------------------------------------
 
-Request Engine::build_request(h2o_req_t* req, std::size_t& header_bytes) const {
+Request Engine::build_request(h2o_req_t* req, std::size_t& header_bytes, std::size_t& header_count) const {
   Request rq;
   rq.protocol = req->version >= 0x200 ? std::string_view("h2") : std::string_view("http/1.1");
   rq.tls = ssl_ != nullptr;  // one listener: TLS or not, whatever :scheme claims
@@ -235,6 +235,7 @@ Request Engine::build_request(h2o_req_t* req, std::size_t& header_bytes) const {
   if (req->query_at != SIZE_MAX) rq.query = parse_query(view(req->path).substr(req->query_at + 1));
 
   header_bytes = req->method.len + req->path.len;
+  header_count = req->headers.size;
   for (std::size_t i = 0; i < req->headers.size; ++i) {
     const h2o_header_t& h = req->headers.entries[i];
     rq.headers.add(view(*h.name), view(h.value));
@@ -247,7 +248,7 @@ Request Engine::build_request(h2o_req_t* req, std::size_t& header_bytes) const {
   if (socklen_t n = req->conn->callbacks->get_peername(req->conn, reinterpret_cast<sockaddr*>(&ss)); n) {
     char host[NI_MAXHOST];
     if (std::size_t len = h2o_socket_getnumerichost(reinterpret_cast<sockaddr*>(&ss), n, host); len != SIZE_MAX)
-      rq.remote_addr.assign(host, len);
+      rq.peer_addr.assign(host, len);
   }
   rq.received = Clock::now();
   return rq;
@@ -270,8 +271,8 @@ int Engine::on_req(h2o_req_t* req) {
   // With the body still arriving, the part in req->entity is held until proceed_req.
   s->piece_held = req->proceed_req != nullptr;
 
-  std::size_t header_bytes = 0;
-  s->meta = build_request(req, header_bytes);
+  std::size_t header_bytes = 0, header_count = 0;
+  s->meta = build_request(req, header_bytes, header_count);
   s->meta.deadline.stop = s->stop->get_token();
   app_.prepare(s->meta);  // request id + deadline, fixed before anything can fail
   s->head_only = s->meta.method == http::Method::Head;
@@ -279,7 +280,7 @@ int Engine::on_req(h2o_req_t* req) {
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(s->meta.deadline.remaining()).count();
   h2o_timer_link(ctx_.loop, std::uint64_t(std::max<std::int64_t>(1, ms)), &s->deadline.timer);
 
-  if (header_bytes > opts_.max_header_bytes) {
+  if (header_bytes > opts_.max_header_bytes || header_count > opts_.max_header_count) {
     reject(s, {431, "headers.too_large", "request headers too large", {}});
     return 0;
   }

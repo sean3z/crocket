@@ -6,6 +6,7 @@
 #include "crocket/request.hpp"
 #include "crocket/state.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -24,6 +25,12 @@ namespace crocket {
 /// route banner, and error bodies that include ApiError::detail.
 enum class Profile : std::uint8_t { Release, Dev };
 
+/// Which header trusted proxies use to report the client.
+enum class ProxyHeader : std::uint8_t {
+  XForwardedFor,  // X-Forwarded-For and X-Forwarded-Proto (nginx, AWS ALB, Envoy, ...)
+  Forwarded,      // RFC 7239 Forwarded
+};
+
 /// Framework behaviour that is not about the socket.
 struct Config {
   std::size_t max_body_bytes = 1 << 20;               // 413 body.too_large
@@ -32,6 +39,16 @@ struct Config {
   std::chrono::milliseconds drain_timeout{10'000};    // graceful shutdown budget
   bool debug_routes = false;                          // expose GET /__routes
   Profile profile = Profile::Release;
+
+  /// Proxies in front of the server, as addresses or CIDR ranges ("10.0.0.0/8",
+  /// "fd00::/8"). Requests from them have Request::remote_addr and scheme taken
+  /// from `proxy_header`; that header is ignored from everyone else.
+  std::vector<std::string> trusted_proxies = {};
+  ProxyHeader proxy_header = ProxyHeader::XForwardedFor;
+  /// Host names this server answers to ("api.example.com", "*.example.com").
+  /// Any other Host is 400 host.invalid. Empty allows every host; the dev
+  /// profile also allows localhost.
+  std::vector<std::string> allowed_hosts = {};
   json::ReadOptions json = {};                        // limits for Json<T> bodies
 
   /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
@@ -50,6 +67,7 @@ struct LaunchOptions {
   std::string tls_key = {};
   unsigned workers = 0;                  // 0 = hardware concurrency
   std::size_t max_header_bytes = 8192;   // names + values; 431 headers.too_large
+  std::size_t max_header_count = 100;    // 431 headers.too_large
   bool http2 = true;                     // offer h2 via ALPN when TLS is on
   /// Without TLS, also accept HTTP/2 with prior knowledge (and Upgrade: h2c), as
   /// gRPC clients use on an insecure channel. HTTP/1.1 keeps working on the port.
@@ -149,8 +167,15 @@ struct Stats {
   std::atomic<bool> draining{false};
 };
 
+/// An address range from Config::trusted_proxies (IPv4 as IPv4-mapped IPv6).
+struct IpRange {
+  std::array<std::uint8_t, 16> addr{};
+  int prefix = 0;
+};
+
 struct Core {
   Config config;
+  std::vector<IpRange> trusted_proxies;  // parsed at ignite
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
   std::vector<ReadyCheck> ready_checks;
@@ -274,6 +299,8 @@ class LocalClient {
       req_.body = std::move(b);
       return *this;
     }
+    /// The socket peer's address, e.g. a proxy's ("10.0.0.5").
+    Call& remote(std::string_view addr) { req_.peer_addr = addr; return *this; }
     Call& bearer(std::string_view token) { return header("authorization", std::string("Bearer ") + std::string(token)); }
     Response dispatch() { return app_.handle(std::move(req_)); }
 

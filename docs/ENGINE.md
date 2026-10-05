@@ -88,7 +88,9 @@ Request construction:
 - **Headers:** every request header reaches the handler over both protocols, custom ones
   included. Over h2 the `host` header is filled from `:authority`.
 - **`protocol`:** `"h2"` for HTTP/2 requests, otherwise `"http/1.1"`.
-- **`tls`, `remote_addr`:** whether the listener has TLS, and the peer's numeric address.
+- **`tls`, `peer_addr`:** whether the listener has TLS, and the peer's numeric address.
+  `Crocket::prepare` derives `remote_addr` and `scheme` from them, through
+  `Config::trusted_proxies` when the peer is one.
 
 ### Request bodies
 
@@ -137,6 +139,7 @@ HTTP/1.1 uploads are decoded by h2o and accepted.
 | Condition | Response |
 |---|---|
 | Request headers larger than `max_header_bytes` (names plus values, default 8 KiB) | 431 `headers.too_large` |
+| More than `max_header_count` request headers (default 100) | 431 `headers.too_large` |
 | `Content-Length` over `max_body_bytes`, or a body that grows past it | 413 `body.too_large` |
 | `max_in_flight` requests already dispatched | 503 `server.busy` |
 | Deadline (`request_timeout`) reached | 504 `deadline.exceeded` |

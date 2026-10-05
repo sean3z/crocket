@@ -42,6 +42,10 @@ block(SCOPE_FOR VARIABLES)
   # Per-function sections let an application linking with -Wl,--gc-sections drop
   # the parts of h2o crocket never calls (HTTP/3, proxying, file serving).
   string(APPEND CMAKE_C_FLAGS " -g -w -ffunction-sections -fdata-sections")
+  # h2o answers a request with more headers than this itself (400, connection
+  # closed). Above crocket's LaunchOptions::max_header_count, so crocket sends
+  # the 431 instead. Code including h2o.h gets the same value (below).
+  string(APPEND CMAKE_C_FLAGS " -DH2O_MAX_HEADERS=128")
   FetchContent_Declare(h2o
     URL https://github.com/h2o/h2o/archive/${CROCKET_H2O_COMMIT}.tar.gz
     URL_HASH SHA256=${CROCKET_H2O_SHA256}
@@ -59,4 +63,4 @@ set(CROCKET_H2O_INCLUDE_DIRS
   ${h2o_SOURCE_DIR}/include
   ${h2o_SOURCE_DIR}/deps/picotls/include
   ${h2o_SOURCE_DIR}/deps/quicly/include)
-set(CROCKET_H2O_DEFINITIONS H2O_USE_LIBUV=0)
+set(CROCKET_H2O_DEFINITIONS H2O_USE_LIBUV=0 H2O_MAX_HEADERS=128)

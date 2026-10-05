@@ -268,6 +268,19 @@ struct FromRequest<RequestId> {
   static std::expected<RequestId, ApiError> extract(Request& r) { return RequestId{r.request_id}; }
 };
 
+/// The client: its address and the scheme it connected with, as trusted
+/// proxies report them (Config::trusted_proxies); otherwise the connection's.
+struct Client {
+  std::string addr;         // "203.0.113.9"
+  std::string_view scheme;  // "https" or "http"
+};
+template <>
+struct FromRequest<Client> {
+  static constexpr std::string_view kind = "client";
+  static constexpr bool consumes_body = false;
+  static std::expected<Client, ApiError> extract(Request& r) { return Client{r.remote_addr, r.scheme}; }
+};
+
 /// Query<T>: maps query parameters onto the public members of aggregate T by
 /// name. Members parse with FromParam; std::optional members may be absent.
 /// Failures are 422 query.invalid.

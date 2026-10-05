@@ -4,6 +4,7 @@
 
 #include <meta>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -142,6 +143,12 @@ consteval Route put(std::string_view p, RouteOptions o = {}) { return route(Meth
 consteval Route patch(std::string_view p, RouteOptions o = {}) { return route(Method::Patch, p, o); }
 consteval Route del(std::string_view p, RouteOptions o = {}) { return route(Method::Delete, p, o); }
 consteval Route options(std::string_view p, RouteOptions o = {}) { return route(Method::Options, p, o); }
+
+/// An HTTP date (RFC 9110 IMF-fixdate), "Sun, 06 Nov 1994 08:49:37 GMT", for
+/// headers such as Last-Modified.
+std::string date(std::chrono::system_clock::time_point t);
+/// Parses an IMF-fixdate; nullopt for anything else.
+std::optional<std::chrono::sys_seconds> parse_date(std::string_view s);
 
 }  // namespace http
 

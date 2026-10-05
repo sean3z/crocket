@@ -83,6 +83,10 @@ for proto in --http2 --http1.1; do
        -H 'access-control-request-method: POST')"
   expect "oversized headers -> 431" "431" \
     "$(curl -sk $proto -o /dev/null -w '%{http_code}' -H "x-big: $(head -c 9000 /dev/zero | tr '\0' b)" "$BASE/healthz")"
+  etag=$(curl -sk $proto -D - -o /dev/null "$BASE/healthz" | tr -d '\r' | sed -n 's/^etag: //p')
+  expect "If-None-Match -> 304 with no body" "304 0" \
+    "$(curl -sk $proto --max-time 5 -o /dev/null -w '%{http_code} %{size_download}' -H "if-none-match: $etag" "$BASE/healthz")"
+  expect_match "security headers" "x-content-type-options: nosniff" "$(curl -sk $proto -D - -o /dev/null "$BASE/healthz")"
   expect "too many headers -> 431" "431" \
     "$(for i in $(seq 1 110); do echo "x-h$i: v"; done | curl -sk $proto -o /dev/null -w '%{http_code}' -H @- "$BASE/healthz")"
 done

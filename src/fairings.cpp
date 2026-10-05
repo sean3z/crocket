@@ -1,4 +1,5 @@
 #include "crocket/fairings.hpp"
+#include "crocket/grpc.hpp"
 #include "crocket/json.hpp"
 #include "crocket/responder.hpp"
 
@@ -107,6 +108,58 @@ void Logger::on_response(const Request& rq, Response& rs) {
 void Logger::on_shutdown() { (*sink_)(text_ ? "shutdown" : line_start("info", "shutdown") + "}"); }
 
 // ---- Cors -----------------------------------------------------------------------
+
+// ---- Shield ----------------------------------------------------------------------
+
+Shield::Shield()
+    : headers_{{"x-content-type-options", "nosniff"},
+               {"x-frame-options", "DENY"},
+               {"content-security-policy", "default-src 'none'; frame-ancestors 'none'"},
+               {"referrer-policy", "no-referrer"},
+               {"strict-transport-security", "max-age=31536000"}} {}
+
+Shield Shield::none() {
+  Shield s;
+  s.headers_.clear();
+  return s;
+}
+
+Shield& Shield::set(std::string_view name, std::string value) {
+  remove(name);
+  std::string lower(name);
+  for (auto& c : lower)
+    if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+  headers_.emplace_back(std::move(lower), std::move(value));
+  return *this;
+}
+
+Shield& Shield::remove(std::string_view name) {
+  std::erase_if(headers_, [&](auto& h) { return Headers::iequals(h.first, name); });
+  return *this;
+}
+
+void Shield::on_ignite(Ignite& ig) {
+  for (auto& [k, v] : headers_)
+    if (!http::valid_header_name(k) || !http::valid_header_value(v))
+      ig.fail("Shield: header '" + k + "' has a name or value not allowed in HTTP headers");
+}
+
+void Shield::on_response(const Request& rq, Response& rs) {
+  if (auto ct = rs.headers.get("content-type"); ct && grpc::is_grpc_content_type(*ct)) return;
+  for (auto& [k, v] : headers_) {
+    if (rs.headers.contains(k)) continue;
+    if (k == "strict-transport-security") {
+      // Over plain http a browser ignores it; on localhost it would pin every
+      // local development server to https.
+      auto host = rq.header("host").value_or("");
+      bool local = host.starts_with("localhost") || host.starts_with("127.") || host.starts_with("[::1]");
+      if (rq.scheme != "https" || local) continue;
+    }
+    rs.headers.set(k, v);
+  }
+}
+
+// ---- Cors ----------------------------------------------------------------------
 
 Cors Cors::deny() { return Cors{}; }
 Cors Cors::allow_origins(std::vector<std::string> origins) {

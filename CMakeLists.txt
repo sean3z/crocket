@@ -39,6 +39,7 @@ find_package(Threads REQUIRED)
 
 add_library(crocket STATIC
   src/app.cpp
+  src/identity.cpp
   src/router.cpp
   src/json.cpp
   src/http.cpp

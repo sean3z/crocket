@@ -116,6 +116,9 @@ auto redirect(Query<Target> q, Response& rs) -> void {
 [[= http::get("/boom")]]
 auto boom() -> std::string { throw std::runtime_error("secret database password in what()"); }
 
+[[= http::get("/whoami")]]
+auto whoami(const Request& rq) -> std::string { return rq.remote_addr + " " + std::string(rq.scheme); }
+
 [[= http::del("/users/{id}")]]
 auto remove(std::uint64_t id, Auth auth) -> Result<void> {
   if (!auth.has_scope("admin")) return std::unexpected(ApiError::forbidden("auth.scope", "admin scope required"));
@@ -623,6 +626,96 @@ int main() {
     CHECK_EQ(probe.capture("pid").value_or("?"), std::string_view("99"));
     CHECK_EQ(probe.capture("uid").value_or("?"), std::string_view("7"));
     CHECK(!probe.capture("id").has_value());
+  }
+
+  section("trusted proxies: the client's address and scheme");
+  {
+    // Without trusted proxies, forwarding headers are ignored.
+    auto plain = client.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "1.2.3.4").dispatch();
+    CHECK_EQ(plain.body, std::string("10.0.0.5 http"));
+
+    LogCapture plog;
+    Crocket proxied = make_app(plog, nullptr, Config{.trusted_proxies = {"10.0.0.0/8", "fd00::/8"}});
+    LocalClient pc(proxied);
+    auto who = [&](std::string_view peer, std::vector<std::pair<std::string, std::string>> headers) {
+      auto call = pc.get("/whoami").remote(peer);
+      for (auto& [k, v] : headers) call.header(k, v);
+      return call.dispatch().body;
+    };
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "1.2.3.4"}}), std::string("1.2.3.4 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "1.2.3.4"}, {"x-forwarded-proto", "https"}}),
+             std::string("1.2.3.4 https"));
+    CHECK_EQ(who("fd00::1", {{"x-forwarded-for", "2001:db8::7"}}), std::string("2001:db8::7 http"));
+    CHECK_EQ(who("::ffff:10.0.0.5", {{"x-forwarded-for", "1.2.3.4"}}), std::string("1.2.3.4 http"));
+    // Two proxies: each trusted hop vouches for the one before it.
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "1.2.3.4, 10.0.0.7"}}), std::string("1.2.3.4 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "1.2.3.4"}, {"x-forwarded-for", "10.0.0.7"}}),
+             std::string("1.2.3.4 http"));
+    // A client cannot choose its own address: what it sent sits left of the real one.
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "6.6.6.6, 1.2.3.4"}}), std::string("1.2.3.4 http"));
+    // A peer that is not a trusted proxy is the client, whatever it sends.
+    CHECK_EQ(who("203.0.113.9", {{"x-forwarded-for", "1.2.3.4"}, {"x-forwarded-proto", "https"}}),
+             std::string("203.0.113.9 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "unknown"}}), std::string("10.0.0.5 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "1.2.3.4:5678"}}), std::string("1.2.3.4 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-for", "[2001:db8::7]:443"}}), std::string("2001:db8::7 http"));
+    CHECK_EQ(who("10.0.0.5", {{"x-forwarded-proto", "javascript"}}), std::string("10.0.0.5 http"));
+    CHECK_EQ(who("10.0.0.5", {{"forwarded", "for=1.2.3.4"}}), std::string("10.0.0.5 http"));  // not the configured header
+
+    Crocket rfc = make_app(plog, nullptr,
+                           Config{.trusted_proxies = {"10.0.0.5"}, .proxy_header = ProxyHeader::Forwarded});
+    LocalClient rc(rfc);
+    auto fwd = [&](std::string_view value) {
+      return rc.get("/whoami").remote("10.0.0.5").header("forwarded", value).dispatch().body;
+    };
+    CHECK_EQ(fwd("for=192.0.2.60;proto=https"), std::string("192.0.2.60 https"));
+    CHECK_EQ(fwd(R"(For="[2001:db8:cafe::17]:4711";Proto=HTTPS)"), std::string("2001:db8:cafe::17 https"));
+    CHECK_EQ(fwd("for=6.6.6.6, for=192.0.2.60;proto=http;by=10.0.0.5"), std::string("192.0.2.60 http"));
+    CHECK_EQ(fwd("for=_hidden"), std::string("10.0.0.5 http"));
+    CHECK_EQ(rc.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "1.2.3.4").dispatch().body,
+             std::string("10.0.0.5 http"));
+
+    Crocket bad{Config{.trusted_proxies = {"10.0.0.0/33", "lb.internal"}}};
+    auto ig = bad.ignite();
+    CHECK(!ig && contains(ig.error().message(), R"(trusted_proxies entry "10.0.0.0/33" is not)"));
+    CHECK(!ig && contains(ig.error().message(), R"(trusted_proxies entry "lb.internal" is not)"));
+  }
+
+  section("allowed hosts");
+  {
+    LogCapture hlog;
+    Crocket hosted = make_app(hlog, nullptr, Config{.allowed_hosts = {"api.example.com", "*.example.org", "[::1]"}});
+    LocalClient hc(hosted);
+    auto status = [&](std::optional<std::string_view> host) {
+      auto call = hc.get("/healthz");
+      if (host) call.header("host", *host);
+      return call.dispatch();
+    };
+    for (auto ok : {"api.example.com", "API.Example.com:8443", "api.example.com.", "a.example.org", "a.b.example.org",
+                    "[::1]:8000"})
+      CHECK_EQ(status(ok).status, 200);
+    for (auto no : {"example.org", "evil.com", "api.example.com.evil.com", "xexample.org", "localhost", ""}) {
+      auto r = status(no);
+      CHECK_EQ(r.status, 400);
+      CHECK_EQ(r.error_code, std::string_view("host.invalid"));
+    }
+    CHECK_EQ(status(std::nullopt).status, 400);
+    CHECK(contains(hlog.last(), "host.invalid"));
+    // Every host is allowed when the list is empty.
+    CHECK_EQ(client.get("/healthz").header("host", "anything.test").dispatch().status, 200);
+    // The dev profile also answers on localhost.
+    Config dev = Config::dev();
+    dev.allowed_hosts = {"api.example.com"};
+    Crocket dev_hosted = make_app(hlog, nullptr, dev);
+    LocalClient dc(dev_hosted);
+    CHECK_EQ(dc.get("/healthz").header("host", "localhost:8000").dispatch().status, 200);
+    CHECK_EQ(dc.get("/healthz").header("host", "evil.com").dispatch().status, 400);
+
+    Crocket bad{Config{.allowed_hosts = {"https://api.example.com", "api.example.com:443", "*"}}};
+    auto ig = bad.ignite();
+    CHECK(!ig && contains(ig.error().message(), R"(allowed_hosts entry "https://api.example.com" is not a host name)"));
+    CHECK(!ig && contains(ig.error().message(), R"(allowed_hosts entry "api.example.com:443" has a port)"));
+    CHECK(!ig && !contains(ig.error().message(), R"(entry "*")"));
   }
 
   section("dev profile: details in error bodies only in dev");

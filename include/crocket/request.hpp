@@ -83,7 +83,11 @@ struct Request {
   // Connection facts, set by the engine.
   std::string_view protocol = "local";  // "http/1.1", "h2", or "local"
   bool tls = false;
-  std::string remote_addr;
+  std::string peer_addr;  // the socket's peer: the client, or the nearest proxy
+
+  // The client, as Config::trusted_proxies report it; otherwise the connection's.
+  std::string remote_addr;  // e.g. "203.0.113.9"
+  std::string_view scheme;  // "https" or "http"
 
   // Set by the framework before fairings run.
   std::string request_id;

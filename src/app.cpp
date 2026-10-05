@@ -2,6 +2,7 @@
 #include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
 #include "engine.hpp"
+#include "identity.hpp"
 #include "router.hpp"
 
 #include <algorithm>
@@ -179,7 +180,17 @@ std::expected<void, IgniteError> Crocket::ignite() {
   if (c.config.debug_routes)
     routes.push_back(builtin_route("/__routes", "crocket::routes", detail::Builtin::Routes));
 
-  // 2. Every State<T> a route needs must be managed.
+  // 2. Proxies and hosts must be well-formed.
+  c.trusted_proxies.clear();
+  for (auto& p : c.config.trusted_proxies) {
+    if (auto r = detail::parse_ip_range(p)) c.trusted_proxies.push_back(*r);
+    else errors.push_back("trusted_proxies entry \"" + p + "\" is not an IP address or CIDR range (\"10.0.0.0/8\")");
+  }
+  for (auto& h : c.config.allowed_hosts)
+    if (auto why = detail::host_pattern_problem(h); !why.empty())
+      errors.push_back("allowed_hosts entry \"" + h + "\" " + why);
+
+  // 3. Every State<T> a route needs must be managed.
   std::set<std::string> seen;
   for (auto& r : routes)
     for (auto& need : r.needs)
@@ -189,7 +200,7 @@ std::expected<void, IgniteError> Crocket::ignite() {
         if (seen.insert(msg).second) errors.push_back(std::move(msg));
       }
 
-  // 3. Same method + same shape + same rank can never be disambiguated.
+  // 4. Same method + same shape + same rank can never be disambiguated.
   std::map<std::tuple<http::Method, std::string, int>, const RouteDef*> shapes;
   for (auto& r : routes) {
     auto key = std::make_tuple(r.method, detail::Router::shape(r.path), r.rank);
@@ -202,7 +213,7 @@ std::expected<void, IgniteError> Crocket::ignite() {
 
   c.routes = std::move(routes);
 
-  // 4. Fairings get the last word.
+  // 5. Fairings get the last word.
   Ignite ig(c, errors);
   for (auto& f : c.fairings) {
     try {
@@ -232,6 +243,12 @@ void Crocket::prepare(Request& req) const {
     if (auto t = req.header("grpc-timeout"))
       if (auto d = parse_grpc_timeout(*t)) req.deadline.at = std::min(req.deadline.at, req.received + *d);
   }
+  if (req.scheme.empty()) {  // once: the engine prepares before handle()
+    req.remote_addr = req.peer_addr;
+    req.scheme = req.tls ? "https" : "http";
+    if (!core_->trusted_proxies.empty())
+      detail::resolve_client(req, core_->trusted_proxies, core_->config.proxy_header);
+  }
   req.state_registry = &core_->state;
   req.dev_profile = core_->config.profile == Profile::Dev;
   req.json_options = core_->config.json;
@@ -247,7 +264,13 @@ Response Crocket::handle(Request req) {
 
   Response res;
   bool finished = false;
+  if (auto host = req.header("host").value_or("");
+      !detail::host_allowed(host, core_->config.allowed_hosts, req.dev_profile)) {
+    write_error({400, "host.invalid", "host not allowed", "Host: '" + std::string(host) + "'"}, req, res);
+    finished = true;
+  }
   for (auto& f : core_->fairings) {
+    if (finished) break;
     try {
       if (auto early = f->on_request(req)) {
         res = std::move(*early);

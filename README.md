@@ -809,7 +809,45 @@ What you get:
 - **Graceful shutdown on SIGINT/SIGTERM:** stop accepting, drain in-flight requests,
   run `on_shutdown`, then destroy managed state.
 
-The threading model and limits are in [docs/ENGINE.md](docs/ENGINE.md).
+Requests whose headers exceed `LaunchOptions::max_header_bytes` (8 KiB) or
+`max_header_count` (100) get 431 `headers.too_large`. The threading model and the other
+limits are in [docs/ENGINE.md](docs/ENGINE.md).
+
+### Behind a proxy
+
+`Request::remote_addr` and `Request::scheme` describe the client: its address, and
+whether it connected with `https` or `http`. Behind a load balancer, list the proxies
+you run so crocket takes both from the headers they add:
+
+```cpp
+Config cfg;
+cfg.trusted_proxies = {"10.0.0.0/8"};             // addresses or CIDR ranges
+cfg.proxy_header = ProxyHeader::XForwardedFor;    // the default; or ProxyHeader::Forwarded (RFC 7239)
+cfg.allowed_hosts = {"api.example.com", "*.example.com"};
+
+[[= http::get("/whoami")]]
+auto whoami(const Request& rq) -> std::string { return rq.remote_addr + " " + std::string(rq.scheme); }
+```
+
+- **Only trusted proxies are believed.** A request from any other address keeps its
+  own address and scheme, whatever headers it sends. Behind a chain of trusted proxies,
+  the client is the first address that no trusted proxy is behind, so a value the
+  client wrote into `X-Forwarded-For` itself is never picked.
+- **Only the configured header is read.** Set `proxy_header` to the one your proxies
+  write. The other is ignored, so a client cannot supply it.
+- **`allowed_hosts`** lists the host names the server answers to. Any other `Host`
+  (`:authority` in HTTP/2) is 400 `host.invalid` before routing, which stops
+  host-header injection in links and redirects. Ports are not compared, and
+  `*.example.com` matches subdomains but not `example.com` itself. An empty list
+  allows every host.
+- The socket's own peer stays in `Request::peer_addr`.
+- Malformed entries in either list fail ignite.
+
+In tests, `LocalClient` sets the peer with `.remote()`:
+
+```cpp
+auto r = client.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "203.0.113.9").dispatch();
+```
 
 ### Dev profile
 
@@ -834,6 +872,8 @@ Compared with the release defaults, the dev profile:
 - **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
   breakpoint), and the drain on shutdown is one second.
 - **An empty `LaunchOptions::host` binds `127.0.0.1`** instead of `0.0.0.0`.
+- **`allowed_hosts` also accepts `localhost`, `127.0.0.1` and `::1`**, so a server
+  configured for its public name still answers locally.
 
 ### Not (yet) in crocket
 
@@ -899,11 +939,11 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 | Test | What it checks |
 |---|---|
-| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile and header validation. |
+| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies and allowed hosts. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight and 431. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, and 431 for oversized headers and too many headers. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 

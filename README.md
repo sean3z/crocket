@@ -183,7 +183,7 @@ crocket's request guards. They run before the handler, and if one fails, its
 
 | Extractor | Gives you | Fails with |
 |---|---|---|
-| `Json<T>` | Request body decoded into `T` via reflection | 415 `json.unsupported_media_type`, 422 `json.invalid` / `json.path_mismatch` / `json.read_only` |
+| `Json<T>` | Request body decoded into `T` via reflection (see [JSON](#json)) | 415 `json.unsupported_media_type`, 422 `json.invalid` / `json.validation` / `json.unknown_field` / `json.duplicate_key` / `json.limit_exceeded` / `json.path_mismatch` / `json.read_only` |
 | `Query<T>` | Query string mapped onto the members of `T` | 422 `query.invalid` |
 | `Header<"name", T>` | Header `name` parsed as `T` (default `std::string`; `std::optional<U>` if it may be absent) | 400 `header.missing` / `header.invalid` |
 | `Auth` | Bearer token verified by the managed `Authenticator` | 401 `auth.missing` / `auth.invalid` / verifier's code |
@@ -249,14 +249,137 @@ auto reports(Header<"x-tenant"> tenant,                       // required: 400 h
 
 Every request header reaches the handler, over HTTP/1.1 and HTTP/2 alike.
 
-JSON mapping is driven by reflection, with no derive or registration step. It handles:
+### JSON
 
-- aggregates, nested aggregates, `std::vector`, `std::array`, string-keyed maps and
-  `std::optional`;
-- missing members, which are allowed if they are `optional` or have a default member
-  initializer.
+Any plain struct works as JSON as it is, with no annotations, derive macros or
+registration:
 
-Errors say exactly what went wrong: `field 'email': expected string, got number`.
+```cpp
+struct NewUser {
+  std::string email;                // required
+  std::optional<std::string> name;  // may be absent or null
+  int age = 0;                      // may be absent: keeps its default
+};
+
+[[= http::post("/users")]]
+auto create(Json<NewUser> body) -> Json<NewUser> { return body; }
+```
+
+By default, JSON names are the member names, a member is required unless it is
+`optional` or has a default initializer, unknown fields are ignored, and empty optionals
+are written as `null`. [Annotations](#annotations) change those defaults where you need
+to, and [validation](#validation) adds checks, but neither is required.
+
+`Json<T>` reads the body straight into `T`, with no document tree in between, and a
+responder writes `T` back out. The strict reading rules below apply to every struct,
+annotated or not.
+
+| C++ | JSON |
+|---|---|
+| `bool`, integers, floating point | `true`/`false`, number (NaN and infinity are written as `null`) |
+| `std::string` | string |
+| an enum | string: the enumerator's name |
+| an aggregate struct | object, one member per data member |
+| `std::optional<T>` | `T` or `null` |
+| `std::vector<T>`, `std::array<T, N>` | array (`std::array`: exactly `N` elements) |
+| `std::map<std::string, T>` | object |
+| `std::variant<T...>` | untagged by default; see `json::tag` |
+| `std::chrono::sys_time<D>` | RFC 3339 `"2026-10-05T14:03:07.250Z"`, with digits for `D`'s precision; `"2026-10-05"` when `D` is days |
+| `std::chrono::year_month_day` | `"2026-10-05"` |
+| `std::chrono::duration<R, P>` | number of ticks |
+| `json::Value` | any JSON |
+
+Errors name the field with a JSON Pointer:
+`field '/items/2/qty': expected integer, got string`.
+
+Reading is strict, because a lenient parser is one that disagrees with the next one in
+line:
+
+- **UTF-8 is checked.** Overlong forms, surrogates and stray bytes are 422 `json.invalid`.
+  Output is always valid UTF-8: a `std::string` holding invalid bytes is written with
+  U+FFFD in their place.
+- **Duplicate keys are rejected** (422 `json.duplicate_key`) in every object, including
+  ones the struct ignores. `{"a":1,"\u0061":2}` counts as a duplicate.
+- **Every dimension is limited** by `Config::json` (`json::ReadOptions`): nesting depth
+  (64), string length (1 MiB), members per object (1024) and elements per array
+  (100,000). Exceeding one is 422 `json.limit_exceeded`.
+- **Integers keep every bit.** `std::uint64_t` reads all 64 bits, and a value that does
+  not fit the member's type is an error, never a rounded number.
+
+#### Annotations
+
+```cpp
+struct [[= json::rename_all(json::camel_case), = json::deny_unknown_fields]] Signup {
+  std::string display_name;                                      // "displayName"
+  [[= json::rename("e-mail")]] std::string email;
+  [[= json::as_string]] std::uint64_t referrer_id = 0;           // "9007199254740993"
+  [[= json::omit_null]] std::optional<std::string> note;         // left out when empty
+  [[= json::unix_seconds]] std::chrono::sys_seconds joined{};    // 1759672987
+  [[= json::tag("type")]] std::variant<Card, BankTransfer> payment;
+};
+```
+
+| Annotation | On | Effect |
+|---|---|---|
+| `json::rename("name")` | member, enumerator, struct | The JSON name. On a struct, it is the struct's `json::tag` value. |
+| `json::rename_all(json::camel_case)` | struct, enum | Names for every member or enumerator without a `rename`: `snake_case`, `camel_case`, `pascal_case`, `kebab_case` or `screaming_snake_case`. |
+| `json::deny_unknown_fields` | struct | A member `T` does not have is 422 `json.unknown_field` instead of being ignored. `Config::json.deny_unknown_fields` turns this on everywhere. |
+| `json::omit_null` | optional member, struct | An empty optional is left out instead of written as `null`. |
+| `json::as_string` | integer member, struct | Written as a string, so JavaScript clients (exact only up to 2^53) see every digit. Reading accepts a string or a number. |
+| `json::unix_seconds`, `json::unix_millis` | `sys_time` member | An integer timestamp instead of RFC 3339. |
+| `json::tag("type")` | `std::variant` of structs | An internally tagged union: `{"type":"Card","number":"…"}`. The tag can be anywhere in the object. |
+
+An untagged `std::variant` reads the first alternative whose JSON type fits and that
+reads without error, so `std::variant<std::int64_t, std::string>` takes `5` or `"5"`.
+`std::monostate` is `null`. An alternative that fails is re-read as the next one, and
+when struct alternatives nest inside each other, the re-reading multiplies with depth.
+Re-reading is capped at 8 times the body's size, and beyond that the request is 422
+`json.limit_exceeded`. Use `json::tag` for unions of structs, especially recursive ones.
+
+Two members with the same JSON name, or an annotation on a member it cannot apply to,
+are compile errors.
+
+#### Validation
+
+```cpp
+struct NewUser {
+  [[= json::email]] std::string email;
+  [[= json::min_len(1), = json::max_len(64)]] std::string name;
+  [[= json::pattern("^[a-z0-9_]{3,20}$")]] std::string handle;
+  [[= json::min(13), = json::max(130)]] std::optional<int> age;
+  [[= json::max_len(10)]] std::vector<std::string> tags = {};
+};
+```
+
+| Annotation | On | Checks |
+|---|---|---|
+| `json::min(n)`, `json::max(n)` | numbers | Inclusive bounds. |
+| `json::min_len(n)`, `json::max_len(n)` | strings, arrays, maps | Length in code points (strings) or elements. |
+| `json::pattern("re")` | strings | A regular expression that must match somewhere; anchor it with `^…$`. |
+| `json::email` | strings | An address of the form `local@domain.tld`, within RFC 5321's lengths. |
+
+Checks on an `optional` apply when it holds a value. A failing check does not stop
+reading. Every failure is collected and returned as one 422 `json.validation`, with an
+`errors` entry per field:
+
+```json
+{"title":"Unprocessable Content","status":422,
+ "detail":"field '/email': must be an email address; field '/age': must be at least 13",
+ "code":"json.validation","request_id":"5f0c…",
+ "errors":[{"pointer":"/email","detail":"must be an email address"},
+           {"pointer":"/age","detail":"must be at least 13"}]}
+```
+
+`json::pattern` compiles the expression when the program compiles, so a bad pattern is a
+compile error. It matches in time linear in the input, without backtracking, so no
+request can make it slow. The syntax is a subset of ECMAScript's: classes, `\d \w \s`,
+anchors, groups, `|` and the usual quantifiers, but no backreferences or lookaround (see
+[`detail/regex.hpp`](include/crocket/detail/regex.hpp)). `json::validate(value)` runs the
+same checks on a value built in code.
+
+Outside a handler, `json::read(text, value)`, `json::from_string<T>(text)` and
+`json::to_string(value)` do the same mapping, and `json::parse(text)` returns a
+`json::Value` when the shape is not known.
 
 ### One struct for create and update: `json::from_path`
 
@@ -309,7 +432,7 @@ The return type is the response. Built-in responders:
 | `std::string`, `std::string_view`, `const char*` | 200 `text/plain` |
 | `Json<T>` | 200 `application/json` |
 | `std::optional<T>` | `T`, or 404 `not_found` when empty |
-| `std::expected<T, ApiError>` (alias `Result<T>`) | `T`, or the error envelope |
+| `std::expected<T, ApiError>` (alias `Result<T>`) | `T`, or the error as a problem+json body |
 | `Result<void>` / `void` | 204 |
 | `Created<T>`, `Accepted<T>` | 201 / 202, with an optional `Location` header |
 | `Status<T>` | Runtime status plus payload |
@@ -356,18 +479,25 @@ auto report() -> Csv { return {{{"name", "age"}, {"Ada", "36"}}}; }
 
 ### Errors
 
-Every error, whether from an extractor, a responder, the router or an exception, uses
-one JSON envelope and carries the request id:
+Every error, whether from an extractor, a responder, the router or an exception, is an
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem (`application/problem+json`)
+and carries the request id:
 
 ```json
-{"error":{"code":"user.email","message":"email must contain '@'","request_id":"5f0c…"}}
+{"title":"Unprocessable Content","status":422,"detail":"email must contain '@'",
+ "code":"user.email","request_id":"5f0c…"}
 ```
 
 `ApiError{status, code, message, detail}` is the type behind it:
 
+- `message` is the problem's `detail`, written for the client.
 - `code` is a stable, dotted identifier that clients can switch on.
+- `errors` lists failing fields as `{"pointer", "detail"}` pairs. `Json<T>` fills it
+  from validation and decoding errors.
+- `type` is an optional problem-type URI. It is left out when empty, which RFC 9457
+  reads as `about:blank`, and `title` is the status's reason phrase.
 - `detail` goes to the logs only, never to the client. The one exception is the
-  [dev profile](#dev-profile), which adds it to error bodies.
+  [dev profile](#dev-profile), which adds it to error bodies as `debug`.
 - An uncaught exception becomes 500 `internal`. Its `what()` is logged, never sent.
 - A response header with CR, LF or NUL in its value, or an invalid name, also becomes
   500 `internal`, so a `Location` built from user input cannot inject headers. If an
@@ -696,7 +826,7 @@ return crocket::build(Config::from_env()) // CROCKET_PROFILE=dev ./my_app
 
 Compared with the release defaults, the dev profile:
 
-- **Error bodies carry `detail`**, including an uncaught exception's `what()`, so you
+- **Error bodies carry `debug`** (`ApiError::detail`), including an uncaught exception's `what()`, so you
   see the cause in the client without reading logs. Release never sends it.
 - **Logs are readable lines** from `Logger`, coloured on a terminal unless `NO_COLOR`
   is set: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
@@ -770,6 +900,7 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 | Test | What it checks |
 |---|---|
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile and header validation. |
+| `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
 | `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight and 431. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
@@ -795,7 +926,11 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
   `auth.invalid`. The requirements list `auth.expired`; the `Authenticator` still
   returns `auth.expired` for expired tokens.
 - `Json<T>` with a non-JSON `content-type` is 415 `json.unsupported_media_type`.
-  Malformed JSON is 422 `json.invalid` as specified.
+  Malformed JSON is 422 `json.invalid` as specified. Validation failures, unknown fields
+  under `deny_unknown_fields`, duplicate keys and exceeded limits have their own codes
+  (see [JSON](#json)).
+- Error bodies are RFC 9457 problem details (`application/problem+json`). `message` is
+  sent as `detail`, and `ApiError::detail` stays in the logs.
 - `Task<T>` handlers are awaited synchronously on a worker thread (see
   [docs/ENGINE.md](docs/ENGINE.md)).
 

@@ -14,14 +14,23 @@
 
 namespace crocket {
 
-/// The error shape for every failure the framework or a handler reports.
-/// `message` goes to the client; `detail` only goes to logs.
+/// One invalid field of a request, listed under "errors" in the problem body.
+struct FieldError {
+  std::string pointer;  // RFC 6901 JSON Pointer into the request body: "/items/0/name"
+  std::string detail;   // "must be at least 1"
+};
+
+/// The error shape for every failure the framework or a handler reports, sent
+/// as RFC 9457 application/problem+json. `message` goes to the client (as
+/// "detail"); `detail` only goes to logs, and to the body in the dev profile.
 struct ApiError {
   int status = 500;
   std::string_view code = "internal";  // stable, dotted: "auth.expired"
   std::string message = "internal error";
   std::string detail = {};
   int grpc_status = -1;  // explicit gRPC status code; -1 derives it from `status`
+  std::vector<FieldError> errors = {};  // per-field failures, e.g. from validation
+  std::string_view type = {};           // problem type URI; empty means "about:blank"
 
   static ApiError not_found(std::string msg = "not found") { return {404, "not_found", std::move(msg), {}}; }
   static ApiError bad_request(std::string_view code, std::string msg) { return {400, code, std::move(msg), {}}; }
@@ -31,6 +40,18 @@ struct ApiError {
   static ApiError unavailable(std::string_view code, std::string msg) { return {503, code, std::move(msg), {}}; }
   static ApiError internal(std::string detail) { return {500, "internal", "internal error", std::move(detail)}; }
 };
+
+namespace json {
+/// Limits and strictness for reading JSON. Config::json sets them for every
+/// Json<T> body; exceeding a limit is 422 json.limit_exceeded.
+struct ReadOptions {
+  std::size_t max_depth = 64;                  // nested arrays and objects
+  std::size_t max_string_bytes = 1 << 20;      // one string or key, after unescaping
+  std::size_t max_object_members = 1024;       // members of one object
+  std::size_t max_array_elements = 100'000;    // elements of one array
+  bool deny_unknown_fields = false;            // as if every struct had [[= json::deny_unknown_fields]]
+};
+}  // namespace json
 
 using Clock = std::chrono::steady_clock;
 
@@ -69,6 +90,7 @@ struct Request {
   Clock::time_point received = Clock::now();
   Deadline deadline;
   bool dev_profile = false;  // error bodies include ApiError::detail
+  json::ReadOptions json_options;  // Config::json
 
   // Set by the router for the candidate currently being tried.
   std::string_view route_template;  // "/users/{id}"; "" while unmatched

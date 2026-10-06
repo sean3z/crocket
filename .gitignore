@@ -4,3 +4,5 @@
 # clangd index and the compile_commands.json symlink ./dev creates
 /.cache/
 /compile_commands.json
+# ./dev bench results (machine-specific)
+/bench/results/

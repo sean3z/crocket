@@ -6,7 +6,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 
 APT_PACKAGES=(g++-16 cmake ninja-build ccache lld libssl-dev zlib1g-dev perl pkg-config
-              git curl openssl gdb inotify-tools
+              git curl openssl gdb inotify-tools nghttp2-client
               make m4 bzip2 gpgv)   # the last line is for ./dev gcc
 GCC_VERSION=16.2.0
 WATCH_DIRS=(include src examples tests CMakeLists.txt)
@@ -33,6 +33,17 @@ ${B}./dev${R} <command> [args]
   check                     Release tree (build/, -O2) plus the full ctest: run
                             this before calling a change done
   clean [dev|release|all]   Delete build trees (default: dev)
+  bench [options] [load|micro] [scenario...]
+                            Benchmarks on the release tree: load (h2load against
+                            crocket_bench over http/1.1 and h2c) and micro (in-process
+                            timings and allocations). Both by default. Options:
+                              --save NAME     keep the results as bench/results/NAME.tsv
+                              --compare NAME  show the change from NAME; exits 1 if
+                                              anything is more than 10% worse
+                              --duration S    seconds per load run (default 10)
+                              --clients N     connections per load run (default 64)
+                            Numbers compare only on the same machine. h2load comes from
+                            nghttp2-client (./dev setup); $H2LOAD overrides the path.
   h2o-update [ref]          Pin h2o to the newest master commit (or a branch, tag
                             or commit), then run ./dev check
 
@@ -165,6 +176,137 @@ cmd_clean() {
   esac
 }
 
+# ---- bench -----------------------------------------------------------------------
+
+BENCH_PORT=18600
+# name method path [body]
+BENCH_SCENARIOS=(
+  "plaintext GET /plaintext"
+  "json GET /json"
+  "orders POST /orders body"
+  "router GET /api/v39/users/7/orders/9"
+  "wait GET /wait"
+)
+
+bench_body() { # a 1 KB order for POST /orders
+  local items='' i
+  for i in 0 1 2 3 4 5 6 7; do
+    items+="${items:+,}{\"sku\":\"SKU-$((i * 7919))\",\"name\":\"Widget model $i\",\"qty\":$((i + 1)),\"price\":9.99}"
+  done
+  printf '{"id":1001,"email":"customer@example.com","tags":["priority","gift","eu"],"items":[%s]}' "$items"
+}
+
+# One h2load run -> rows "name.proto<TAB>metric<TAB>value<TAB>better" on stdout.
+bench_load_one() { # name method path body proto work
+  local name=$1 method=$2 path=$3 body=$4 proto=$5 work=$6
+  local args=(-c "$BENCH_CLIENTS" -t "$BENCH_THREADS" -D "$BENCH_DURATION" --warm-up-time 1
+              --log-file "$work/$name.$proto.log")
+  [[ $proto == h1 ]] && args+=(--h1 -m 1) || args+=(-m 10)
+  [[ -n $body ]] && args+=(-d "$work/body.json" -H 'content-type: application/json')
+  [[ $method == GET ]] || [[ -n $body ]] || args+=(-H ":method: $method")
+  local out; out=$("$H2LOAD" "${args[@]}" "http://127.0.0.1:$BENCH_PORT$path" 2>&1) || { warn "$name/$proto: h2load failed"; echo "$out" >&2; return; }
+  local rps done ok
+  rps=$(sed -n 's/^finished in [^,]*, \([0-9.]*\) req\/s.*/\1/p' <<<"$out")
+  read -r done ok < <(sed -n 's/^requests: [0-9]* total, [0-9]* started, \([0-9]*\) done, \([0-9]*\) succeeded.*/\1 \2/p' <<<"$out")
+  # Latency percentiles from the per-request log (third column: microseconds).
+  local pct; pct=$(cut -f3 "$work/$name.$proto.log" | sort -n | awk '{a[NR]=$1} END {
+    if (NR == 0) { print "0 0"; exit }
+    p50 = a[int(NR * 0.50) + (NR * 0.50 > int(NR * 0.50))]; p99 = a[int(NR * 0.99) + (NR * 0.99 > int(NR * 0.99))]
+    printf "%.3f %.3f", p50 / 1000, p99 / 1000 }')
+  local p50 p99; read -r p50 p99 <<<"$pct"
+  printf '%s.%s\treq_per_s\t%s\thigher\n' "$name" "$proto" "${rps:-0}"
+  printf '%s.%s\tp50_ms\t%s\tlower\n' "$name" "$proto" "$p50"
+  printf '%s.%s\tp99_ms\t%s\tlower\n' "$name" "$proto" "$p99"
+  printf '%s.%s\tnon_2xx\t%s\tlower\n' "$name" "$proto" "$(( ${done:-0} - ${ok:-0} ))"
+  rm -f "$work/$name.$proto.log"
+}
+
+bench_load() { # [scenario...] -> rows
+  command -v "$H2LOAD" >/dev/null || die "h2load not found; run ./dev setup (nghttp2-client) or set H2LOAD"
+  local work; work=$(mktemp -d)
+  bench_body >"$work/body.json"
+  CROCKET_PORT=$BENCH_PORT "$(tree release)/crocket_bench" >"$work/server.log" 2>&1 &
+  local pid=$!
+  # shellcheck disable=SC2064
+  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null; rm -rf '$work'" RETURN
+  local i; for i in $(seq 50); do curl -sf -o /dev/null "http://127.0.0.1:$BENCH_PORT/healthz" && break; sleep 0.1; done
+  curl -sf -o /dev/null "http://127.0.0.1:$BENCH_PORT/healthz" || { cat "$work/server.log" >&2; die "crocket_bench did not start"; }
+  local sc name method path body proto
+  for sc in "${BENCH_SCENARIOS[@]}"; do
+    read -r name method path body <<<"$sc"
+    if (($# > 0)) && [[ " $* " != *" $name "* ]]; then continue; fi
+    for proto in h1 h2c; do
+      say "load: $name over $proto (${BENCH_DURATION}s, $BENCH_CLIENTS connections)"
+      bench_load_one "$name" "$method" "$path" "$body" "$proto" "$work"
+    done
+  done
+}
+
+bench_print() { # file
+  awk -F'\t' '{ printf "  %-22s %-14s %12s\n", $1, $2, $3 }' "$1"
+}
+
+bench_compare() { # baseline current -> table; returns 1 on a >10% regression
+  awk -F'\t' -v OFS='\t' '
+    NR == FNR { base[$1 FS $2] = $3; next }
+    {
+      key = $1 FS $2; b = base[key]; c = $3; mark = ""
+      if (b == "") { printf "  %-22s %-14s %12s %12s\n", $1, $2, "-", c; next }
+      if (b + 0 == 0) change = (c + 0 == 0) ? 0 : 100
+      else change = (c - b) / b * 100
+      worse = ($4 == "higher") ? -change : change
+      # Ignore tiny absolute differences in counts and sub-0.05 ms latencies.
+      if (worse > 10 && !(($2 == "non_2xx" || $2 == "allocs_per_op") && c - b < 1) && !($2 ~ /_ms$/ && c - b < 0.05)) { mark = "  WORSE"; bad = 1 }
+      else if (worse < -10) mark = "  better"
+      printf "  %-22s %-14s %12s %12s %+8.1f%%%s\n", $1, $2, b, c, change, mark
+    }
+    END { exit bad }' "$1" "$2"
+}
+
+cmd_bench() {
+  local save='' compare='' kinds=() scenarios=()
+  BENCH_DURATION=10 BENCH_CLIENTS=64
+  BENCH_THREADS=$(( $(nproc) >= 8 ? 4 : 2 ))
+  H2LOAD=${H2LOAD:-h2load}
+  while (($#)); do
+    case $1 in
+      --save) save=$2; shift 2 ;;
+      --compare) compare=$2; shift 2 ;;
+      --duration) BENCH_DURATION=$2; shift 2 ;;
+      --clients) BENCH_CLIENTS=$2; shift 2 ;;
+      load|micro) kinds+=("$1"); shift ;;
+      -*) die "unknown option $1" ;;
+      *) scenarios+=("$1"); shift ;;
+    esac
+  done
+  ((${#kinds[@]})) || kinds=(load micro)
+  if [[ -n $compare && ! -f $ROOT/bench/results/$compare.tsv ]]; then die "no bench/results/$compare.tsv; make one with --save $compare"; fi
+  build release crocket_bench crocket_microbench
+  local out; out=$(mktemp)
+  local k; for k in "${kinds[@]}"; do
+    case $k in
+      micro) say "micro: in-process timings and allocations"; "$(tree release)/crocket_microbench" >>"$out" ;;
+      load) bench_load "${scenarios[@]}" >>"$out" ;;
+    esac
+  done
+  local rc=0
+  if [[ -n $compare ]]; then
+    ok "compared with $compare (baseline, now, change)"
+    bench_compare "$ROOT/bench/results/$compare.tsv" "$out" || rc=1
+    ((rc == 0)) || warn "more than 10% worse on a line marked WORSE"
+  else
+    ok "results"
+    bench_print "$out"
+  fi
+  if [[ -n $save ]]; then
+    mkdir -p "$ROOT/bench/results"
+    cp "$out" "$ROOT/bench/results/$save.tsv"
+    ok "saved as bench/results/$save.tsv"
+  fi
+  rm -f "$out"
+  return "$rc"
+}
+
 # ---- h2o -------------------------------------------------------------------------
 
 H2O_REPO=h2o/h2o
@@ -268,7 +410,7 @@ cmd_watch() {
 cmd=${1:-help}
 shift || true
 case $cmd in
-  setup|gcc|build|run|watch|test|check|clean) "cmd_$cmd" "$@" ;;
+  setup|gcc|build|run|watch|test|check|clean|bench) "cmd_$cmd" "$@" ;;
   h2o-update) cmd_h2o_update "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 1 ;;

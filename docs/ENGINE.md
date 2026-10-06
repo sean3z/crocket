@@ -53,16 +53,30 @@ Handlers may block, for example on `Pool::checkout`, without stalling I/O for ot
 connections. The two sides communicate through two queues:
 
 - **Jobs:** the event loop pushes a closure owning the `Request`. A worker runs
-  `Crocket::handle`, which includes fairings, routing, extractors and the handler.
-- **Completions:** the worker posts `{txn, Response}` with `h2o_multithread_send_message`.
-  That writes to an eventfd the loop watches, so the loop wakes and responds.
+  `Crocket::handle_async`, which includes fairings, routing, extractors and the handler.
+- **Completions:** whichever worker finishes the request posts `{txn, Response}` with
+  `h2o_multithread_send_message`. That writes to an eventfd the loop watches, so the
+  loop wakes and responds.
 
 Workers never touch an `h2o_req_t`. Each transaction gets a monotonically increasing id,
 and a completion whose id is no longer live is dropped. That happens when the client
 disconnected or the deadline already produced a 504.
 
-`Task<T>` handlers are awaited with `sync_wait` on the worker. Coroutines that resume on
-other threads work, but a waiting worker is occupied until the task finishes.
+Each request lives in a heap-allocated `detail::Exchange` from the start of the pipeline,
+so the `Request` and `Response` stay at one address while a handler refers to them. A
+`Task<T>` handler runs on the worker until it first suspends. The worker then returns to
+the pool, and whatever the task awaits resumes it through the engine (the `Executor`), as
+a job on a second queue that workers take before new requests. When the task finishes,
+that worker writes the response, runs `on_response` fairings and posts the completion. A
+task that finishes without suspending takes the ordinary path.
+
+`Task<T>` wraps every `co_await` on a foreign awaitable: if the awaitable resumes the
+task on another thread, the task hops back to a worker before its code continues, with
+the request's log context and exchange installed. `sleep_for` (one timer thread for the
+process, woken early by the request's stop token) and `callback<T>()` resume on a worker
+themselves. `max_in_flight` counts suspended requests, and the drain at shutdown waits
+for them as well as for busy workers. `LocalClient` resumes tasks on a small pool of its
+own.
 
 ## Per-transaction flow
 

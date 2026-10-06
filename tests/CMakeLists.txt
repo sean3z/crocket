@@ -8,6 +8,11 @@ add_executable(crocket_json_test json.cpp)
 target_link_libraries(crocket_json_test PRIVATE crocket)
 add_test(NAME json COMMAND crocket_json_test)
 
+# Async handlers: suspension, resumption on workers, context, callback<T>, sleep_for.
+add_executable(crocket_async_test async.cpp)
+target_link_libraries(crocket_async_test PRIVATE crocket)
+add_test(NAME async COMMAND crocket_async_test)
+
 add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)

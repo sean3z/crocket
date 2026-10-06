@@ -9,6 +9,11 @@
 #include "router.hpp"
 
 #include <algorithm>
+#include <thread>
+#include <semaphore>
+#include <mutex>
+#include <deque>
+#include <condition_variable>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
@@ -292,16 +297,135 @@ void Crocket::prepare(Request& req) const {
   req.json_options = core_->config.json;
 }
 
+namespace detail {
+namespace {
+
+thread_local Exchange* t_exchange = nullptr;
+
+/// Marks the request this thread runs, for current_exchange().
+struct ExchangeScope {
+  Exchange* prev;
+  explicit ExchangeScope(Exchange* ex) : prev(std::exchange(t_exchange, ex)) {}
+  ~ExchangeScope() { t_exchange = prev; }
+};
+
+/// Resumes tasks when no engine is running (LocalClient, tasks outside requests).
+class FallbackPool final : public Executor {
+ public:
+  FallbackPool() {
+    for (int i = 0; i < 4; ++i) threads_.emplace_back([this] { loop(); });
+  }
+  ~FallbackPool() override {
+    {
+      std::lock_guard lk(mu_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    for (auto& t : threads_) t.join();
+  }
+  void post(std::move_only_function<void()> job) override {
+    {
+      std::lock_guard lk(mu_);
+      jobs_.push_back(std::move(job));
+    }
+    cv_.notify_one();
+  }
+
+ private:
+  void loop() {
+    for (;;) {
+      std::move_only_function<void()> job;
+      {
+        std::unique_lock lk(mu_);
+        cv_.wait(lk, [&] { return stop_ || !jobs_.empty(); });
+        if (jobs_.empty()) return;
+        job = std::move(jobs_.front());
+        jobs_.pop_front();
+      }
+      job();
+    }
+  }
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<std::move_only_function<void()>> jobs_;
+  std::vector<std::thread> threads_;
+  bool stop_ = false;
+};
+
+Executor& fallback_pool() {
+  static FallbackPool pool;
+  return pool;
+}
+
+}  // namespace
+
+Exchange* current_exchange() noexcept { return t_exchange; }
+
+void resume_on_worker(Exchange* ex, std::coroutine_handle<> h) {
+  if (ex) ex->post(h);
+  else fallback_pool().post([h] { h.resume(); });
+}
+
+void Exchange::post(std::coroutine_handle<> h) {
+  Executor* ex = app_.core_->executor.load();
+  (ex ? *ex : fallback_pool()).post([this, h] {
+    ExchangeScope current{this};
+    log::detail::RequestScope scope{app_.core_->log, &req};
+    h.resume();
+  });
+}
+
+void Exchange::handler_done() {
+  int expected = Running;
+  if (state_.compare_exchange_strong(expected, FinishedEarly)) return;  // the pipeline completes it
+  app_.complete(this);
+}
+
+void respond_exception(std::exception_ptr e, Request& rq, Response& rs) {
+  rs = Response{};
+  try {
+    std::rethrow_exception(e);
+  } catch (const ApiError& err) {
+    write_error(err, rq, rs);
+  } catch (const std::exception& err) {
+    write_error(ApiError::internal(std::string("uncaught exception in ") + std::string(rq.handler) + ": " + err.what()),
+                rq, rs);
+  } catch (...) {
+    write_error(ApiError::internal("uncaught non-std exception in " + std::string(rq.handler)), rq, rs);
+  }
+}
+
+void async_handler_done(Request& rq) { rq.exchange->handler_done(); }
+
+}  // namespace detail
+
+void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&&)> done) {
+  run(new detail::Exchange(*this, std::move(req), std::move(done)));
+}
+
 Response Crocket::handle(Request req) {
+  // Usually the response is back before handle_async returns: no waiting then.
+  enum : int { Pending, Waiting, Delivered };
+  std::atomic<int> state{Pending};
+  std::binary_semaphore ready{0};
+  Response out;
+  handle_async(std::move(req), [&](Response&& res) {
+    out = std::move(res);
+    if (state.exchange(Delivered) == Waiting) ready.release();
+  });
+  if (state.exchange(Waiting) != Delivered) ready.acquire();
+  return out;
+}
+
+void Crocket::run(detail::Exchange* ex) {
+  Request& req = ex->req;
+  Response& res = ex->res;
+  req.exchange = ex;
   prepare(req);
+  detail::ExchangeScope current{ex};
   log::detail::RequestScope scope{core_->log, &req};  // log lines from here on carry this request
   core_->stats.in_flight.fetch_add(1, std::memory_order_relaxed);
-  struct Dec {
-    detail::Stats& s;
-    ~Dec() { s.in_flight.fetch_sub(1, std::memory_order_relaxed); }
-  } dec{core_->stats};
 
-  Response res;
   bool finished = false;
   if (auto host = req.header("host").value_or("");
       !detail::host_allowed(host, core_->config.allowed_hosts, req.dev_profile)) {
@@ -322,9 +446,18 @@ Response Crocket::handle(Request req) {
       break;
     }
   }
-  if (!finished) res = run_routes(req);
-  finish(req, res);
-  return res;
+  if (!finished && run_routes(req, res) && ex->suspend()) return;  // the handler completes it
+  complete(ex);
+}
+
+void Crocket::complete(detail::Exchange* ex) {
+  std::unique_ptr<detail::Exchange> owned(ex);
+  finish(ex->req, ex->res);
+  core_->stats.in_flight.fetch_sub(1, std::memory_order_relaxed);
+  auto done = std::move(ex->done_);
+  Response res = std::move(ex->res);
+  owned.reset();  // the request goes before the response is delivered
+  done(std::move(res));
 }
 
 Response Crocket::reject(Request& req, const ApiError& err) {
@@ -362,11 +495,10 @@ void Crocket::finish(const Request& req, Response& res) {
   }
 }
 
-Response Crocket::run_routes(Request& req) {
-  Response res;
+bool Crocket::run_routes(Request& req, Response& res) {
   if (!core_->ignited) {
     write_error(ApiError::internal("request handled before ignite"), req, res);
-    return res;
+    return false;
   }
   auto candidates = core_->router->match(req.method, req.path);
   bool forwarded = false;
@@ -375,12 +507,16 @@ Response Crocket::run_routes(Request& req) {
     req.route_template = cand.def->path;
     req.handler = cand.def->handler;
     req.captures = std::move(cand.captures);
-    if (cand.def->builtin != detail::Builtin::None) return builtin(cand.def->builtin, req);
+    if (cand.def->builtin != detail::Builtin::None) {
+      res = builtin(cand.def->builtin, req);
+      return false;
+    }
 
     res = Response{};
     try {
       auto out = cand.def->invoke(req, res);
-      if (out.kind == detail::Outcome::Done) return res;
+      if (out.kind == detail::Outcome::Async) return true;
+      if (out.kind == detail::Outcome::Done) return false;
       if (out.kind == detail::Outcome::Forward) {
         forwarded = true;
         forward_detail = std::string(req.handler) + ": " + out.detail;
@@ -389,20 +525,10 @@ Response Crocket::run_routes(Request& req) {
       res = Response{};
       write_error(out.error, req, res);
       res.failure_kind = out.failure_kind;
-      return res;
-    } catch (const ApiError& e) {
-      res = Response{};
-      write_error(e, req, res);
-      return res;
-    } catch (const std::exception& e) {
-      res = Response{};
-      write_error(ApiError::internal(std::string("uncaught exception in ") + std::string(req.handler) + ": " + e.what()),
-                  req, res);
-      return res;
+      return false;
     } catch (...) {
-      res = Response{};
-      write_error(ApiError::internal("uncaught non-std exception in " + std::string(req.handler)), req, res);
-      return res;
+      detail::respond_exception(std::current_exception(), req, res);
+      return false;
     }
   }
 
@@ -410,13 +536,13 @@ Response Crocket::run_routes(Request& req) {
   if (forwarded) {
     write_error(ApiError{404, "path.invalid", "not found", forward_detail}, req, res);
     res.failure_kind = "path";
-    return res;
+    return false;
   }
   req.route_template = {};
   req.handler = {};
   if (grpc::is_grpc_request(req)) {
     write_error(grpc::error(grpc::Code::Unimplemented, "grpc.unimplemented", "unknown method " + req.path), req, res);
-    return res;
+    return false;
   }
   auto allowed = core_->router->allowed(req.path);
   if (!allowed.empty()) {
@@ -427,10 +553,10 @@ Response Crocket::run_routes(Request& req) {
     }
     write_error(ApiError{405, "method.not_allowed", "method not allowed", {}}, req, res);
     res.headers.set("allow", allow);
-    return res;
+    return false;
   }
   write_error(ApiError::not_found(), req, res);
-  return res;
+  return false;
 }
 
 Response Crocket::builtin(detail::Builtin b, Request& /*req*/) {

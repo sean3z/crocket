@@ -4,6 +4,7 @@
 //   ./build/crocket_serve                                 # http://0.0.0.0:8000
 //   CROCKET_PORT=8443 CROCKET_TLS_CERT=cert.pem CROCKET_TLS_KEY=key.pem ./build/crocket_serve
 //   CROCKET_DEBUG_ROUTES=1 ./build/crocket_serve          # exposes GET /__routes
+//   CROCKET_WORKERS=2 ./build/crocket_serve                # handler threads (default: one per core)
 //
 //   curl localhost:8000/api/users/1
 //   curl -X POST localhost:8000/api/users -H 'authorization: Bearer alice' \
@@ -116,6 +117,14 @@ auto slow(std::uint32_t ms, Deadline d) -> Result<std::string, ApiError> {
   return std::format("slept {} ms", ms);
 }
 
+// The same wait without holding a worker: the task suspends, and the worker
+// serves other requests until the timer (or the deadline) wakes it.
+[[= http::get("/nap/{ms}")]]
+auto nap(std::uint32_t ms, Deadline d) -> Task<std::string> {
+  co_await sleep_for(std::chrono::milliseconds(ms));
+  co_return d.expired() ? std::string("woken by the deadline") : std::format("napped {} ms", ms);
+}
+
 /// A custom request header, read the same way over HTTP/1.1 and HTTP/2.
 [[= http::get("/tenant")]]
 auto tenant(Header<"x-tenant"> tenant) -> std::string { return *tenant; }
@@ -169,6 +178,7 @@ int main() {
   launch.port = static_cast<std::uint16_t>(std::stoi(env("CROCKET_PORT", "8000")));
   launch.tls_cert = env("CROCKET_TLS_CERT");
   launch.tls_key = env("CROCKET_TLS_KEY");
+  if (auto w = env("CROCKET_WORKERS"); !w.empty()) launch.workers = unsigned(std::stoi(w));
 
   return build(cfg)
       .manage(std::move(pool))  // Pool::ready() also drives GET /readyz

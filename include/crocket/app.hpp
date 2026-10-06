@@ -10,6 +10,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <coroutine>
+#include <functional>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -163,6 +165,42 @@ struct ReadyCheck {
   bool (*check)(void*);
 };
 
+/// Runs jobs on worker threads: the engine's pool while launched.
+struct Executor {
+  virtual ~Executor() = default;
+  virtual void post(std::move_only_function<void()> job) = 0;
+};
+
+/// One request in flight. Owns the Request and Response at a fixed address
+/// while the handler, possibly suspended across threads, refers to them, and
+/// delivers the Response once.
+class Exchange {
+ public:
+  using Done = std::move_only_function<void(Response&&)>;
+  Exchange(Crocket& app, Request&& rq, Done done) : req(std::move(rq)), app_(app), done_(std::move(done)) {}
+
+  Request req;
+  Response res;
+
+  /// The async handler finished filling `res`. Completes the request, unless
+  /// the pipeline has not yet seen it suspend (it completes it then).
+  void handler_done();
+  /// Resumes `h` on a worker with this request's context.
+  void post(std::coroutine_handle<> h);
+
+ private:
+  friend class crocket::Crocket;
+  enum : int { Running, Suspended, FinishedEarly };
+  /// After the handler suspended: false if it has finished meanwhile.
+  bool suspend() {
+    int expected = Running;
+    return state_.compare_exchange_strong(expected, Suspended);
+  }
+  Crocket& app_;
+  Done done_;
+  std::atomic<int> state_{Running};
+};
+
 /// Counters the framework maintains itself (read by Metrics).
 struct Stats {
   std::atomic<std::int64_t> in_flight{0};
@@ -180,6 +218,7 @@ struct Core {
   Config config;
   std::vector<IpRange> trusted_proxies;  // parsed at ignite
   std::shared_ptr<log::detail::Hub> log;  // where this app's log lines go
+  std::atomic<Executor*> executor{nullptr};  // the engine's workers while launched
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
   std::vector<ReadyCheck> ready_checks;
@@ -267,14 +306,19 @@ class Crocket {
   int launch(LaunchOptions opts);
 
   /// The full request pipeline: request id, fairings, routing, extractors,
-  /// handler, responder, error mapping. Used by the engine and LocalClient.
+  /// handler, responder, error mapping. `done` gets the response exactly once:
+  /// before handle_async returns, or later, from a worker, when an async
+  /// handler finishes. Used by the engine.
+  void handle_async(Request&& req, std::move_only_function<void(Response&&)> done);
+  /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);
 
   /// Build an error response for a request rejected before routing
   /// (limits, timeouts). Runs on_response fairings so logs/metrics see it.
+  Response reject(Request& req, const ApiError& err);
+
   /// Returns once every log line so far has been written (the writer is asynchronous).
   void flush_logs() const;
-  Response reject(Request& req, const ApiError& err);
 
   /// Assign request id, deadline and state pointer. Idempotent.
   void prepare(Request& req) const;
@@ -284,7 +328,11 @@ class Crocket {
   [[nodiscard]] detail::Core& core() { return *core_; }
 
  private:
-  Response run_routes(Request& req);
+  friend class detail::Exchange;
+  void run(detail::Exchange* ex);       // the pipeline; completes ex unless its handler suspended
+  void complete(detail::Exchange* ex);  // finish, deliver and free
+  /// Routes req; true if the handler suspended (it completes the exchange later).
+  bool run_routes(Request& req, Response& res);
   Response builtin(detail::Builtin b, Request& req);
   void finish(const Request& req, Response& res);
   std::unique_ptr<detail::Core> core_;

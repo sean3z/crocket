@@ -186,6 +186,7 @@ BENCH_SCENARIOS=(
   "orders POST /orders body"
   "router GET /api/v39/users/7/orders/9"
   "wait GET /wait"
+  "wait_async GET /wait_async"
 )
 
 bench_body() { # a 1 KB order for POST /orders

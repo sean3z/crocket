@@ -7,6 +7,7 @@
 // Nothing here includes the wire engine (h2o).
 
 #include "crocket/app.hpp"
+#include "crocket/async.hpp"
 #include "crocket/extract.hpp"
 #include "crocket/fairings.hpp"
 #include "crocket/grpc.hpp"

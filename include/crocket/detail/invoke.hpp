@@ -25,7 +25,9 @@ struct Binding {
 };
 
 struct Outcome {
-  enum Kind : std::uint8_t { Done, Forward, Failed };
+  // Async: the handler returned a task that suspended; it fills the response
+  // and finishes the request itself (see Exchange).
+  enum Kind : std::uint8_t { Done, Forward, Failed, Async };
   Kind kind = Done;
   ApiError error = {};              // when Failed
   std::string_view failure_kind;    // "path", "json", "auth", ...
@@ -107,19 +109,60 @@ decltype(auto) pass(Slot<A>& slot) {
   else return std::move(*slot);
 }
 
+/// An exception from a handler as the response it becomes (500, or the ApiError thrown).
+void respond_exception(std::exception_ptr e, Request& rq, Response& rs);
+/// The async handler of rq has finished filling the response.
+void async_handler_done(Request& rq);
+
+/// A coroutine that starts when called and frees itself at the end.
+struct Detached {
+  struct promise_type {
+    Detached get_return_object() noexcept { return {}; }
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    std::suspend_never final_suspend() noexcept { return {}; }
+    void return_void() noexcept {}
+    void unhandled_exception() noexcept { std::terminate(); }
+  };
+};
+
+/// Runs an async handler's result to completion, then turns its value into the
+/// response with `on_value`. Runs inline until the task first suspends.
+template <class Aw, class OnValue>
+Detached drive(Aw aw, Request& rq, Response& rs, OnValue on_value) {
+  try {
+    if constexpr (std::is_void_v<await_result_t<Aw>>) {
+      co_await worker_await(std::move(aw));
+      on_value();
+    } else {
+      on_value(co_await worker_await(std::move(aw)));
+    }
+  } catch (...) {
+    respond_exception(std::current_exception(), rq, rs);
+  }
+  async_handler_done(rq);
+}
+
+/// Starts an awaitable handler result; the request finishes when it does.
+template <class R, class OnValue>
+Outcome start_async(R&& r, Request& rq, Response& rs, OnValue on_value) {
+  drive(std::forward<R>(r), rq, rs, std::move(on_value));
+  Outcome out;
+  out.kind = Outcome::Async;
+  return out;
+}
+
 template <class R>
-void respond_result(R&& r, const Request& rq, Response& rs) {
+Outcome respond_result(R&& r, Request& rq, Response& rs) {
   using U = std::remove_cvref_t<R>;
   if constexpr (Awaitable<U>) {
-    using V = await_result_t<U>;
-    if constexpr (std::is_void_v<V>) {
-      sync_wait(std::forward<R>(r));
-      Responder<NoContent>::respond(NoContent{}, rq, rs);
-    } else {
-      respond_value(sync_wait(std::forward<R>(r)), rq, rs);
-    }
+    if constexpr (std::is_void_v<await_result_t<U>>)
+      return start_async(std::forward<R>(r), rq, rs, [&rq, &rs] { Responder<NoContent>::respond(NoContent{}, rq, rs); });
+    else
+      return start_async(std::forward<R>(r), rq, rs,
+                         [&rq, &rs](auto&& v) { respond_value(std::forward<decltype(v)>(v), rq, rs); });
   } else {
     respond_value(std::forward<R>(r), rq, rs);
+    return {};
   }
 }
 
@@ -150,7 +193,7 @@ Outcome invoke_impl(Request& rq, Response& rs, type_list<A...>, std::index_seque
     // A void handler that wrote to Response& keeps what it wrote.
     if constexpr (!(is_raw_response<A> || ...)) Responder<NoContent>::respond(NoContent{}, rq, rs);
   } else {
-    respond_result(call(), rq, rs);
+    return respond_result(call(), rq, rs);
   }
   return out;
 }

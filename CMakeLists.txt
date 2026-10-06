@@ -69,6 +69,13 @@ if(CROCKET_BUILD_EXAMPLES)
   target_link_libraries(crocket_grpc PRIVATE crocket)
 endif()
 
+# Benchmarks (./dev bench). Built only on request, never by `all` or ctest.
+add_executable(crocket_bench EXCLUDE_FROM_ALL bench/server.cpp)
+target_link_libraries(crocket_bench PRIVATE crocket)
+add_executable(crocket_microbench EXCLUDE_FROM_ALL bench/micro.cpp)
+target_link_libraries(crocket_microbench PRIVATE crocket)
+target_include_directories(crocket_microbench PRIVATE src)  # the router, measured directly
+
 if(CROCKET_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

@@ -1029,6 +1029,33 @@ don't need it.
 (release), configured from `CMakePresets.json`. `./dev` picks the compiler in this
 order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
+### Benchmarks
+
+```bash
+./dev bench --save main          # on main: load and micro benchmarks, kept as a baseline
+./dev bench --compare main       # on a branch: the change from main; exits 1 if >10% worse
+./dev bench micro                # in-process only (seconds)
+./dev bench load router wait     # chosen load scenarios
+```
+
+`load` runs [h2load](https://nghttp2.org/documentation/h2load-howto.html) against
+`crocket_bench` ([bench/server.cpp](bench/server.cpp)) over HTTP/1.1 and h2c, and reports
+requests per second, p50 and p99 latency, and non-2xx responses:
+
+| Scenario | Request | Measures |
+|---|---|---|
+| `plaintext` | `GET /plaintext` | The pipeline with the least work |
+| `json` | `GET /json` | Encoding a small struct |
+| `orders` | `POST /orders` | Decoding and encoding a 1 KB order |
+| `router` | `GET /api/v39/users/7/orders/9` | A route matched last among about 200 |
+| `wait` | `GET /wait` | A handler that waits 20 ms, so worker occupancy |
+
+`micro` ([bench/micro.cpp](bench/micro.cpp)) times routing, the in-process request
+pipeline and JSON, and counts heap allocations per operation. Results are saved in
+`bench/results/`, which git ignores: numbers compare only on the same machine, with the
+same load on it. The load generator shares the machine with the server, so treat
+differences of a few percent as noise. `--duration` and `--clients` change the load.
+
 ## Tests
 
 | Test | What it checks |

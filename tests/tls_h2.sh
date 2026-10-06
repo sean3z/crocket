@@ -28,7 +28,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$WORK/key.pem" -out "$WORK/cert.pem" >/dev/null 2>&1 || { echo "openssl failed"; exit 1; }
 
 # A 15 s deadline leaves room for the 11 s handler below.
-CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 \
+CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 CROCKET_WORKERS=2 \
   "$SERVE" >"$WORK/serve.log" 2>&1 &
 SRV_PID=$!
 wait_up "$BASE/healthz" || { echo "server did not start"; cat "$WORK/serve.log"; exit 1; }
@@ -90,6 +90,20 @@ for proto in --http2 --http1.1; do
   expect "too many headers -> 431" "431" \
     "$(for i in $(seq 1 110); do echo "x-h$i: v"; done | curl -sk $proto -o /dev/null -w '%{http_code}' -H @- "$BASE/healthz")"
 done
+
+echo "[async handlers]"
+# 2 workers, 20 requests that each wait 500 ms: a blocking handler needs 5 s,
+# a suspended one frees its worker, so all 20 finish in about 0.5 s.
+start=$(date +%s%N)
+naps=()
+for i in $(seq 20); do curl -sk -o "$WORK/nap.$i" "$BASE/api/nap/500" & naps+=($!); done
+wait "${naps[@]}"  # not a bare wait: the server runs in the background too
+took=$(( ($(date +%s%N) - start) / 1000000 ))
+expect "20 suspended handlers on 2 workers" "20" "$(cat "$WORK"/nap.* | grep -o 'napped 500 ms' | wc -l | tr -d ' ')"
+expect_match "  ... at the same time (${took} ms)" "^yes$" "$( ((took < 2500)) && echo yes || echo no)"
+expect "a deadline wakes a sleeping task: 504" "504" \
+  "$(curl -sk -o /dev/null -w '%{http_code}' -H 'grpc-timeout: 200m' "$BASE/api/nap/5000")"
+expect "the server is free again" "napped 1 ms" "$(curl -sk "$BASE/api/nap/1")"
 
 echo "[http/1.1 bodies]"
 expect "chunked upload" "201" \

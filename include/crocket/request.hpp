@@ -70,7 +70,10 @@ struct Deadline {
   }
 };
 
-namespace detail { class StateRegistry; }
+namespace detail {
+class StateRegistry;
+class Exchange;
+}  // namespace detail
 
 struct Request {
   http::Method method = http::Method::Get;
@@ -133,6 +136,7 @@ struct Request {
 
   // Framework-internal: managed state lookup for State<T>.
   const detail::StateRegistry* state_registry = nullptr;
+  detail::Exchange* exchange = nullptr;  // set while the pipeline runs
 };
 
 struct Response {

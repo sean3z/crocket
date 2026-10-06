@@ -4,7 +4,8 @@
 //   json       GET  /json                       encode a small struct
 //   orders     POST /orders                     decode and re-encode a 1 KB order
 //   router     GET  /api/v39/users/7/orders/9   matched last among ~200 routes
-//   wait       GET  /wait                       the handler waits 20 ms (worker occupancy)
+//   wait       GET  /wait                       the handler blocks its worker for 20 ms
+//   wait_async GET  /wait_async                 the handler suspends for 20 ms (no worker held)
 //
 //   CROCKET_PORT (18600), CROCKET_WORKERS (0: the default), CROCKET_BENCH_LOGGER=1
 //   to attach Logger (lines go to a sink that drops them).
@@ -52,6 +53,12 @@ auto orders(Json<Order> order) -> Json<Order> { return order; }
 auto wait() -> std::string {
   std::this_thread::sleep_for(20ms);
   return "done";
+}
+
+[[= http::get("/wait_async")]]
+auto wait_async() -> Task<std::string> {
+  co_await sleep_for(20ms);
+  co_return "done";
 }
 
 }  // namespace bench

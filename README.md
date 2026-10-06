@@ -752,17 +752,35 @@ In the dev profile, lines are readable text instead of JSON:
 
 ### Async handlers
 
-Return `Task<T>` from the same annotations. Inside, `co_await` other tasks or anything
-awaitable.
+Return `Task<T>` from the same annotations. While the task waits, its worker goes back
+to the pool and serves other requests, so slow I/O does not limit how many requests run
+at once.
 
 ```cpp
-auto compute_fib(std::uint32_t n) -> Task<std::uint64_t>;   // any awaitable works
-
-[[= http::get("/fib/{n}")]]
-auto fib(std::uint32_t n) -> Task<Json<std::uint64_t>> {
-  co_return Json<std::uint64_t>{co_await compute_fib(n)};
+[[= http::get("/quote/{sym}")]]
+auto quote(std::string sym, State<PriceClient> prices) -> Task<Json<Quote>> {
+  auto [price, resolve] = callback<double>();
+  prices->fetch(sym, [resolve](double p) { resolve(p); });   // any callback-based client
+  co_return Json{Quote{sym, co_await std::move(price)}};
 }
 ```
+
+- **`co_await sleep_for(d)`** waits without holding a worker. It ends early when the
+  request is cancelled (deadline, client gone, shutdown), so check `Deadline::expired()`
+  afterwards when that matters.
+- **`callback<T>()`** adapts a library that reports results through a callback: call
+  `resolve(value)` once, from any thread. If every `resolve` is destroyed unused, the
+  `co_await` throws and the request is a 500.
+- **Other awaitables** work too: another `Task`, or an async client's own awaitable.
+- **Code in a task always runs on a crocket worker.** If a library resumes the task on
+  its own thread, it moves back to a worker before continuing. So log lines keep their
+  request context, and `Deadline` keeps working.
+- **Code after a `co_await` may run on a different worker**, so `thread_local` state
+  does not carry over, and a mutex must not be held across a `co_await`.
+- **Blocking calls still block.** A synchronous database driver inside a `Task` occupies
+  its worker as it would in a plain handler.
+
+`LocalClient` waits for an async handler like any other.
 
 ### Deadlines and cancellation
 
@@ -1048,7 +1066,8 @@ requests per second, p50 and p99 latency, and non-2xx responses:
 | `json` | `GET /json` | Encoding a small struct |
 | `orders` | `POST /orders` | Decoding and encoding a 1 KB order |
 | `router` | `GET /api/v39/users/7/orders/9` | A route matched last among about 200 |
-| `wait` | `GET /wait` | A handler that waits 20 ms, so worker occupancy |
+| `wait` | `GET /wait` | A handler that blocks its worker for 20 ms |
+| `wait_async` | `GET /wait_async` | A handler that suspends for 20 ms without holding a worker |
 
 `micro` ([bench/micro.cpp](bench/micro.cpp)) times routing, the in-process request
 pipeline and JSON, and counts heap allocations per operation. Results are saved in
@@ -1062,9 +1081,10 @@ differences of a few percent as noise. `--duration` and `--clients` change the l
 |---|---|
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, application logging (templates, context, redaction, sampling, levels, a full buffer), metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
+| `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, and security headers. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, 20 async handlers sharing 2 workers, and a deadline waking a sleeping task. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
@@ -1092,8 +1112,6 @@ differences of a few percent as noise. `--duration` and `--clients` change the l
   (see [JSON](#json)).
 - Error bodies are RFC 9457 problem details (`application/problem+json`). `message` is
   sent as `detail`, and `ApiError::detail` stays in the logs.
-- `Task<T>` handlers are awaited synchronously on a worker thread (see
-  [docs/ENGINE.md](docs/ENGINE.md)).
 
 ## License
 

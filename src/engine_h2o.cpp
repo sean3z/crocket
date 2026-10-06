@@ -129,9 +129,19 @@ constexpr bool status_has_body(int st) { return !(st < 200 || st == 204 || st ==
 
 std::string_view view(h2o_iovec_t v) { return {v.base ? v.base : "", v.len}; }
 
-class Engine {
+class Engine final : public Executor {
  public:
   Engine(Crocket& app, const LaunchOptions& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
+
+  /// Executor: resumes a suspended handler on a worker. Ahead of new requests,
+  /// and kept at shutdown (unlike requests that have not started).
+  void post(std::move_only_function<void()> job) override {
+    {
+      std::lock_guard lk(jobs_m_);
+      resumes_.push_back(std::move(job));
+    }
+    jobs_cv_.notify_one();
+  }
 
   int run();
 
@@ -213,11 +223,12 @@ class Engine {
   std::mutex jobs_m_;
   std::condition_variable jobs_cv_;
   std::condition_variable idle_cv_;
-  std::deque<std::move_only_function<void()>> jobs_;
+  std::deque<std::move_only_function<void()>> jobs_;     // new requests
+  std::deque<std::move_only_function<void()>> resumes_;  // suspended handlers to continue
   unsigned busy_ = 0;
   bool stopping_ = false;
   std::vector<std::thread> workers_;
-  std::atomic<std::size_t> outstanding_{0};  // dispatched, not yet finished by a worker
+  std::atomic<std::size_t> outstanding_{0};  // dispatched, response not yet delivered
 };
 
 // ---- request construction ---------------------------------------------------------
@@ -359,16 +370,21 @@ void Engine::dispatch(Session* s) {
   {
     std::lock_guard lk(jobs_m_);
     jobs_.emplace_back([this, txn, rq = std::move(rq)]() mutable {
-      auto* res = new Response;
+      // The response may come back here, or later from another worker when an
+      // async handler finishes.
+      auto deliver = [this, txn](Response&& res) {
+        h2o_multithread_send_message(&done_rx_.rx, &(new Done{{}, txn, new Response(std::move(res))})->msg);
+        outstanding_.fetch_sub(1);
+      };
       try {
-        *res = app_.handle(std::move(rq));
-      } catch (...) {  // Crocket::handle maps handler exceptions; this is a last resort
-        res->status = 500;
-        res->body = R"({"title":"Internal Server Error","status":500,"detail":"internal error","code":"internal"})";
-        res->set_content_type("application/problem+json");
+        app_.handle_async(std::move(rq), deliver);
+      } catch (...) {  // handle_async maps handler exceptions; this is a last resort
+        Response res;
+        res.status = 500;
+        res.body = R"({"title":"Internal Server Error","status":500,"detail":"internal error","code":"internal"})";
+        res.set_content_type("application/problem+json");
+        deliver(std::move(res));
       }
-      h2o_multithread_send_message(&done_rx_.rx, &(new Done{{}, txn, res})->msg);
-      outstanding_.fetch_sub(1);
     });
   }
   jobs_cv_.notify_one();
@@ -490,10 +506,11 @@ void Engine::worker_loop() {
     std::move_only_function<void()> job;
     {
       std::unique_lock lk(jobs_m_);
-      jobs_cv_.wait(lk, [&] { return stopping_ || !jobs_.empty(); });
-      if (jobs_.empty()) return;  // stopping and drained
-      job = std::move(jobs_.front());
-      jobs_.pop_front();
+      jobs_cv_.wait(lk, [&] { return stopping_ || !jobs_.empty() || !resumes_.empty(); });
+      auto& q = !resumes_.empty() ? resumes_ : jobs_;  // finish started requests first
+      if (q.empty()) return;  // stopping and drained
+      job = std::move(q.front());
+      q.pop_front();
       ++busy_;
     }
     job();
@@ -507,7 +524,10 @@ void Engine::worker_loop() {
 
 bool Engine::wait_workers_idle(Clock::time_point until) {
   std::unique_lock lk(jobs_m_);
-  return idle_cv_.wait_until(lk, until, [&] { return busy_ == 0 && jobs_.empty(); });
+  // Suspended handlers count: they are not on a worker, but their request is open.
+  return idle_cv_.wait_until(lk, until, [&] {
+    return busy_ == 0 && jobs_.empty() && resumes_.empty() && app_.core().stats.in_flight.load() == 0;
+  });
 }
 
 void Engine::stop_workers() {
@@ -613,6 +633,7 @@ int Engine::run() {
 
   unsigned n = opts_.workers ? opts_.workers : std::max(4u, std::thread::hardware_concurrency());
   start_workers(n);
+  app_.core().executor.store(this);
 
   g_stop.store(false);
   g_wake_fd.store(wake_fd);
@@ -652,6 +673,7 @@ int Engine::run() {
     std::fflush(stderr);
     std::quick_exit(1);
   }
+  app_.core().executor.store(nullptr);
   stop_workers();
 
   // Deliver the last completions (dropped: nobody waits), let h2o finish

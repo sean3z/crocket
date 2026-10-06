@@ -39,6 +39,7 @@ find_package(Threads REQUIRED)
 
 add_library(crocket STATIC
   src/app.cpp
+  src/async.cpp
   src/log.cpp
   src/conditional.cpp
   src/identity.cpp

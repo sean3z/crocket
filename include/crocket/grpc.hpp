@@ -236,12 +236,11 @@ Outcome invoke_impl(Request& rq, Response& rs, type_list<A...>, std::index_seque
     call();
     write_reply({}, rs);
   } else if constexpr (crocket::detail::Awaitable<std::remove_cvref_t<R>>) {
-    if constexpr (std::is_void_v<crocket::detail::await_result_t<std::remove_cvref_t<R>>>) {
-      sync_wait(call());
-      write_reply({}, rs);
-    } else {
-      reply_value(sync_wait(call()), rq, rs);
-    }
+    if constexpr (std::is_void_v<crocket::detail::await_result_t<std::remove_cvref_t<R>>>)
+      return crocket::detail::start_async(call(), rq, rs, [&rs] { write_reply({}, rs); });
+    else
+      return crocket::detail::start_async(call(), rq, rs,
+                                          [&rq, &rs](auto&& v) { reply_value(std::forward<decltype(v)>(v), rq, rs); });
   } else {
     reply_value(call(), rq, rs);
   }

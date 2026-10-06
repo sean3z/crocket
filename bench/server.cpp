@@ -7,7 +7,7 @@
 //   wait       GET  /wait                       the handler blocks its worker for 20 ms
 //   wait_async GET  /wait_async                 the handler suspends for 20 ms (no worker held)
 //
-//   CROCKET_PORT (18600), CROCKET_WORKERS (0: the default), CROCKET_BENCH_LOGGER=1
+//   CROCKET_PORT (18600), CROCKET_WORKERS and CROCKET_EVENT_LOOPS (0: the defaults), CROCKET_BENCH_LOGGER=1
 //   to attach Logger (lines go to a sink that drops them).
 
 #include <crocket/crocket.hpp>
@@ -99,5 +99,6 @@ int main() {
   return app.launch({.host = "127.0.0.1",
                      .port = std::uint16_t(env_uint("CROCKET_PORT", 18600)),
                      .workers = env_uint("CROCKET_WORKERS", 0),
+                     .event_loops = env_uint("CROCKET_EVENT_LOOPS", 0),
                      .h2_prior_knowledge = true});
 }

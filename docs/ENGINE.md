@@ -47,20 +47,36 @@ To build offline, set `FETCHCONTENT_SOURCE_DIR_H2O` to an h2o checkout.
 
 ## Threading model
 
-One event-loop thread runs `h2o_evloop_run` and owns every h2o object. Handlers run on a
-worker pool of `LaunchOptions::workers` threads (0 means `max(4, hardware_concurrency)`).
-Handlers may block, for example on `Pool::checkout`, without stalling I/O for other
-connections. The two sides communicate through two queues:
+Network I/O runs on `LaunchOptions::event_loops` event-loop threads (0, the default,
+means one per core). Each has its own `h2o_context_t`, `h2o_evloop_t` and listening
+socket. The sockets share the port through `SO_REUSEPORT`, so the kernel spreads new
+connections across the loops, and a connection stays on one loop for its whole life. A
+loop owns every h2o object of its connections. Only the `h2o_globalconf_t` (read-only
+once serving) and the TLS context are shared.
 
-- **Jobs:** the event loop pushes a closure owning the `Request`. A worker runs
+Handlers run on one worker pool of `LaunchOptions::workers` threads (0 means
+`max(4, hardware_concurrency)`), shared by every loop. Handlers may block, for example on
+`Pool::checkout`, without stalling I/O for other connections. Loops and workers
+communicate through two queues:
+
+- **Jobs:** a loop pushes a closure owning the `Request`. A worker runs
   `Crocket::handle_async`, which includes fairings, routing, extractors and the handler.
-- **Completions:** whichever worker finishes the request posts `{txn, Response}` with
-  `h2o_multithread_send_message`. That writes to an eventfd the loop watches, so the
-  loop wakes and responds.
+- **Completions:** whichever worker finishes the request posts `{txn, Response}` to the
+  loop that owns it, with `h2o_multithread_send_message`. That writes to an eventfd the
+  loop watches, so the loop wakes and responds.
 
-Workers never touch an `h2o_req_t`. Each transaction gets a monotonically increasing id,
+Workers never touch an `h2o_req_t`. Each transaction gets an id that increases per loop,
 and a completion whose id is no longer live is dropped. That happens when the client
 disconnected or the deadline already produced a 504.
+
+`launch()`'s thread starts the loops and workers, then waits for SIGINT or SIGTERM, which
+only it takes. Shutdown is in three phases:
+
+1. Every loop stops accepting, sends GOAWAY, and drains its requests until
+   `drain_timeout`. Then it tells what is left to stop.
+2. `launch()`'s thread waits for the workers and for suspended handlers, then stops the
+   workers. Meanwhile the loops keep delivering completions.
+3. Each loop closes its connections and tears itself down.
 
 Each request lives in a heap-allocated `detail::Exchange` from the start of the pipeline,
 so the `Request` and `Response` stay at one address while a handler refers to them. A

@@ -69,6 +69,7 @@ int main(int argc, char** argv) {
   auto env = [](const char* name) { return std::string(std::getenv(name) ? std::getenv(name) : ""); };
   LaunchOptions opts{.port = 50051, .tls_cert = env("CROCKET_TLS_CERT"), .tls_key = env("CROCKET_TLS_KEY")};
   if (auto port = env("CROCKET_PORT"); !port.empty()) opts.port = static_cast<std::uint16_t>(std::stoi(port));
+  if (auto loops = env("CROCKET_EVENT_LOOPS"); !loops.empty()) opts.event_loops = unsigned(std::stoi(loops));
   opts.h2_prior_knowledge = opts.tls_cert.empty();  // gRPC's insecure channels speak h2 without TLS
   return build(Config::from_env())
       .attach(Logger{})

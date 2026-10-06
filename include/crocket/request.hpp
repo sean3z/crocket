@@ -95,6 +95,7 @@ struct Request {
   Deadline deadline;
   bool dev_profile = false;  // error bodies include ApiError::detail
   json::ReadOptions json_options;  // Config::json
+  std::vector<std::string_view> vary;  // request headers the response depends on (sent as Vary)
 
   // Set by the router for the candidate currently being tried.
   std::string_view route_template;  // "/users/{id}"; "" while unmatched

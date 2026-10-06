@@ -2,6 +2,7 @@
 #include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
 
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -58,6 +59,76 @@ void write_error(const ApiError& e, const Request& rq, Response& rs) {
   }
   b += '}';
 }
+
+// ---- Accept ------------------------------------------------------------------------
+
+namespace {
+std::string_view trim_ows(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+  return s;
+}
+std::string lower_ascii(std::string_view s) {
+  std::string out(s);
+  for (auto& c : out)
+    if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+  return out;
+}
+}  // namespace
+
+Accept::Accept(std::string_view header) {
+  while (!header.empty()) {
+    auto comma = header.find(',');
+    auto item = trim_ows(header.substr(0, comma));
+    header.remove_prefix(comma == std::string_view::npos ? header.size() : comma + 1);
+    auto media = trim_ows(item.substr(0, item.find(';')));
+    auto slash = media.find('/');
+    if (slash == std::string_view::npos) continue;
+    double q = 1;
+    if (auto semi = item.find(';'); semi != std::string_view::npos) {
+      auto params = item.substr(semi + 1);
+      while (true) {
+        auto next = params.find(';');
+        auto p = trim_ows(params.substr(0, next));
+        if (p.size() > 2 && (p[0] == 'q' || p[0] == 'Q') && p[1] == '=')
+          if (std::from_chars(p.data() + 2, p.data() + p.size(), q).ec != std::errc() || q < 0 || q > 1) q = 0;
+        if (next == std::string_view::npos) break;
+        params.remove_prefix(next + 1);
+      }
+    }
+    ranges_.push_back({lower_ascii(media.substr(0, slash)), lower_ascii(media.substr(slash + 1)), q});
+  }
+}
+
+double Accept::quality(std::string_view type) const {
+  if (ranges_.empty()) return 1;
+  auto t = lower_ascii(trim_ows(type.substr(0, type.find(';'))));
+  auto slash = t.find('/');
+  std::string_view main = std::string_view(t).substr(0, slash);
+  std::string_view sub = slash == std::string::npos ? std::string_view() : std::string_view(t).substr(slash + 1);
+  // The most specific matching range decides: text/csv over text/* over */*.
+  int best = -1;
+  double q = 0;
+  for (auto& r : ranges_) {
+    int specificity = r.type == "*" ? (r.subtype == "*" ? 0 : -1)
+                      : r.type != main ? -1
+                      : r.subtype == "*" ? 1
+                      : r.subtype == sub ? 2
+                                         : -1;
+    if (specificity > best) best = specificity, q = r.q;
+  }
+  return best < 0 ? 0 : q;
+}
+
+std::string_view Accept::best(std::initializer_list<std::string_view> offered) const {
+  std::string_view choice = offered.size() ? *offered.begin() : std::string_view();
+  double top = 0;
+  for (auto o : offered)
+    if (double q = quality(o); q > top) top = q, choice = o;
+  return choice;
+}
+
+bool Accept::accepts(std::string_view type) const { return quality(type) > 0; }
 
 std::string IgniteError::message() const {
   std::string m = "ignite failed:";

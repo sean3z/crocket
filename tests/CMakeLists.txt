@@ -1,6 +1,6 @@
 # Acceptance 1-4, 6 and the production behaviour: in-process, no sockets.
 add_executable(crocket_acceptance acceptance.cpp)
-target_link_libraries(crocket_acceptance PRIVATE crocket)
+target_link_libraries(crocket_acceptance PRIVATE crocket ZLIB::ZLIB)  # to check gzip bodies
 add_test(NAME acceptance COMMAND crocket_acceptance)
 
 # JSON reading, writing, annotations and validation, plus problem+json bodies.

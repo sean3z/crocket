@@ -91,6 +91,8 @@ struct Request {
 
   // Set by the framework before fairings run.
   std::string request_id;
+  std::string trace_id;  // from a valid W3C traceparent header; empty without one
+  std::string subject;   // who the request is from, once Auth has verified it
   Clock::time_point received = Clock::now();
   Deadline deadline;
   bool dev_profile = false;  // error bodies include ApiError::detail

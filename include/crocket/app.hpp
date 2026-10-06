@@ -3,6 +3,7 @@
 
 #include "crocket/detail/invoke.hpp"
 #include "crocket/http.hpp"
+#include "crocket/log.hpp"
 #include "crocket/request.hpp"
 #include "crocket/state.hpp"
 
@@ -50,6 +51,7 @@ struct Config {
   /// profile also allows localhost.
   std::vector<std::string> allowed_hosts = {};
   json::ReadOptions json = {};                        // limits for Json<T> bodies
+  log::Options log = {};                              // level, sampling, redaction, sink
 
   /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
   /// breakpoint), a one-second drain, and listening on 127.0.0.1.
@@ -165,6 +167,7 @@ struct ReadyCheck {
 struct Stats {
   std::atomic<std::int64_t> in_flight{0};
   std::atomic<bool> draining{false};
+  std::atomic<std::uint64_t> log_dropped{0};
 };
 
 /// An address range from Config::trusted_proxies (IPv4 as IPv4-mapped IPv6).
@@ -176,6 +179,7 @@ struct IpRange {
 struct Core {
   Config config;
   std::vector<IpRange> trusted_proxies;  // parsed at ignite
+  std::shared_ptr<log::detail::Hub> log;  // where this app's log lines go
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
   std::vector<ReadyCheck> ready_checks;
@@ -203,6 +207,7 @@ class Ignite {
   [[nodiscard]] const Config& config() const { return core_.config; }
   [[nodiscard]] std::span<const RouteDef> routes() const { return core_.routes; }
   [[nodiscard]] const detail::Stats& stats() const { return core_.stats; }
+  [[nodiscard]] const std::shared_ptr<log::detail::Hub>& log_hub() const { return core_.log; }
 
  private:
   friend class Crocket;
@@ -267,6 +272,8 @@ class Crocket {
 
   /// Build an error response for a request rejected before routing
   /// (limits, timeouts). Runs on_response fairings so logs/metrics see it.
+  /// Returns once every log line so far has been written (the writer is asynchronous).
+  void flush_logs() const;
   Response reject(Request& req, const ApiError& err);
 
   /// Assign request id, deadline and state pointer. Idempotent.
@@ -302,7 +309,13 @@ class LocalClient {
     /// The socket peer's address, e.g. a proxy's ("10.0.0.5").
     Call& remote(std::string_view addr) { req_.peer_addr = addr; return *this; }
     Call& bearer(std::string_view token) { return header("authorization", std::string("Bearer ") + std::string(token)); }
-    Response dispatch() { return app_.handle(std::move(req_)); }
+    /// Handles the request, then waits until its log lines are written, so a
+    /// test can read them.
+    Response dispatch() {
+      auto res = app_.handle(std::move(req_));
+      app_.flush_logs();
+      return res;
+    }
 
    private:
     friend class LocalClient;

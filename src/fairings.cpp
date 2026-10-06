@@ -1,5 +1,6 @@
 #include "crocket/fairings.hpp"
 #include "crocket/grpc.hpp"
+#include "log_hub.hpp"
 #include "crocket/json.hpp"
 #include "crocket/responder.hpp"
 
@@ -19,12 +20,6 @@ namespace crocket {
 // ---- Logger -------------------------------------------------------------------
 
 namespace {
-void stderr_sink(std::string_view line) {
-  static std::mutex mu;
-  std::lock_guard lk(mu);
-  std::fwrite(line.data(), 1, line.size(), stderr);
-  std::fputc('\n', stderr);
-}
 void field(std::string& o, std::string_view k, std::string_view v) {
   o += ',';
   json::write_string(o, k);
@@ -40,55 +35,39 @@ std::string line_start(std::string_view level, std::string_view msg) {
 }
 }  // namespace
 
-Logger::Logger() : sink_(std::make_shared<Sink>(stderr_sink)), to_stderr_(true) {}
-Logger::Logger(Sink sink) : sink_(std::make_shared<Sink>(std::move(sink))) {}
-
-namespace {
-std::string local_time_now() {
-  auto now = std::chrono::system_clock::now();
-  auto t = std::chrono::system_clock::to_time_t(now);
-  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
-  std::tm tm{};
-  localtime_r(&t, &tm);
-  char buf[16];
-  std::snprintf(buf, sizeof buf, "%02d:%02d:%02d.%03d", tm.tm_hour, tm.tm_min, tm.tm_sec, int(ms));
-  return buf;
-}
-}  // namespace
-
 void Logger::on_ignite(Ignite& ig) {
-  text_ = ig.config().profile == Profile::Dev;
-  if (text_) {  // launch() prints the route banner
-    const char* no_colour = std::getenv("NO_COLOR");
-    colour_ = to_stderr_ && isatty(STDERR_FILENO) && !(no_colour && *no_colour);
-    return;
-  }
-  auto o = line_start("info", "ignite");
-  o += R"(,"routes":)" + std::to_string(ig.routes().size()) + "}";
-  (*sink_)(o);
+  hub_ = ig.log_hub();
+  if (hub_->text() || !hub_->enabled(log::Level::info)) return;  // launch() prints the routes in dev
+  hub_->write(line_start("info", "ignite") + R"(,"routes":)" + std::to_string(ig.routes().size()) + "}");
 }
 
 void Logger::on_response(const Request& rq, Response& rs) {
+  if (!hub_) return;
+  auto level = rs.status >= 500 ? log::Level::error : rs.status >= 400 ? log::Level::warn : log::Level::info;
+  if (!hub_->enabled(level) || (rs.status < 400 && !hub_->sampled(rq.request_id))) return;
   auto dur = std::chrono::duration<double, std::milli>(Clock::now() - rq.received).count();
-  if (text_) {
+  if (hub_->text()) {
+    bool colour = hub_->colour();
     auto paint = [&](std::string_view code, std::string_view s) {
-      return colour_ ? std::format("\x1b[{}m{}\x1b[0m", code, s) : std::string(s);
+      return colour ? std::format("\x1b[{}m{}\x1b[0m", code, s) : std::string(s);
     };
     std::string_view hue = rs.status >= 500 ? "31" : rs.status >= 400 ? "33" : rs.status >= 300 ? "36" : "32";
-    auto o = std::format("{} {} {} {} {:.2f}ms", paint("2", local_time_now()), rq.method_text, rq.path,
+    auto o = std::format("{} {} {} {} {:.2f}ms", paint("2", log::detail::local_clock()), rq.method_text, rq.path,
                          paint(hue, std::to_string(rs.status)), dur);
     if (!rq.handler.empty()) o += std::format(" {}", rq.handler);
+    if (!rq.subject.empty()) o += std::format(" {}", paint("2", "as " + rq.subject));
     if (!rs.error_code.empty()) {
       auto what = rs.error_detail.empty() ? std::string(rs.error_code)
                                           : std::format("{}: {}", rs.error_code, rs.error_detail);
       o += std::format(" {} {}", paint(hue, what), paint("2", "[" + rq.request_id + "]"));
     }
-    (*sink_)(o);
+    hub_->write(std::move(o));
     return;
   }
-  std::string_view level = rs.status >= 500 ? "error" : rs.status >= 400 ? "warn" : "info";
-  auto o = line_start(level, "request");
-  field(o, "id", rq.request_id);
+  constexpr std::string_view names[] = {"debug", "info", "warn", "error"};
+  auto o = line_start(names[int(level)], "request");
+  field(o, "request_id", rq.request_id);
+  if (!rq.trace_id.empty()) field(o, "trace_id", rq.trace_id);
   field(o, "method", rq.method_text);
   field(o, "route", rq.route_template.empty() ? std::string_view("<unmatched>") : rq.route_template);
   if (!rq.handler.empty()) field(o, "handler", rq.handler);
@@ -98,14 +77,22 @@ void Logger::on_response(const Request& rq, Response& rs) {
   std::snprintf(buf, sizeof buf, "%.3f", dur);
   o += R"(,"duration_ms":)";
   o += buf;
-  o += R"(,"bytes":)" + std::to_string(rs.body.size());
+  o += R"(,"bytes_in":)" + std::to_string(rq.body.size());
+  o += R"(,"bytes_out":)" + std::to_string(rs.body.size());
   field(o, "proto", rq.protocol);
+  if (!rq.remote_addr.empty()) field(o, "client", rq.remote_addr);
+  if (auto ua = rq.header("user-agent")) field(o, "user_agent", ua->substr(0, 256));
+  if (!rq.subject.empty()) field(o, "subject", rq.subject);
   if (!rs.error_detail.empty()) field(o, "detail", rs.error_detail);
   o += '}';
-  (*sink_)(o);
+  hub_->write(std::move(o));
 }
 
-void Logger::on_shutdown() { (*sink_)(text_ ? "shutdown" : line_start("info", "shutdown") + "}"); }
+void Logger::on_shutdown() {
+  if (!hub_) return;
+  if (hub_->enabled(log::Level::info)) hub_->write(hub_->text() ? "shutdown" : line_start("info", "shutdown") + "}");
+  hub_->flush();
+}
 
 // ---- Cors -----------------------------------------------------------------------
 
@@ -336,6 +323,9 @@ std::string Metrics::render() const {
   o += "# HELP crocket_http_requests_in_flight Requests currently being handled.\n"
        "# TYPE crocket_http_requests_in_flight gauge\n";
   o += "crocket_http_requests_in_flight " + std::to_string(store_->stats ? store_->stats->in_flight.load() : 0) + "\n";
+  o += "# HELP crocket_log_lines_dropped_total Log lines discarded because the writer fell behind.\n"
+       "# TYPE crocket_log_lines_dropped_total counter\n";
+  o += "crocket_log_lines_dropped_total " + std::to_string(store_->stats ? store_->stats->log_dropped.load() : 0) + "\n";
   o += "# HELP crocket_extractor_failures_total Extractor failures by kind.\n"
        "# TYPE crocket_extractor_failures_total counter\n";
   for (auto& [k, n] : store_->failures)

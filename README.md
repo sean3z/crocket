@@ -667,9 +667,10 @@ flip it.
 
 Built-in fairings:
 
-- **`Logger`:** one JSON line per request with id, method, route template (never the
-  raw path), handler, status, error code, duration, bytes, protocol and log-only detail.
-  Also lines at ignite and shutdown. Pass a sink to send lines elsewhere.
+- **`Logger`:** one line per request with the request and trace ids, method, route
+  template (never the raw path), handler, status, error code, duration, bytes in and
+  out, protocol, client address, user agent, authenticated subject and log-only detail.
+  Also lines at ignite and shutdown. See [Logging](#logging) for where lines go.
 - **`Cors`:** deny-by-default CORS.
   - `Cors::allow_origins({...})` with `allow_methods`, `allow_headers`,
     `expose_headers`, `allow_credentials` and `max_age`.
@@ -688,6 +689,66 @@ Built-in fairings:
   - `crocket_http_requests_total` and a duration histogram.
   - `crocket_http_requests_in_flight`.
   - `crocket_extractor_failures_total`.
+
+### Logging
+
+`log::debug`, `log::info`, `log::warn` and `log::error` work anywhere: in a handler, in
+code it calls, in a fairing, or outside any request.
+
+```cpp
+[[= http::post("/users")]]
+auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>> {
+  auto user = db->insert(*body);
+  log::info("created user {user_id} on plan {plan}", user.id, body->plan);
+  return Created<User>{user, std::format("/users/{}", user.id)};
+}
+```
+
+```json
+{"ts":"2026-10-05T14:03:07.250Z","level":"info","msg":"created user 42 on plan pro",
+ "request_id":"5f0c…","trace_id":"4bf92f35…","route":"/users","handler":"api::create",
+ "subject":"alice","user_id":42,"plan":"pro"}
+```
+
+- **Each `{name}` is a field as well as part of the text.** Arguments may be anything
+  JSON can encode, structs included. A count that does not match the placeholders, a
+  repeated name, or a name crocket writes itself (`request_id`, `msg`, ...) is a compile
+  error. Write `{{` and `}}` for literal braces.
+- **The request comes along by itself.** While crocket runs a handler and its fairings,
+  every line carries that request's id, trace id (from a W3C `traceparent` header),
+  route, handler and authenticated subject, at any depth of the call stack. Outside a
+  request, lines carry none of these. A thread the handler starts takes the context
+  with it explicitly:
+  ```cpp
+  auto ctx = log::context();
+  std::thread([ctx] { log::Scope scope{ctx}; log::info("indexing {count} rows", n); }).detach();
+  ```
+- **Lines are written by a background thread**, so a slow terminal or log shipper never
+  holds up a request. `LocalClient` waits for a request's lines before `dispatch()`
+  returns, and `app.flush_logs()` waits for everything so far.
+
+`Config::log` controls everything:
+
+```cpp
+cfg.log.level = log::Level::debug;           // default info; Config::dev() uses debug
+cfg.log.sample = 0.1;                        // keep 10% of successful request lines
+cfg.log.redact = {"password", "card"};       // fields shown as "[redacted]"
+cfg.log.buffer = 10'000;                     // lines waiting for the writer
+cfg.log.when_full = log::WhenFull::drop;     // or block
+cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `level` | `info` | Lines below it are skipped, request lines included (successes are `info`, 4xx `warn`, 5xx `error`). |
+| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept. |
+| `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these, ignoring case, is written as `"[redacted]"`, in the message too and inside structs. |
+| `buffer` | `10'000` | Lines waiting for the writer. |
+| `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
+| `sink` | stderr | Called on the writer thread with each line. |
+
+In the dev profile, lines are readable text instead of JSON:
+`14:03:07.250 INFO  created user 42 on plan pro [5f0c…]`.
 
 ### Async handlers
 
@@ -900,8 +961,8 @@ Compared with the release defaults, the dev profile:
 
 - **Error bodies carry `debug`** (`ApiError::detail`), including an uncaught exception's `what()`, so you
   see the cause in the client without reading logs. Release never sends it.
-- **Logs are readable lines** from `Logger`, coloured on a terminal unless `NO_COLOR`
-  is set: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
+- **Logs are readable lines**, coloured on a terminal unless `NO_COLOR` is set, and
+  `debug` lines are on: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
 - **`launch()` prints every route** before it starts.
 - **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
   breakpoint), and the drain on shutdown is one second.
@@ -972,7 +1033,7 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 | Test | What it checks |
 |---|---|
-| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
+| `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, application logging (templates, context, redaction, sampling, levels, a full buffer), metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |

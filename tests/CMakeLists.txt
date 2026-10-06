@@ -38,6 +38,9 @@ crocket_compile_fail(bad_template "capture .\\{id. must be a whole segment of th
 crocket_compile_fail(json_name_clash
   "members 'user_id' and 'legacy_id' of Account both have the JSON name \"userId\"")
 crocket_compile_fail(json_bad_pattern "invalid json::pattern \"\\^\\[A-Z\\]\\{3-\\}\\$\": expected '\\}' at offset 8")
+crocket_compile_fail(log_arg_count
+  "log message \"created user \\{user_id\\} on plan \\{plan\\}\": has 2 placeholders but 1 argument follow")
+crocket_compile_fail(log_reserved_field "placeholder \\{request_id\\} is a field crocket writes itself")
 crocket_compile_fail(json_check_type
   "json::min/max\\]\\] on member 'name' of Signup needs a number, but the member is std::")
 

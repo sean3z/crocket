@@ -12,6 +12,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <algorithm>
+#include <functional>
 
 using namespace crocket;
 
@@ -116,6 +118,37 @@ auto redirect(Query<Target> q, Response& rs) -> void {
 [[= http::get("/boom")]]
 auto boom() -> std::string { throw std::runtime_error("secret database password in what()"); }
 
+struct Plan {
+  std::string name;
+  std::string api_token;
+  int seats;
+};
+
+[[= http::get("/logs")]]
+auto logs() -> std::string {
+  log::debug("not at level info {x}", 1);
+  log::info("created user {user_id} on plan {plan}", 42, std::string("pro"));
+  log::warn("login for {user} with {password}", std::string_view("ada"), "hunter2");
+  log::error("plan {details} and {{braces}}", Plan{"pro", "abc123", 5});
+  return "ok";
+}
+
+[[= http::get("/logs/thread")]]
+auto logs_thread() -> std::string {
+  auto ctx = log::context();
+  std::thread([ctx] {
+    log::Scope scope{ctx};
+    log::info("from a thread the handler started {n}", 1);
+  }).join();
+  return "ok";
+}
+
+[[= http::get("/logs/burst")]]
+auto logs_burst() -> std::string {
+  for (int i = 0; i < 50; ++i) log::info("line {i}", i);
+  return "ok";
+}
+
 [[= http::get("/doc")]]
 auto doc() -> Cacheable<std::string> {
   using namespace std::chrono;
@@ -214,11 +247,15 @@ Authenticator test_auth() {
 struct LogCapture {
   std::shared_ptr<std::mutex> mu = std::make_shared<std::mutex>();
   std::shared_ptr<std::vector<std::string>> lines = std::make_shared<std::vector<std::string>>();
-  Logger logger() {
-    return Logger{[mu = mu, lines = lines](std::string_view l) {
+  std::function<void(std::string_view)> sink() {
+    return [mu = mu, lines = lines](std::string_view l) {
       std::lock_guard lk(*mu);
       lines->emplace_back(l);
-    }};
+    };
+  }
+  std::vector<std::string> all() const {
+    std::lock_guard lk(*mu);
+    return *lines;
   }
   std::string last() const {
     std::lock_guard lk(*mu);
@@ -270,8 +307,9 @@ auto bulk(Json<std::vector<Widget>> ws) -> std::string { return std::to_string(w
 bool contains(std::string_view hay, std::string_view needle) { return hay.find(needle) != std::string_view::npos; }
 
 Crocket make_app(LogCapture& log, Metrics* metrics_out = nullptr, Config cfg = Config{.debug_routes = true}) {
+  if (!cfg.log.sink) cfg.log.sink = log.sink();
   Crocket app{std::move(cfg)};
-  app.manage(Db{}).manage(test_auth()).manage(Greeter{"Hi"}).attach(log.logger());
+  app.manage(Db{}).manage(test_auth()).manage(Greeter{"Hi"}).attach(Logger{});
   if (metrics_out) app.attach(*metrics_out);
   app.attach(Cors::allow_origins({"https://ok.example"}))
       .mount("/", reflect_routes<^^api>())
@@ -470,7 +508,8 @@ int main() {
     (void)client.get("/hello/Ada/36").dispatch();
     auto line = log.last();
     for (auto key : {R"("method":"GET")", R"("route":"/hello/{name}/{age}")", R"("status":200)",
-                     R"("code":"")", R"("duration_ms":)", R"("bytes":29)", R"("id":")"})
+                     R"("code":"")", R"("duration_ms":)", R"("bytes_in":0)", R"("bytes_out":29)",
+                     R"("request_id":")", R"("msg":"request")"})
       CHECK(contains(line, key));
     CHECK(!contains(line, "Ada"));  // route template, not the raw path
   }
@@ -858,6 +897,128 @@ int main() {
                  .header("if-range", "Thu, 01 Jan 2026 00:00:00 GMT").dispatch().status, 200);
     // A fresh copy beats a range.
     CHECK_EQ(client.get("/doc").header("range", "bytes=0-0").header("if-none-match", etag).dispatch().status, 304);
+  }
+
+  section("logging: message templates and request context");
+  {
+    LogCapture alog;
+    Crocket app2 = make_app(alog);
+    LocalClient c2(app2);
+    (void)c2.get("/logs").bearer("alice").header("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        .header("user-agent", "curl/8.5.0").remote("203.0.113.9").dispatch();
+    auto lines = alog.all();
+    auto find = [&](std::string_view needle) {
+      for (auto& l : lines)
+        if (contains(l, needle)) return l;
+      return std::string();
+    };
+    auto created = find("created user");
+    CHECK(contains(created, R"({"ts":")"));
+    CHECK(contains(created, R"("level":"info","msg":"created user 42 on plan pro","request_id":")"));
+    CHECK(contains(created, R"("trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","route":"/logs","handler":"api::logs")"));
+    CHECK(contains(created, R"("user_id":42,"plan":"pro"})"));
+    CHECK(find("not at level info").empty());
+    // Redaction: by field name, in the message too, and inside structs.
+    auto login = find("login for");
+    CHECK(contains(login, R"("msg":"login for ada with [redacted]")"));
+    CHECK(contains(login, R"("password":"[redacted]")"));
+    CHECK(!contains(login, "hunter2"));
+    auto plan = find("plan {");
+    CHECK(contains(plan, R"("level":"error")"));
+    CHECK(contains(plan, R"("details":{"name":"pro","api_token":"[redacted]","seats":5})"));
+    CHECK(contains(plan, R"(and {braces})"));
+    CHECK(!contains(plan, "abc123"));
+    // The request line has the new fields.
+    auto req = find(R"("msg":"request")");
+    for (auto key : {R"("trace_id":"4bf92f3577b34da6a3ce929d0e0e4736")", R"("client":"203.0.113.9")",
+                     R"("user_agent":"curl/8.5.0")", R"("route":"/logs")"})
+      CHECK(contains(req, key));
+    // A handler's own thread, given the context.
+    (void)c2.get("/logs/thread").dispatch();
+    lines = alog.all();
+    CHECK(contains(find("from a thread"), R"("route":"/logs/thread")"));
+    // The authenticated subject.
+    (void)c2.post("/users").bearer("alice").json(R"({"email":"a@b.c"})").dispatch();
+    CHECK(contains(alog.last(), R"("subject":"alice")"));
+    // A malformed traceparent is ignored.
+    (void)c2.get("/healthz").header("traceparent", "00-00000000000000000000000000000000-00f067aa0ba902b7-01").dispatch();
+    CHECK(!contains(alog.last(), "trace_id"));
+    // Outside a request: the last app to ignite, with no request fields.
+    log::info("background job {job} finished", std::string_view("reindex"));
+    app2.flush_logs();
+    CHECK(contains(alog.last(), R"("msg":"background job reindex finished")"));
+    CHECK(!contains(alog.last(), "request_id"));
+  }
+
+  section("logging: level, sampling and a full buffer");
+  {
+    LogCapture quiet;
+    Config warn_only;
+    warn_only.log.level = log::Level::warn;
+    Crocket qa = make_app(quiet, nullptr, warn_only);
+    LocalClient qc(qa);
+    (void)qc.get("/healthz").dispatch();
+    (void)qc.get("/logs").dispatch();
+    (void)qc.get("/nope").dispatch();
+    auto lines = quiet.all();
+    CHECK(std::ranges::none_of(lines, [](auto& l) { return contains(l, R"("status":200)"); }));
+    CHECK(std::ranges::any_of(lines, [](auto& l) { return contains(l, R"("status":404)"); }));
+    CHECK(std::ranges::any_of(lines, [](auto& l) { return contains(l, "login for"); }));  // warn
+    CHECK(std::ranges::none_of(lines, [](auto& l) { return contains(l, "created user"); }));  // info
+
+    LogCapture sampled;
+    Config none;
+    none.log.sample = 0;
+    Crocket sa = make_app(sampled, nullptr, none);
+    LocalClient sc(sa);
+    for (int i = 0; i < 20; ++i) (void)sc.get("/healthz").dispatch();
+    (void)sc.get("/nope").dispatch();
+    lines = sampled.all();
+    CHECK(std::ranges::none_of(lines, [](auto& l) { return contains(l, R"("status":200)"); }));
+    CHECK(std::ranges::any_of(lines, [](auto& l) { return contains(l, R"("status":404)"); }));  // errors always kept
+
+    auto slow = [](LogCapture& cap) {
+      return [inner = cap.sink()](std::string_view l) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        inner(l);
+      };
+    };
+    LogCapture dropping;
+    Config small;
+    small.log.buffer = 4;
+    Metrics dm;
+    Config small_slow = small;
+    small_slow.log.sink = slow(dropping);
+    Crocket db = make_app(dropping, &dm, small_slow);
+    LocalClient dc(db);
+    (void)dc.get("/logs/burst").dispatch();
+    lines = dropping.all();
+    auto kept = std::ranges::count_if(lines, [](auto& l) { return contains(l, R"("msg":"line )"); });
+    CHECK(kept < 50);
+    CHECK(std::ranges::any_of(lines, [](auto& l) { return contains(l, "log lines dropped"); }));
+    CHECK(contains(dm.render(), "crocket_log_lines_dropped_total "));
+    CHECK(!contains(dm.render(), "crocket_log_lines_dropped_total 0\n"));
+
+    LogCapture blocking;
+    Config wait = small;
+    wait.log.when_full = log::WhenFull::block;
+    wait.log.sink = slow(blocking);
+    Crocket ba = make_app(blocking, nullptr, wait);
+    LocalClient bc(ba);
+    (void)bc.get("/logs/burst").dispatch();
+    lines = blocking.all();
+    CHECK_EQ(std::ranges::count_if(lines, [](auto& l) { return contains(l, R"("msg":"line )"); }), 50);
+  }
+
+  section("logging: dev profile text");
+  {
+    LogCapture tlog;
+    Crocket ta = make_app(tlog, nullptr, Config::dev());
+    LocalClient tc(ta);
+    (void)tc.get("/logs").dispatch();
+    auto lines = tlog.all();
+    CHECK(std::ranges::any_of(lines, [](auto& l) { return contains(l, " DEBUG not at level info 1 ["); }));
+    CHECK(std::ranges::any_of(lines, [](auto& l) { return contains(l, " INFO  created user 42 on plan pro ["); }));
   }
 
   section("dev profile: details in error bodies only in dev");

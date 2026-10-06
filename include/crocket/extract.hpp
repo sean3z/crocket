@@ -244,7 +244,9 @@ struct FromRequest<Auth> {
       return std::unexpected(ApiError::unauthorized("auth.invalid", "authorization must use the Bearer scheme"));
     auto* verifier = r.state_registry ? r.state_registry->get<Authenticator>() : nullptr;
     if (!verifier) return std::unexpected(ApiError::internal("Auth used without a managed Authenticator"));
-    return verifier->verify(h->substr(scheme.size()));
+    auto auth = verifier->verify(h->substr(scheme.size()));
+    if (auth) r.subject = auth->subject;  // for log lines
+    return auth;
   }
   static void state_deps(std::vector<detail::StateDep>& out) { out.push_back(detail::state_dep<Authenticator>()); }
 };

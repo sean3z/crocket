@@ -6,6 +6,8 @@
 
 #include "crocket/http.hpp"
 
+#include <array>
+#include <initializer_list>
 #include <chrono>
 #include <stop_token>
 #include <string>
@@ -54,6 +56,30 @@ struct ReadOptions {
 }  // namespace json
 
 using Clock = std::chrono::steady_clock;
+
+/// The matched route's capture values, in template order. Fixed capacity, so
+/// routing allocates nothing; ignite rejects a route with more captures.
+class Captures {
+ public:
+  static constexpr std::size_t capacity = 16;
+  Captures() = default;
+  Captures(std::initializer_list<std::string_view> values) {
+    for (auto v : values) push_back(v);
+  }
+  void push_back(std::string_view v) noexcept {
+    if (n_ < capacity) items_[n_++] = v;
+  }
+  void clear() noexcept { n_ = 0; }
+  [[nodiscard]] std::size_t size() const noexcept { return n_; }
+  [[nodiscard]] bool empty() const noexcept { return n_ == 0; }
+  [[nodiscard]] std::string_view operator[](std::size_t i) const noexcept { return items_[i]; }
+  [[nodiscard]] const std::string_view* begin() const noexcept { return items_.data(); }
+  [[nodiscard]] const std::string_view* end() const noexcept { return items_.data() + n_; }
+
+ private:
+  std::array<std::string_view, capacity> items_{};
+  std::size_t n_ = 0;
+};
 
 /// Deadline and cancellation for one request. Available to blocking
 /// extractors (e.g. pool checkout) and to handlers as an extractor.
@@ -104,7 +130,7 @@ struct Request {
   // Set by the router for the candidate currently being tried.
   std::string_view route_template;  // "/users/{id}"; "" while unmatched
   std::string_view handler;         // "api::create"
-  std::vector<std::string_view> captures;
+  Captures captures;
 
   [[nodiscard]] std::optional<std::string_view> header(std::string_view name) const {
     return headers.get(name);

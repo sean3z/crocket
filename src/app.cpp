@@ -5,6 +5,7 @@
 #include "engine.hpp"
 #include "conditional.hpp"
 #include "identity.hpp"
+#include "log_hub.hpp"
 #include "router.hpp"
 
 #include <algorithm>
@@ -24,6 +25,7 @@ Config Config::dev() {
   c.profile = Profile::Dev;
   c.debug_routes = true;
   c.request_timeout = std::chrono::hours(1);
+  c.log.level = log::Level::debug;
   c.drain_timeout = std::chrono::seconds(1);
   return c;
 }
@@ -36,10 +38,20 @@ Config Config::from_env() {
   throw std::invalid_argument("CROCKET_PROFILE=" + std::string(p) + ": unknown profile (use dev or release)");
 }
 
-Crocket::Crocket(Config cfg) : core_(std::make_unique<detail::Core>()) { core_->config = std::move(cfg); }
+Crocket::Crocket(Config cfg) : core_(std::make_unique<detail::Core>()) {
+  core_->config = std::move(cfg);
+  core_->log = std::make_shared<log::detail::Hub>(core_->config.log, core_->config.profile == Profile::Dev,
+                                                  &core_->stats.log_dropped);
+}
 Crocket::Crocket(Crocket&&) noexcept = default;
 Crocket& Crocket::operator=(Crocket&&) noexcept = default;
-Crocket::~Crocket() = default;
+Crocket::~Crocket() {
+  if (core_) log::detail::clear_default(core_->log.get());
+}
+
+void Crocket::flush_logs() const {
+  if (core_ && core_->log) core_->log->flush();
+}
 
 Crocket& Crocket::mount(std::string_view base, Routes routes, Mode mode) & {
   if (core_->ignited)
@@ -52,6 +64,24 @@ Crocket& Crocket::configure(Config cfg) & {
   core_->config = std::move(cfg);
   return *this;
 }
+
+namespace {
+
+/// The trace id of a W3C traceparent ("00-<32 hex>-<16 hex>-<2 hex>"), or "".
+std::string trace_id_of(std::string_view tp) {
+  auto hex = [](std::string_view s) {
+    return std::ranges::all_of(s, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+  };
+  if (tp.size() < 55 || tp[2] != '-' || tp[35] != '-' || tp[52] != '-') return {};
+  auto version = tp.substr(0, 2), trace = tp.substr(3, 32), parent = tp.substr(36, 16), flags = tp.substr(53, 2);
+  if (!hex(version) || version == "ff" || !hex(trace) || !hex(parent) || !hex(flags)) return {};
+  if (version == "00" && tp.size() != 55) return {};
+  if (trace.find_first_not_of('0') == std::string_view::npos || parent.find_first_not_of('0') == std::string_view::npos)
+    return {};
+  return std::string(trace);
+}
+
+}  // namespace
 
 namespace {
 
@@ -234,6 +264,7 @@ std::expected<void, IgniteError> Crocket::ignite() {
   }
   c.router = std::make_shared<detail::Router>(c.routes);
   c.ignited = true;
+  log::detail::set_default(c.log);  // lines logged outside a request go here
   return {};
 }
 
@@ -242,6 +273,8 @@ void Crocket::prepare(Request& req) const {
     auto hdr = req.header("x-request-id");
     req.request_id = (hdr && valid_request_id(*hdr)) ? std::string(*hdr) : detail::generate_request_id();
   }
+  if (req.trace_id.empty())
+    if (auto tp = req.header("traceparent")) req.trace_id = trace_id_of(*tp);
   if (req.deadline.at == Clock::time_point::max()) {
     req.deadline.at = req.received + core_->config.request_timeout;
     // A gRPC client's deadline can only shorten the configured one.
@@ -261,6 +294,7 @@ void Crocket::prepare(Request& req) const {
 
 Response Crocket::handle(Request req) {
   prepare(req);
+  log::detail::RequestScope scope{core_->log, &req};  // log lines from here on carry this request
   core_->stats.in_flight.fetch_add(1, std::memory_order_relaxed);
   struct Dec {
     detail::Stats& s;
@@ -295,6 +329,7 @@ Response Crocket::handle(Request req) {
 
 Response Crocket::reject(Request& req, const ApiError& err) {
   prepare(req);
+  log::detail::RequestScope scope{core_->log, &req};
   Response res;
   write_error(err, req, res);
   finish(req, res);
@@ -322,8 +357,7 @@ void Crocket::finish(const Request& req, Response& res) {
     try {
       (*it)->on_response(req, res);
     } catch (const std::exception& e) {
-      std::fprintf(stderr, "crocket: fairing %.*s on_response threw: %s\n", int((*it)->name().size()),
-                   (*it)->name().data(), e.what());
+      log::error("fairing {fairing} on_response threw: {error}", (*it)->name(), std::string_view(e.what()));
     }
   }
 }
@@ -498,6 +532,7 @@ void shut_down(Crocket& app) {
     }
   }
   app.core().state.clear();
+  app.flush_logs();
 }
 }  // namespace detail
 

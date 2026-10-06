@@ -98,6 +98,7 @@ auto create(Json<NewUser> body, Auth auth, State<DbPool> db, Deadline d) -> Resu
   auto conn = db->checkout(d);
   if (!conn) return std::unexpected(conn.error());
   User u = (*conn)->insert(std::move(*body), auth.subject);
+  log::info("created user {user_id}", u.id);  // tagged with the request id, route and subject
   return Created<User>{u, "/api/users/" + std::to_string(u.id)};
 }
 

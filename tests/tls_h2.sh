@@ -122,7 +122,9 @@ echo "[request id propagation]"
 rid=$(curl -sk --http1.1 -D - -o /dev/null -H 'x-request-id: trace-123' "$BASE/healthz" | tr -d '\r' |
       sed -n 's/^x-request-id: //p')
 expect "X-Request-Id honoured over http/1.1" "trace-123" "$rid"
-grep -q '"id":"trace-123"' "$WORK/serve.log" && pass "request id in log line" || fail "request id in log line"
+grep -q '"request_id":"trace-123"' "$WORK/serve.log" && pass "request id in log line" || fail "request id in log line"
+grep -q '"msg":"created user [0-9]*","request_id":"[0-9a-f]*",.*"subject":"alice","user_id":' "$WORK/serve.log" \
+  && pass "handler log line carries the request" || fail "handler log line carries the request"
 grep -q '"route":"/api/users/{id}"' "$WORK/serve.log" && pass "log uses route template" || fail "log uses route template"
 curl -sk "$BASE/metrics" | grep -q 'route="/api/users/{id}"' && pass "metrics by route template" ||
   fail "metrics by route template"

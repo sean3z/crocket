@@ -6,3 +6,5 @@
 /compile_commands.json
 # ./dev bench results (machine-specific)
 /bench/results/
+# cargo, if bench/rocket is built directly rather than by ./dev bench
+/bench/rocket/target/

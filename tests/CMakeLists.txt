@@ -13,6 +13,12 @@ add_executable(crocket_async_test async.cpp)
 target_link_libraries(crocket_async_test PRIVATE crocket)
 add_test(NAME async COMMAND crocket_async_test)
 
+# The trie router against the linear scan it replaced, on random route tables.
+add_executable(crocket_router_test router.cpp)
+target_link_libraries(crocket_router_test PRIVATE crocket)
+target_include_directories(crocket_router_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME router COMMAND crocket_router_test)
+
 add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)

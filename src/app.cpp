@@ -209,6 +209,10 @@ std::expected<void, IgniteError> Crocket::ignite() {
       std::vector<http::Segment> segs;
       if (auto err = http::parse_template(r.path, segs); !err.empty())
         errors.push_back(describe(r) + ": " + err);
+      else if (segs.size() > detail::Router::kMaxSegments)
+        errors.push_back(describe(r) + ": more than " + std::to_string(detail::Router::kMaxSegments) + " path segments");
+      else if (std::ranges::count_if(segs, &http::Segment::capture) > std::ptrdiff_t(Captures::capacity))
+        errors.push_back(describe(r) + ": more than " + std::to_string(Captures::capacity) + " captures");
       routes.push_back(std::move(r));
     }
   }
@@ -503,18 +507,19 @@ bool Crocket::run_routes(Request& req, Response& res) {
   auto candidates = core_->router->match(req.method, req.path);
   bool forwarded = false;
   std::string forward_detail;
-  for (auto& cand : candidates) {
-    req.route_template = cand.def->path;
-    req.handler = cand.def->handler;
-    req.captures = std::move(cand.captures);
-    if (cand.def->builtin != detail::Builtin::None) {
-      res = builtin(cand.def->builtin, req);
+  for (const auto* cand : candidates) {
+    const RouteDef& def = *cand->def;
+    req.route_template = def.path;
+    req.handler = def.handler;
+    req.captures = candidates.captures(*cand);
+    if (def.builtin != detail::Builtin::None) {
+      res = builtin(def.builtin, req);
       return false;
     }
 
     res = Response{};
     try {
-      auto out = cand.def->invoke(req, res);
+      auto out = def.invoke(req, res);
       if (out.kind == detail::Outcome::Async) return true;
       if (out.kind == detail::Outcome::Done) return false;
       if (out.kind == detail::Outcome::Forward) {

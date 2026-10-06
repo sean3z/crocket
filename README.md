@@ -175,6 +175,10 @@ auto user_by_name(std::string_view name) -> std::string;     // /user/ada
 Two routes with the same method, path shape and rank are a conflict. They fail at
 ignite with both handlers named.
 
+Routes are compiled at ignite into a tree keyed by path segment, so finding the
+candidates takes the same time with 10 routes or 1,000 and allocates nothing. A route
+may have up to 64 segments and 16 captures; longer paths are 404.
+
 ### Request guards: extractors
 
 Every parameter that isn't a path capture is an **extractor**. Extractors are
@@ -1081,6 +1085,7 @@ differences of a few percent as noise. `--duration` and `--clients` change the l
 |---|---|
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, application logging (templates, context, redaction, sampling, levels, a full buffer), metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
+| `router` | The route tree against a linear scan of every route, over 2,000 random route tables: the same candidates in the same order, the same captures, HEAD falling back to GET, and the same methods for 405. |
 | `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |

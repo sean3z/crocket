@@ -567,6 +567,30 @@ int main() {
     CHECK_EQ(m.status, 200);
     CHECK(contains(m.body, R"(crocket_http_requests_total{method="GET",route="/hello/{name}/{age}",status="200"})"));
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/users",kind="json"})"));
+    // A method crocket does not know is "_OTHER": made-up methods cannot add series.
+    auto series = [&] {
+      auto body = client.get("/metrics").dispatch().body;
+      return std::ranges::count(body, '\n');
+    };
+    for (int i = 0; i < 1000; ++i) {
+      Request odd;
+      odd.method = http::Method::Unknown;
+      odd.method_text = std::format("JUNK{}", i);
+      odd.path = "/hello/Ada/36";
+      (void)app.handle(std::move(odd));
+    }
+    auto after_junk = series();
+    for (int i = 1000; i < 2000; ++i) {
+      Request odd;
+      odd.method = http::Method::Unknown;
+      odd.method_text = std::format("JUNK{}", i);
+      odd.path = "/hello/Ada/36";
+      (void)app.handle(std::move(odd));
+    }
+    CHECK_EQ(series(), after_junk);  // the same few _OTHER series, counted higher
+    auto mb = client.get("/metrics").dispatch().body;
+    CHECK(contains(mb, R"(crocket_http_requests_total{method="_OTHER",route="<unmatched>",status=")"));
+    CHECK(!contains(mb, "JUNK"));
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/users",kind="auth"})"));
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/hello/{name}/{age}",kind="path"})"));
     CHECK(contains(m.body, "crocket_http_requests_in_flight 1"));  // the scrape itself

@@ -1132,7 +1132,8 @@ differences of a few percent as noise.
 
 When h2load itself runs out of CPU, requests per second measures the client, not the
 server, and `./dev bench` warns: `h2load's threads were 98% busy, so req/s is the client's
-limit`. CPU per request does not depend on the client, so compare that instead. `--duration`, `--clients` and `--threads` (h2load's) change the load.
+limit`. CPU per request does not depend on the client, so compare that instead. `--duration`, `--clients` and `--threads` (h2load's) change the load. `--realistic`
+attaches `Logger` and `Metrics` to the server, as most production apps do.
 
 `--vs-rocket` builds [bench/rocket](bench/rocket) (Rocket 0.5, the same routes and bodies)
 with cargo, runs the same scenarios against it over HTTP/1.1 (Rocket serves HTTP/2 only

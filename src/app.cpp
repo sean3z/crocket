@@ -616,6 +616,7 @@ bool Crocket::run_routes(Request& req, Response& res) {
       return true;
     }
     req.route_template = def.path;
+    req.route = &def;
     req.handler = def.handler;
     req.captures = candidates.captures(*cand);
     if (def.builtin != detail::Builtin::None) {
@@ -662,6 +663,7 @@ bool Crocket::run_routes(Request& req, Response& res) {
     return false;
   }
   req.route_template = {};
+  req.route = nullptr;
   req.handler = {};
   if (grpc::is_grpc_request(req)) {
     write_error(grpc::error(grpc::Code::Unimplemented, "grpc.unimplemented", "unknown method " + req.path), req, res);

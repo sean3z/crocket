@@ -78,6 +78,14 @@ only it takes. Shutdown is in three phases:
    workers. Meanwhile the loops keep delivering completions.
 3. Each loop closes its connections and tears itself down.
 
+A request whose every candidate route has an async handler (`RouteDef::async`) runs on
+its loop: fairings, routing, extractors and the handler, with no handoff. The loop is the
+exchange's executor, so the task resumes there, through a second `h2o_multithread`
+receiver for jobs, and a response produced on the loop is written immediately. If routing
+on the loop reaches a handler that may block (an `on_request` fairing rewrote the
+request), the exchange is routed again on a worker. A loop held for more than 10 ms is
+logged once per handler (`detail::LoopHold`). Other requests go to the workers as below.
+
 Each request lives in a heap-allocated `detail::Exchange` from the start of the pipeline,
 so the `Request` and `Response` stay at one address while a handler refers to them. A
 `Task<T>` handler runs on the worker until it first suspends. The worker then returns to

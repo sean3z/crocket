@@ -1,11 +1,11 @@
 #pragma once
 // Task<T>: a lazy coroutine type handlers may return instead of T.
 //
-// A handler returning Task<T> runs on a worker until it first suspends; the
-// worker then goes back to the pool, and the task continues on a worker when
-// what it awaits completes. Code in a Task always runs on a crocket worker,
-// with the request's context (log lines, Deadline): an awaitable from another
-// library that resumes on its own thread is followed by a hop back to a worker.
+// A handler returning Task<T> runs on its connection's event loop: it must not
+// block, and while it waits the loop serves other connections. Code in a Task
+// always runs on that loop (in LocalClient, on a worker), with the request's
+// context (log lines, Deadline): an awaitable from another library that resumes
+// on its own thread is followed by a hop back.
 
 #include <coroutine>
 #include <exception>

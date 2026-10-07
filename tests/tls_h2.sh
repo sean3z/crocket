@@ -101,6 +101,18 @@ wait "${naps[@]}"  # not a bare wait: the server runs in the background too
 took=$(( ($(date +%s%N) - start) / 1000000 ))
 expect "20 suspended handlers on 2 workers" "20" "$(cat "$WORK"/nap.* | grep -o 'napped 500 ms' | wc -l | tr -d ' ')"
 expect_match "  ... at the same time (${took} ms)" "^yes$" "$( ((took < 2500)) && echo yes || echo no)"
+# Async handlers run on the event loops: with both workers blocked, they still answer.
+slows=()
+for i in 1 2; do curl -sk -o /dev/null "$BASE/api/slow/2000" & slows+=($!); done
+sleep 0.3
+start=$(date +%s%N)
+naps=()
+for i in $(seq 20); do curl -sk -o "$WORK/busy.$i" "$BASE/api/nap/100" & naps+=($!); done
+wait "${naps[@]}"
+took=$(( ($(date +%s%N) - start) / 1000000 ))
+expect "async handlers while every worker blocks" "20" "$(cat "$WORK"/busy.* | grep -o 'napped 100 ms' | wc -l | tr -d ' ')"
+expect_match "  ... without waiting for a worker (${took} ms)" "^yes$" "$( ((took < 1000)) && echo yes || echo no)"
+wait "${slows[@]}"
 expect "a deadline wakes a sleeping task: 504" "504" \
   "$(curl -sk -o /dev/null -w '%{http_code}' -H 'grpc-timeout: 200m' "$BASE/api/nap/5000")"
 expect "the server is free again" "napped 1 ms" "$(curl -sk "$BASE/api/nap/1")"

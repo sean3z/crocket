@@ -7,6 +7,9 @@
 //   wait       GET  /wait                       the handler blocks its worker for 20 ms
 //   wait_async GET  /wait_async                 the handler suspends for 20 ms (no worker held)
 //
+// plaintext_async, json_async, orders_async and router_async are the same as
+// Task<T> handlers under /async: they run on the event loop, with no handoff.
+//
 //   CROCKET_PORT (18600), CROCKET_WORKERS and CROCKET_EVENT_LOOPS (0: the defaults), CROCKET_BENCH_LOGGER=1
 //   to attach Logger (lines go to a sink that drops them).
 
@@ -63,6 +66,26 @@ auto wait_async() -> Task<std::string> {
 
 }  // namespace bench
 
+namespace bench_async {
+
+[[= http::get("/plaintext")]]
+auto plaintext() -> Task<std::string> { co_return "Hello, World!"; }
+
+[[= http::get("/json")]]
+auto json() -> Task<Json<bench::Message>> { co_return Json{bench::Message{"Hello, World!"}}; }
+
+[[= http::post("/orders")]]
+auto orders(Json<bench::Order> order) -> Task<Json<bench::Order>> { co_return order; }
+
+}  // namespace bench_async
+
+namespace resource_async {
+
+[[= http::get("/users/{id}/orders/{order}")]]
+auto order(std::uint64_t id, std::uint64_t order) -> Task<std::string> { co_return std::to_string(id + order); }
+
+}  // namespace resource_async
+
 // Mounted at /api/v0 ... /api/v39: 200 routes the router scenario's target sits behind.
 namespace resource {
 
@@ -95,7 +118,9 @@ int main() {
   Crocket app{cfg};
   if (env_uint("CROCKET_BENCH_LOGGER", 0)) app.attach(Logger{});
   app.mount("/", reflect_routes<^^bench>());
+  app.mount("/async", reflect_routes<^^bench_async>());
   for (int i = 0; i < 40; ++i) app.mount("/api/v" + std::to_string(i), reflect_routes<^^resource>());
+  for (int i = 0; i < 40; ++i) app.mount("/async/api/v" + std::to_string(i), reflect_routes<^^resource_async>());
   return app.launch({.host = "127.0.0.1",
                      .port = std::uint16_t(env_uint("CROCKET_PORT", 18600)),
                      .workers = env_uint("CROCKET_WORKERS", 0),

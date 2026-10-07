@@ -1,5 +1,5 @@
 #pragma once
-// Awaitables for Task<T> handlers that free the worker while they wait.
+// Awaitables for Task<T> handlers that free their thread while they wait.
 //
 //   [[= http::get("/quote/{sym}")]]
 //   auto quote(std::string sym) -> Task<std::string> {
@@ -8,7 +8,7 @@
 //     co_return co_await std::move(price);
 //   }
 //
-// Both resume the task on a crocket worker with the request's context.
+// Both resume the task where it runs (its event loop) with the request's context.
 
 #include "crocket/task.hpp"
 

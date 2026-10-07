@@ -267,12 +267,14 @@ Routes reflect_routes() {
         d.rpc = grpc::detail::method_name(fn);
         d.path = "/" + std::string(d.service) + "/" + std::string(d.rpc);  // mount() adds the package
         d.invoke = &grpc::detail::invoke<&[:fn:], bindings.data()>;
+        d.async = detail::Awaitable<std::remove_cvref_t<typename detail::fn_traits<decltype(&[:fn:])>::ret>>;
       } else {
         constexpr http::Route route = r::route_of(fn);
         d.method = route.method;
         d.path = route.path;
         d.rank = route.rank;
         d.invoke = &detail::invoke<&[:fn:], bindings.data()>;
+        d.async = detail::Awaitable<std::remove_cvref_t<typename detail::fn_traits<decltype(&[:fn:])>::ret>>;
       }
       constexpr auto params = std::define_static_array(std::meta::parameters_of(fn));
       template for (constexpr std::size_t i : std::define_static_array(std::views::iota(std::size_t{0}, params.size()))) {

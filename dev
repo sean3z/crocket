@@ -191,6 +191,10 @@ BENCH_SCENARIOS=(
   "router GET /api/v39/users/7/orders/9"
   "wait GET /wait"
   "wait_async GET /wait_async"
+  "plaintext_async GET /async/plaintext"
+  "json_async GET /async/json"
+  "orders_async POST /async/orders body"
+  "router_async GET /async/api/v39/users/7/orders/9"
 )
 
 bench_body() { # a 1 KB order for POST /orders
@@ -278,12 +282,12 @@ bench_vs_rocket() { # rows -> a crocket/Rocket table for the HTTP/1.1 scenarios
     { v[$1 FS $2] = $3 }
     $1 !~ /^rocket:/ && $1 ~ /\.h1$/ && $2 == "req_per_s" { names[++n] = substr($1, 1, length($1) - 3) }
     END {
-      printf "  %-12s %14s %14s %8s   %-17s %-17s\n", "", "crocket req/s", "Rocket req/s", "ratio", "p50 ms (c / R)", "p99 ms (c / R)"
+      printf "  %-16s %14s %14s %8s   %-17s %-17s\n", "", "crocket req/s", "Rocket req/s", "ratio", "p50 ms (c / R)", "p99 ms (c / R)"
       for (i = 1; i <= n; i++) {
         c = names[i] ".h1"; r = "rocket:" names[i] ".h1"
         if (!((r FS "req_per_s") in v)) continue
         cr = v[c FS "req_per_s"]; rr = v[r FS "req_per_s"]
-        printf "  %-12s %14.0f %14.0f %7.2fx   %6.2f / %-8.2f %6.2f / %-8.2f\n", names[i], cr, rr, (rr > 0 ? cr / rr : 0),
+        printf "  %-16s %14.0f %14.0f %7.2fx   %6.2f / %-8.2f %6.2f / %-8.2f\n", names[i], cr, rr, (rr > 0 ? cr / rr : 0),
                v[c FS "p50_ms"], v[r FS "p50_ms"], v[c FS "p99_ms"], v[r FS "p99_ms"]
       }
     }' "$1"

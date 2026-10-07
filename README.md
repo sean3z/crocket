@@ -939,8 +939,11 @@ What you get:
 - **Graceful shutdown on SIGINT/SIGTERM:** stop accepting, drain in-flight requests,
   run `on_shutdown`, then destroy managed state.
 
-Network I/O runs on one event loop per core (`LaunchOptions::event_loops`), each with its
-own listening socket on the port. `Task<T>` handlers run on the loops, and plain functions
+Network I/O runs on one event loop per physical core (`LaunchOptions::event_loops`), each
+with its own listening socket on the port. Hyperthreads of a core don't get a loop each:
+two loops sharing a core compete for it, and a loop that waits for a CPU stalls every
+connection it owns. CPUs outside the process's affinity mask (a container's cpuset,
+`taskset`) are not counted. `Task<T>` handlers run on the loops, and plain functions
 on a pool of `LaunchOptions::workers` threads.
 
 Requests whose headers exceed `LaunchOptions::max_header_bytes` (8 KiB) or
@@ -1110,6 +1113,7 @@ throughput.
 |---|---|
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers acceptance items 1–4 and 6, plus routing, responders, request ids, log lines, application logging (templates, context, redaction, sampling, levels, a full buffer), metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
+| `cpus` | The default number of event loops: physical cores from CPU topology, counting hyperthread siblings once, honouring the affinity mask, and falling back when topology is missing. |
 | `router` | The route tree against a linear scan of every route, over 2,000 random route tables: the same candidates in the same order, the same captures, HEAD falling back to GET, and the same methods for 405. |
 | `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
@@ -1131,7 +1135,7 @@ throughput.
 | `CROCKET_REQUEST_TIMEOUT` | `10` (an hour in dev) | Request deadline in seconds |
 | `CROCKET_DEBUG_ROUTES` | unset | Set to any value to expose `GET /__routes` |
 | `CROCKET_WORKERS` | one per core | Handler threads |
-| `CROCKET_EVENT_LOOPS` | one per core | Network I/O threads |
+| `CROCKET_EVENT_LOOPS` | one per physical core | Network I/O threads |
 
 ## Differences from REQUIREMENTS.md
 

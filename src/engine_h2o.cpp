@@ -18,6 +18,7 @@
 // See docs/ENGINE.md.
 
 #include "engine.hpp"
+#include "cpus.hpp"
 #include "crocket/grpc.hpp"
 
 #include <h2o.h>
@@ -766,7 +767,7 @@ int Engine::run() {
   // One listening socket per event loop, all on the same port (SO_REUSEPORT):
   // the kernel spreads new connections across them.
   unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-  unsigned n_loops = std::min<unsigned>(opts_.event_loops ? opts_.event_loops : cores, kMaxLoops);
+  unsigned n_loops = std::min<unsigned>(opts_.event_loops ? opts_.event_loops : default_event_loops(), kMaxLoops);
   std::vector<int> fds;
   std::uint16_t port = opts_.port;
   for (unsigned i = 0; i < n_loops; ++i) {

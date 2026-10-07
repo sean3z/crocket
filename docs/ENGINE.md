@@ -55,7 +55,10 @@ compete for one core, and a loop that waits for a CPU stalls all of its connecti
 16-core, 32-thread machine, 16 loops served about 1.6 times the requests of 32. Each has its own `h2o_context_t`, `h2o_evloop_t` and listening
 socket. The sockets share the port through `SO_REUSEPORT`, so the kernel spreads new
 connections across the loops, and a connection stays on one loop for its whole life. A
-loop owns every h2o object of its connections. Only the `h2o_globalconf_t` (read-only
+loop owns every h2o object of its connections. Because `SO_REUSEPORT` would also let the
+sockets join another process's on the same port, and quietly take a share of its
+connections, the engine first binds an ordinary socket there. If anyone holds the port,
+that bind fails with "address already in use", as it does with a single loop. Only the `h2o_globalconf_t` (read-only
 once serving) and the TLS context are shared.
 
 Handlers run on one worker pool of `LaunchOptions::workers` threads (0 means

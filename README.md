@@ -1111,7 +1111,8 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 `load` runs [h2load](https://nghttp2.org/documentation/h2load-howto.html) against
 `crocket_bench` ([bench/server.cpp](bench/server.cpp)) over HTTP/1.1 and h2c, and reports
-requests per second, p50 and p99 latency, and non-2xx responses:
+requests per second, p50 and p99 latency, non-2xx responses, and the server's CPU time per
+request (`server_us_per_req`: user plus kernel, all threads):
 
 | Scenario | Request | Measures |
 |---|---|---|
@@ -1127,14 +1128,19 @@ requests per second, p50 and p99 latency, and non-2xx responses:
 pipeline and JSON, and counts heap allocations per operation. Results are saved in
 `bench/results/`, which git ignores: numbers compare only on the same machine, with the
 same load on it. The load generator shares the machine with the server, so treat
-differences of a few percent as noise. `--duration`, `--clients` and `--threads` (h2load's) change the load.
+differences of a few percent as noise.
+
+When h2load itself runs out of CPU, requests per second measures the client, not the
+server, and `./dev bench` warns: `h2load's threads were 98% busy, so req/s is the client's
+limit`. CPU per request does not depend on the client, so compare that instead. `--duration`, `--clients` and `--threads` (h2load's) change the load.
 
 `--vs-rocket` builds [bench/rocket](bench/rocket) (Rocket 0.5, the same routes and bodies)
 with cargo, runs the same scenarios against it over HTTP/1.1 (Rocket serves HTTP/2 only
 over TLS), and prints the two side by side. The load is closed-loop: each connection waits
 for its response before sending the next request. So with few connections the numbers
 mostly reflect per-request latency, and with many (`--clients 256` or more) the server's
-throughput.
+throughput, until the client runs out of CPU. The last column, CPU per request, compares
+the two servers whatever the client's limit.
 
 ## Tests
 

@@ -38,7 +38,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <latch>
@@ -165,7 +167,9 @@ class Engine final : public Executor {
   friend class Loop;
 
   bool setup_tls();
-  int open_listener(std::uint16_t port, bool reuse_port);
+  /// A bound socket on the port: listening, or with `probe` only bound (to
+  /// check that nobody else holds the port).
+  int open_listener(std::uint16_t port, bool reuse_port, bool probe = false);
 
   // --- worker side ---------------------------------------------------------------
   void start_workers(unsigned n);
@@ -646,7 +650,7 @@ bool Engine::setup_tls() {
   return true;
 }
 
-int Engine::open_listener(std::uint16_t listen_port, bool reuse_port) {
+int Engine::open_listener(std::uint16_t listen_port, bool reuse_port, bool probe) {
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
@@ -664,13 +668,16 @@ int Engine::open_listener(std::uint16_t listen_port, bool reuse_port) {
     int on = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) != 0 ||
         (reuse_port && setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on) != 0) ||
-        ::bind(fd, ai->ai_addr, ai->ai_addrlen) != 0 || ::listen(fd, SOMAXCONN) != 0) {
+        ::bind(fd, ai->ai_addr, ai->ai_addrlen) != 0 || (!probe && ::listen(fd, SOMAXCONN) != 0)) {
       ::close(fd);
       fd = -1;
     }
   }
   freeaddrinfo(found);
-  if (fd < 0) std::fprintf(stderr, "crocket: could not listen on %s:%u\n", opts_.host.c_str(), unsigned(opts_.port));
+  if (fd < 0)
+    std::fprintf(stderr, "crocket: could not listen on %s:%u: %s\n", opts_.host.c_str(), unsigned(listen_port),
+                 errno == EADDRINUSE ? "address already in use (is another server, or another copy of this one, running?)"
+                                     : std::strerror(errno));
   return fd;
 }
 
@@ -770,6 +777,14 @@ int Engine::run() {
   unsigned n_loops = std::min<unsigned>(opts_.event_loops ? opts_.event_loops : default_event_loops(), kMaxLoops);
   std::vector<int> fds;
   std::uint16_t port = opts_.port;
+  if (n_loops > 1 && port != 0) {
+    // SO_REUSEPORT would let these sockets join another process's on the same
+    // port and silently take a share of its connections. A plain bind first
+    // fails with "address in use" if anyone listens there.
+    int probe = open_listener(port, false, true);
+    if (probe < 0) return fail(fds);
+    ::close(probe);
+  }
   for (unsigned i = 0; i < n_loops; ++i) {
     int fd = open_listener(port, n_loops > 1);
     if (fd < 0) return fail(fds);

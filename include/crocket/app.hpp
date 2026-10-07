@@ -70,7 +70,7 @@ struct LaunchOptions {
   std::string tls_cert = {};
   std::string tls_key = {};
   unsigned workers = 0;                  // handler threads; 0 = hardware concurrency
-  unsigned event_loops = 0;              // network I/O threads; 0 = hardware concurrency
+  unsigned event_loops = 0;              // network I/O threads; 0 = one per physical core
   std::size_t max_header_bytes = 8192;   // names + values; 431 headers.too_large
   std::size_t max_header_count = 100;    // 431 headers.too_large
   bool http2 = true;                     // offer h2 via ALPN when TLS is on

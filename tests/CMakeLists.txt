@@ -19,6 +19,12 @@ target_link_libraries(crocket_router_test PRIVATE crocket)
 target_include_directories(crocket_router_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME router COMMAND crocket_router_test)
 
+# The default number of event loops: physical cores from (fake) CPU topology.
+add_executable(crocket_cpus_test cpus.cpp)
+target_link_libraries(crocket_cpus_test PRIVATE crocket)
+target_include_directories(crocket_cpus_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME cpus COMMAND crocket_cpus_test)
+
 add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)

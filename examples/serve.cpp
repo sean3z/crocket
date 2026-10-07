@@ -5,7 +5,7 @@
 //   CROCKET_PORT=8443 CROCKET_TLS_CERT=cert.pem CROCKET_TLS_KEY=key.pem ./build/crocket_serve
 //   CROCKET_DEBUG_ROUTES=1 ./build/crocket_serve          # exposes GET /__routes
 //   CROCKET_WORKERS=2 ./build/crocket_serve                # handler threads (default: one per core)
-//   CROCKET_EVENT_LOOPS=4 ./build/crocket_serve            # network I/O threads (default: one per core)
+//   CROCKET_EVENT_LOOPS=4 ./build/crocket_serve            # network I/O threads (default: one per physical core)
 //
 //   curl localhost:8000/api/users/1
 //   curl -X POST localhost:8000/api/users -H 'authorization: Bearer alice' \

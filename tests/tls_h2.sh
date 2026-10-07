@@ -28,7 +28,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$WORK/key.pem" -out "$WORK/cert.pem" >/dev/null 2>&1 || { echo "openssl failed"; exit 1; }
 
 # A 15 s deadline leaves room for the 11 s handler below.
-CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 CROCKET_WORKERS=2 \
+CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" CROCKET_REQUEST_TIMEOUT=15 CROCKET_WORKERS=2 CROCKET_DEBUG_ROUTES=1 \
   "$SERVE" >"$WORK/serve.log" 2>&1 &
 SRV_PID=$!
 wait_up "$BASE/healthz" || { echo "server did not start"; cat "$WORK/serve.log"; exit 1; }
@@ -116,6 +116,19 @@ wait "${slows[@]}"
 expect "a deadline wakes a sleeping task: 504" "504" \
   "$(curl -sk -o /dev/null -w '%{http_code}' -H 'grpc-timeout: 200m' "$BASE/api/nap/5000")"
 expect "the server is free again" "napped 1 ms" "$(curl -sk "$BASE/api/nap/1")"
+
+echo "[adaptive placement]"
+runs_on() { curl -sk "$BASE/__routes" | grep -o '"path":"/api/slow/{ms}","handler":"[^"]*","rank":[0-9-]*,"runs_on":"[^"]*"' | sed 's/.*"runs_on":"//; s/"$//'; }
+expect "a plain function starts on workers" "workers" "$(runs_on)"
+curl -sk -o /dev/null "$BASE/api/slow/0?n=[1-1100]"  # one connection, 1,100 fast runs
+expect "after 1,000 fast runs it runs on the event loops" "event loop" "$(runs_on)"
+grep -q 'api::slow runs on the event loops from now on' "$WORK/serve.log" && pass "  ... and says so" || fail "  ... and says so"
+expect "a slow run on a loop" "slept 50 ms" "$(curl -sk "$BASE/api/slow/50")"
+expect "  ... moves it back to workers" "workers" "$(runs_on)"
+grep -q 'api::slow took [0-9]* ms on an event loop' "$WORK/serve.log" && pass "  ... and says why" || fail "  ... and says why"
+pool_runs_on() { curl -sk "$BASE/__routes" | grep -o '"path":"/api/users/{id}","handler":"[^"]*","rank":[0-9-]*,"runs_on":"[^"]*"' | sed 's/.*"runs_on":"//; s/"$//'; }
+curl -sk -o /dev/null "$BASE/api/users/1?n=[1-1100]"
+expect "a handler taking a Pool stays on workers however fast" "workers" "$(pool_runs_on)"
 
 echo "[http/1.1 bodies]"
 expect "chunked upload" "201" \

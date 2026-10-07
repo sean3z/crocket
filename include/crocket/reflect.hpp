@@ -240,6 +240,7 @@ void describe_param(RouteDef& d, std::string_view name, std::string_view type, B
   } else if constexpr (Extractor<U>) {
     d.params.push_back({name, FromRequest<U>::kind, type});
     collect_state_deps<U>(d.needs);
+    if constexpr (requires { FromRequest<U>::may_block; }) d.may_block = d.may_block || FromRequest<U>::may_block;
   }
 }
 

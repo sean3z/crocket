@@ -20,6 +20,12 @@ namespace crocket {
 
 template <class T>
 class Pool {
+ public:
+  /// checkout() waits when every connection is out: handlers using a Pool stay
+  /// on workers, never on an event loop (Config::adaptive_placement).
+  static constexpr bool crocket_may_block = true;
+
+ private:
   struct Shared {
     std::mutex mu;
     std::condition_variable_any cv;

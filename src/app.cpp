@@ -253,6 +253,7 @@ std::expected<void, IgniteError> Crocket::ignite() {
   }
 
   c.routes = std::move(routes);
+  c.placement = std::make_unique<detail::Placement[]>(c.routes.size());
 
   // 5. Fairings get the last word. Shield is on unless one is attached already
   // (Shield::none() turns it off); attached last, its on_response runs first.
@@ -369,7 +370,7 @@ Exchange* current_exchange() noexcept { return t_exchange; }
 
 LoopHold::~LoopHold() {
   auto held = std::chrono::steady_clock::now() - since;
-  if (held < kLoopHoldWarning) return;
+  if (!report || held < kLoopHoldWarning) return;
   // Once per handler: the point is to find it, not to flood the log.
   static std::mutex mu;
   static std::set<std::string_view> warned;
@@ -429,13 +430,50 @@ void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&
   run(new detail::Exchange(*this, std::move(req), std::move(done), loop));
 }
 
-bool Crocket::async_route(http::Method method, std::string_view path) const {
+bool Crocket::loop_route(http::Method method, std::string_view path) const {
   if (!core_->ignited) return false;
   auto candidates = core_->router->match(method, path);
   if (candidates.empty()) return false;  // 404 and 405 answers: a worker, as for any synchronous work
   for (const auto* c : candidates)
-    if (!c->def->async || c->def->builtin != detail::Builtin::None) return false;
+    if (!runs_on_loop(*c->def)) return false;
   return true;
+}
+
+bool Crocket::runs_on_loop(const RouteDef& def) const {
+  if (def.builtin != detail::Builtin::None) return false;
+  if (def.async) return true;
+  if (!core_->config.adaptive_placement || def.may_block) return false;
+  return core_->placement[std::size_t(&def - core_->routes.data())].on_loop.load(std::memory_order_relaxed);
+}
+
+void Crocket::ran_on_worker(const RouteDef& def, std::chrono::steady_clock::duration took) {
+  using P = detail::Placement;
+  auto& p = core_->placement[std::size_t(&def - core_->routes.data())];
+  if (p.on_loop.load(std::memory_order_relaxed)) return;
+  if (std::chrono::steady_clock::now().time_since_epoch().count() < p.retry_at.load(std::memory_order_relaxed)) return;
+  if (took >= P::kFast) {
+    if (p.fast_runs.load(std::memory_order_relaxed)) p.fast_runs.store(0, std::memory_order_relaxed);
+    return;
+  }
+  if (p.fast_runs.fetch_add(1, std::memory_order_relaxed) + 1 != P::kPromoteAfter) return;
+  p.on_loop.store(true, std::memory_order_relaxed);
+  log::info("{function} runs on the event loops from now on: {runs} runs in a row each took under {limit_us} us",
+            def.handler, P::kPromoteAfter, std::chrono::microseconds(P::kFast).count());
+}
+
+void Crocket::ran_on_loop(const RouteDef& def, std::chrono::steady_clock::duration took) {
+  using P = detail::Placement;
+  if (took <= P::kDemoteAfter) return;
+  auto& p = core_->placement[std::size_t(&def - core_->routes.data())];
+  if (!p.on_loop.exchange(false, std::memory_order_relaxed)) return;  // demoted already
+  auto n = p.demotions.fetch_add(1, std::memory_order_relaxed) + 1;
+  auto wait = P::kRetryAfter * (1u << std::min(n - 1, 8u));  // 10 s, 20 s, ... about 43 minutes
+  p.fast_runs.store(0, std::memory_order_relaxed);
+  p.retry_at.store((std::chrono::steady_clock::now() + wait).time_since_epoch().count(), std::memory_order_relaxed);
+  log::warn("{function} took {ms} ms on an event loop, stalling the other connections on it, so it runs on workers "
+            "again; it may move back after {retry_s} s of fast runs",
+            def.handler, std::chrono::duration_cast<std::chrono::milliseconds>(took).count(),
+            std::chrono::duration_cast<std::chrono::seconds>(wait).count());
 }
 
 Response Crocket::handle(Request req) {
@@ -486,6 +524,7 @@ void Crocket::run(detail::Exchange* ex) {
   bool suspended = !finished && run_routes(req, res);
   if (hold) {  // reported now, while the request is certainly alive
     hold->handler = req.handler;
+    hold->report = !ex->loop_hold_reported;
     hold.reset();
   }
   if (ex->reroute) {  // after the last use of req here: the worker takes it over
@@ -556,7 +595,7 @@ bool Crocket::run_routes(Request& req, Response& res) {
   std::string forward_detail;
   for (const auto* cand : candidates) {
     const RouteDef& def = *cand->def;
-    if (req.exchange && req.exchange->loop && (!def.async || def.builtin != detail::Builtin::None)) {
+    if (req.exchange && req.exchange->loop && !runs_on_loop(def)) {
       // On an event loop, but this handler may block (a fairing rewrote the
       // request, or an async candidate forwarded): run() routes it again on a worker.
       req.exchange->loop = nullptr;
@@ -573,7 +612,19 @@ bool Crocket::run_routes(Request& req, Response& res) {
 
     res = Response{};
     try {
+      // A plain function is timed, to learn where it should run (adaptive placement).
+      bool timed = core_->config.adaptive_placement && !def.async && !def.may_block;
+      auto started = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       auto out = def.invoke(req, res);
+      if (timed && out.kind != detail::Outcome::Forward) {
+        auto took = std::chrono::steady_clock::now() - started;
+        if (req.exchange && req.exchange->loop) {
+          req.exchange->loop_hold_reported = true;  // ran_on_loop reports a slow run
+          ran_on_loop(def, took);
+        } else {
+          ran_on_worker(def, took);
+        }
+      }
       if (out.kind == detail::Outcome::Async) return true;
       if (out.kind == detail::Outcome::Done) return false;
       if (out.kind == detail::Outcome::Forward) {
@@ -664,7 +715,10 @@ Response Crocket::builtin(detail::Builtin b, Request& /*req*/) {
         json::write_string(o, r.path);
         o += R"(,"handler":)";
         json::write_string(o, r.handler);
-        o += R"(,"rank":)" + std::to_string(r.rank) + R"(,"params":[)";
+        o += R"(,"rank":)" + std::to_string(r.rank);
+        o += R"(,"runs_on":)";
+        o += runs_on_loop(r) ? R"("event loop")" : R"("workers")";
+        o += R"(,"params":[)";
         for (std::size_t i = 0; i < r.params.size(); ++i) {
           if (i) o += ',';
           o += R"({"name":)";

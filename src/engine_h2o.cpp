@@ -439,8 +439,8 @@ void Loop::dispatch(Session* s) {
   rq.body = std::move(s->body);
   e_.outstanding_.fetch_add(1);
   std::uint64_t txn = s->txn;
-  if (app_.async_route(rq.method, rq.path)) {
-    // An async handler runs here, on the loop, with no handoff. The response
+  if (app_.loop_route(rq.method, rq.path)) {
+    // An async handler (or a plain function proved fast) runs here, on the loop, with no handoff. The response
     // comes back here: now, or when the task finishes (as a loop job).
     app_.handle_async(std::move(rq), [this, txn](Response&& res) {
       e_.outstanding_.fetch_sub(1);

@@ -759,8 +759,9 @@ In the dev profile, lines are readable text instead of JSON:
 Return `Task<T>` from the same annotations. A plain function and a `Task` differ in where
 they run:
 
-- **A plain function runs on a worker**, so it may block: a synchronous database call,
-  a file read, a lock. The network threads carry on meanwhile.
+- **A plain function may block**: a synchronous database call, a file read, a lock. It
+  starts on a worker, so the network threads carry on meanwhile. See
+  [adaptive placement](#adaptive-placement) for the fast ones.
 - **A `Task` runs on the event loop of its connection**, with no handoff to a worker, so
   it is the fastest kind of handler. While it waits on a `co_await`, the loop serves
   other connections. **It must not block.** It awaits instead, because blocking a loop
@@ -797,6 +798,30 @@ auto quote(std::string sym, State<PriceClient> prices) -> Task<Json<Quote>> {
 If an `on_request` fairing rewrites a request bound for a `Task` route so that it reaches
 a plain function, that request moves to a worker before the function runs. `LocalClient`
 waits for an async handler like any other.
+
+### Adaptive placement
+
+A plain function that turns out to be fast doesn't need a worker. Crocket times every
+run, and moves a route to the event loops once 1,000 runs in a row have each taken under
+100 µs. There it skips the handoff to a worker and back, as a `Task` does. The first time
+it then takes more than 1 ms on a loop, it moves back to workers. It can try the loops
+again after 10 s, then 20 s, and so on, so a route that is only sometimes slow settles on
+workers. Both moves are logged:
+
+```
+INFO  api::get_user runs on the event loops from now on: 1000 runs in a row each took under 100 us
+WARN  api::get_user took 48 ms on an event loop, stalling the other connections on it, so it runs on workers again; it may move back after 10 s of fast runs
+```
+
+- **Routes that may wait never move.** A route taking a `State<Pool<T>>` stays on workers
+  however fast it is, because a checkout is quick until the pool runs dry. A managed type
+  of your own can say the same with `static constexpr bool crocket_may_block = true;`.
+- **The one stall it allows** is the run that gets a route moved back: a route that has
+  been fast 1,000 times and then blocks holds its loop once.
+- **`GET /__routes`** shows where each route runs now (`"runs_on"`).
+- **`Config::adaptive_placement = false`** keeps every plain function on workers.
+
+Timing a run costs two clock reads, about 40 ns.
 
 ### Deadlines and cancellation
 
@@ -944,7 +969,8 @@ with its own listening socket on the port. Hyperthreads of a core don't get a lo
 two loops sharing a core compete for it, and a loop that waits for a CPU stalls every
 connection it owns. CPUs outside the process's affinity mask (a container's cpuset,
 `taskset`) are not counted. `Task<T>` handlers run on the loops, and plain functions
-on a pool of `LaunchOptions::workers` threads.
+on a pool of `LaunchOptions::workers` threads, or on the loops once they have proved fast
+(see [adaptive placement](#adaptive-placement)).
 
 Requests whose headers exceed `LaunchOptions::max_header_bytes` (8 KiB) or
 `max_header_count` (100) get 431 `headers.too_large`. The threading model and the other
@@ -1118,7 +1144,7 @@ throughput.
 | `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
-| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, 20 async handlers sharing 2 workers, and a deadline waking a sleeping task. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
+| `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, 20 async handlers sharing 2 workers, and a deadline waking a sleeping task. Also adaptive placement: a route promoted after 1,000 fast runs, demoted by one slow run, and a `Pool` route that is never promoted. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 

@@ -53,6 +53,10 @@ struct Config {
   /// profile also allows localhost.
   std::vector<std::string> allowed_hosts = {};
   json::ReadOptions json = {};                        // limits for Json<T> bodies
+  /// Run a plain-function route on the event loops once it has proved fast
+  /// (1,000 runs in a row under 100 us), and back on workers the first time it
+  /// takes over 1 ms there. Off: plain functions always run on workers.
+  bool adaptive_placement = true;
   log::Options log = {};                              // level, sampling, redaction, sink
 
   /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
@@ -105,6 +109,7 @@ struct RouteDef {
   detail::Invoker invoke = nullptr;
   detail::Builtin builtin = detail::Builtin::None;
   bool async = false;  // the handler returns Task<T> (or another awaitable): it runs on the event loop
+  bool may_block = false;  // takes an extractor that may wait (State<Pool<T>>): always on workers
   Mode mode = Mode::Http;
   std::string_view service;  // gRPC: "Greeter"
   std::string_view rpc;      // gRPC: "SayHello"
@@ -188,6 +193,7 @@ class Exchange {
   /// on a worker or in LocalClient.
   Executor* loop;
   bool reroute = false;  // routing found a handler that may block: route again on a worker
+  bool loop_hold_reported = false;  // a promoted plain function ran here: its demotion says it all
 
   /// The async handler finished filling `res`. Completes the request, unless
   /// the pipeline has not yet seen it suspend (it completes it then).
@@ -211,11 +217,25 @@ class Exchange {
 /// Workers when no engine runs (LocalClient, tasks outside requests).
 Executor& fallback_executor();
 
+/// Where a plain-function route runs, learned from how long it takes
+/// (Config::adaptive_placement). One per route, built at ignite.
+struct Placement {
+  static constexpr std::uint32_t kPromoteAfter = 1000;               // fast runs in a row on workers
+  static constexpr std::chrono::microseconds kFast{100};              // ... each under this
+  static constexpr std::chrono::milliseconds kDemoteAfter{1};        // one run on a loop over this
+  static constexpr std::chrono::seconds kRetryAfter{10};             // doubled per demotion
+  std::atomic<bool> on_loop{false};
+  std::atomic<std::uint32_t> fast_runs{0};
+  std::atomic<std::uint32_t> demotions{0};
+  std::atomic<std::int64_t> retry_at{0};  // steady_clock ticks; no promotion before
+};
+
 /// Measures how long a request holds its event loop; warns (once per handler)
 /// past kLoopHoldWarning, since every connection on the loop waits meanwhile.
 inline constexpr std::chrono::milliseconds kLoopHoldWarning{10};
 struct LoopHold {
   std::string_view handler;  // static storage (RouteDef); may be set after construction
+  bool report = true;
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
   explicit LoopHold(std::string_view h = {}) : handler(h) {}
   ~LoopHold();
@@ -239,6 +259,7 @@ struct Core {
   std::vector<IpRange> trusted_proxies;  // parsed at ignite
   std::shared_ptr<log::detail::Hub> log;  // where this app's log lines go
   std::atomic<Executor*> executor{nullptr};  // the engine's workers while launched
+  std::unique_ptr<Placement[]> placement;    // per route (Config::adaptive_placement)
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
   std::vector<ReadyCheck> ready_checks;
@@ -331,9 +352,10 @@ class Crocket {
   /// Called on an event loop (`loop`), async handlers run and resume there, and
   /// a synchronous handler moves to a worker. Used by the engine.
   void handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop = nullptr);
-  /// Whether every route that can answer method+path has an async handler, so
-  /// the event loop can run the request itself.
-  [[nodiscard]] bool async_route(http::Method method, std::string_view path) const;
+  /// Whether every route that can answer method+path runs on the event loop
+  /// (an async handler, or a plain function adaptive placement has promoted),
+  /// so the loop can run the request itself.
+  [[nodiscard]] bool loop_route(http::Method method, std::string_view path) const;
   /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);
 
@@ -357,6 +379,9 @@ class Crocket {
   void complete(detail::Exchange* ex);  // finish, deliver and free
   /// Routes req; true if the handler suspended (it completes the exchange later).
   bool run_routes(Request& req, Response& res);
+  [[nodiscard]] bool runs_on_loop(const RouteDef& def) const;
+  void ran_on_worker(const RouteDef& def, std::chrono::steady_clock::duration took);
+  void ran_on_loop(const RouteDef& def, std::chrono::steady_clock::duration took);
   Response builtin(detail::Builtin b, Request& req);
   void finish(const Request& req, Response& res);
   std::unique_ptr<detail::Core> core_;

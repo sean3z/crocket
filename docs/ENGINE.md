@@ -78,8 +78,13 @@ only it takes. Shutdown is in three phases:
    workers. Meanwhile the loops keep delivering completions.
 3. Each loop closes its connections and tears itself down.
 
-A request whose every candidate route has an async handler (`RouteDef::async`) runs on
-its loop: fairings, routing, extractors and the handler, with no handoff. The loop is the
+A request whose every candidate route runs on the loop (`Crocket::loop_route`) is handled
+on its loop. That is an async handler (`RouteDef::async`), or a plain function that
+adaptive placement has promoted. `run_routes` times each plain function: on a worker it
+counts consecutive runs under 100 µs and promotes the route after 1,000, and on a loop
+one run over 1 ms demotes it, with a growing back-off (`detail::Placement`, one per route,
+built at ignite). Routes that take an extractor with `may_block` (a `Pool`) are never
+promoted. Such a request runs on its loop: fairings, routing, extractors and the handler, with no handoff. The loop is the
 exchange's executor, so the task resumes there, through a second `h2o_multithread`
 receiver for jobs, and a response produced on the loop is written immediately. If routing
 on the loop reaches a handler that may block (an `on_request` fairing rewrote the

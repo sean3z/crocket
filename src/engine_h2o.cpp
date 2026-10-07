@@ -124,6 +124,12 @@ struct Done {
   Response* res;
 };
 
+/// A job for the event loop itself: an async handler to resume there.
+struct LoopJob {
+  h2o_multithread_message_t msg;
+  std::move_only_function<void()> run;
+};
+
 h2o_generator_t g_generator = {nullptr, nullptr};  // the whole body goes in one h2o_send
 
 const h2o_iovec_t kHttp1Alpn[] = {{const_cast<char*>("http/1.1"), 8}, {nullptr, 0}};
@@ -200,10 +206,15 @@ class Engine final : public Executor {
 /// spreads connections across loops), and every request on its connections.
 /// Everything here runs on the loop's thread, except the completion messages
 /// workers post to it.
-class Loop {
+class Loop final : public Executor {
  public:
   Loop(Engine& e, int listen_fd);
-  ~Loop();
+  ~Loop() override;
+
+  /// Executor: runs `job` on this loop's thread (async handlers resume here).
+  void post(std::move_only_function<void()> job) override {
+    h2o_multithread_send_message(&jobs_rx_.rx, &(new LoopJob{{}, std::move(job)})->msg);
+  }
 
   /// The loop's thread: serve until stop, then drain and close (see Engine::run).
   void serve();
@@ -232,6 +243,14 @@ class Loop {
   static void on_completions_cb(h2o_multithread_receiver_t* rx, h2o_linklist_t* messages) {
     reinterpret_cast<Receiver*>(rx)->loop->on_completions(messages);
   }
+  static void on_jobs_cb(h2o_multithread_receiver_t*, h2o_linklist_t* messages) {
+    while (!h2o_linklist_is_empty(messages)) {
+      auto* j = reinterpret_cast<LoopJob*>(messages->next);
+      h2o_linklist_unlink(&j->msg.link);
+      std::unique_ptr<LoopJob> owned(j);
+      owned->run();
+    }
+  }
   static void on_accept_cb(h2o_socket_t* listener, const char* err) {
     static_cast<Loop*>(listener->data)->on_accept(listener, err);
   }
@@ -242,6 +261,7 @@ class Loop {
   void on_deadline(Session* s);
   void on_kick(Session* s);
   void on_completions(h2o_linklist_t* messages);
+  void complete(std::uint64_t txn, Response&& res);
   void on_accept(h2o_socket_t* listener, const char* err);
   void forget(Session* s);
 
@@ -269,6 +289,7 @@ class Loop {
   h2o_socket_t* wake_ = nullptr;
   int wake_fd_ = -1;
   Receiver done_rx_{};
+  Receiver jobs_rx_{};
   bool drained_ = false;
   bool cleaned_up_ = false;
 
@@ -417,6 +438,16 @@ void Loop::dispatch(Session* s) {
   rq.body = std::move(s->body);
   e_.outstanding_.fetch_add(1);
   std::uint64_t txn = s->txn;
+  if (app_.async_route(rq.method, rq.path)) {
+    // An async handler runs here, on the loop, with no handoff. The response
+    // comes back here: now, or when the task finishes (as a loop job).
+    app_.handle_async(std::move(rq), [this, txn](Response&& res) {
+      e_.outstanding_.fetch_sub(1);
+      if (t_loop == this) complete(txn, std::move(res));
+      else h2o_multithread_send_message(&done_rx_.rx, &(new Done{{}, txn, new Response(std::move(res))})->msg);
+    }, this);
+    return;
+  }
   e_.queue_job([this, txn, rq = std::move(rq)]() mutable {
     // The response comes back to this loop, from this worker or, when an async
     // handler finishes, from another.
@@ -441,11 +472,16 @@ void Loop::on_completions(h2o_linklist_t* messages) {
     auto* d = reinterpret_cast<Done*>(messages->next);
     h2o_linklist_unlink(&d->msg.link);
     std::unique_ptr<Response> res(d->res);
-    auto it = live_.find(d->txn);
+    std::uint64_t txn = d->txn;
     delete d;
-    // Not found: the client went away, or the deadline already answered 504.
-    if (it != live_.end() && it->second->phase == Phase::Running) respond(it->second, std::move(*res));
+    complete(txn, std::move(*res));
   }
+}
+
+void Loop::complete(std::uint64_t txn, Response&& res) {
+  auto it = live_.find(txn);
+  // Not found: the client went away, or the deadline already answered 504.
+  if (it != live_.end() && it->second->phase == Phase::Running) respond(it->second, std::move(res));
 }
 
 void Loop::on_deadline(Session* s) {
@@ -570,10 +606,15 @@ void Engine::worker_loop() {
 
 bool Engine::wait_workers_idle(Clock::time_point until) {
   std::unique_lock lk(jobs_m_);
-  // Suspended handlers count: they are not on a worker, but their request is open.
-  return idle_cv_.wait_until(lk, until, [&] {
-    return busy_ == 0 && jobs_.empty() && resumes_.empty() && app_.core().stats.in_flight.load() == 0;
-  });
+  // Suspended handlers count: they are not on a worker, but their request is
+  // open. They may finish on an event loop, which does not notify idle_cv_, so
+  // look again every few milliseconds.
+  auto idle = [&] { return busy_ == 0 && jobs_.empty() && resumes_.empty() && app_.core().stats.in_flight.load() == 0; };
+  while (!idle()) {
+    if (Clock::now() >= until) return false;
+    idle_cv_.wait_for(lk, 5ms);
+  }
+  return true;
 }
 
 void Engine::stop_workers() {
@@ -642,6 +683,8 @@ Loop::Loop(Engine& e, int listen_fd) : e_(e), app_(e.app_), opts_(e.opts_), cfg_
   accept_ctx_.ssl_ctx = e_.ssl_;
   done_rx_.loop = this;
   h2o_multithread_register_receiver(ctx_.queue, &done_rx_.rx, on_completions_cb);
+  jobs_rx_.loop = this;
+  h2o_multithread_register_receiver(ctx_.queue, &jobs_rx_.rx, on_jobs_cb);
   listener_ = h2o_evloop_socket_create(ctx_.loop, listen_fd, H2O_SOCKET_FLAG_DONT_READ);
   listener_->data = this;
   h2o_socket_read_start(listener_, on_accept_cb);
@@ -654,6 +697,7 @@ Loop::~Loop() {
   // freed; tearing the loop down under it is not safe, so it is left to exit.
   if (!cleaned_up_) return;
   h2o_multithread_unregister_receiver(ctx_.queue, &done_rx_.rx);
+  h2o_multithread_unregister_receiver(ctx_.queue, &jobs_rx_.rx);
   h2o_evloop_t* loop = ctx_.loop;
   h2o_context_dispose(&ctx_);
   h2o_evloop_destroy(loop);

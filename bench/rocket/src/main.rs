@@ -39,6 +39,20 @@ async fn wait_async() -> &'static str {
     "done"
 }
 
+// The `_async` scenarios: the same handlers as async fns. Rocket runs both kinds
+// on the same threads.
+#[get("/plaintext")]
+async fn plaintext_async() -> &'static str { "Hello, World!" }
+
+#[get("/json")]
+async fn json_async() -> Json<Message> { Json(Message { message: "Hello, World!" }) }
+
+#[post("/orders", data = "<order>")]
+async fn orders_async(order: Json<Order>) -> Json<Order> { order }
+
+#[get("/users/<id>/orders/<order>")]
+async fn order_async(id: u64, order: u64) -> String { (id + order).to_string() }
+
 // Mounted at /api/v0 ... /api/v39, as in crocket_bench.
 #[get("/users")]
 fn list() -> &'static str { "[]" }
@@ -53,9 +67,12 @@ fn order(id: u64, order: u64) -> String { (id + order).to_string() }
 
 #[launch]
 fn rocket() -> _ {
-    let mut r = rocket::build().mount("/", routes![plaintext, json, orders, wait, wait_async]);
+    let mut r = rocket::build()
+        .mount("/", routes![plaintext, json, orders, wait, wait_async])
+        .mount("/async", routes![plaintext_async, json_async, orders_async]);
     for i in 0..40 {
         r = r.mount(format!("/api/v{i}"), routes![list, get, put, user_orders, order]);
+        r = r.mount(format!("/async/api/v{i}"), routes![order_async]);
     }
     r
 }

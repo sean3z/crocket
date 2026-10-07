@@ -363,7 +363,25 @@ Executor& fallback_pool() {
 
 }  // namespace
 
+Executor& fallback_executor() { return fallback_pool(); }
+
 Exchange* current_exchange() noexcept { return t_exchange; }
+
+LoopHold::~LoopHold() {
+  auto held = std::chrono::steady_clock::now() - since;
+  if (held < kLoopHoldWarning) return;
+  // Once per handler: the point is to find it, not to flood the log.
+  static std::mutex mu;
+  static std::set<std::string_view> warned;
+  {
+    std::lock_guard lk(mu);
+    if (!warned.insert(handler).second) return;
+  }
+  log::warn("{blocking_handler} held its event loop for {ms} ms, stalling the other connections on it; an async "
+            "handler must await, not block (a plain function runs on a worker and may block)",
+            handler.empty() ? std::string_view("a fairing") : handler,
+            std::chrono::duration_cast<std::chrono::milliseconds>(held).count());
+}
 
 void resume_on_worker(Exchange* ex, std::coroutine_handle<> h) {
   if (ex) ex->post(h);
@@ -371,8 +389,12 @@ void resume_on_worker(Exchange* ex, std::coroutine_handle<> h) {
 }
 
 void Exchange::post(std::coroutine_handle<> h) {
-  Executor* ex = app_.core_->executor.load();
+  Executor* ex = loop ? loop : app_.core_->executor.load();
   (ex ? *ex : fallback_pool()).post([this, h] {
+    // Declared first, so it reports after the scopes end: resume() may finish
+    // the request, and then nothing here may touch it.
+    std::optional<LoopHold> hold;
+    if (loop) hold.emplace(req.handler);
     ExchangeScope current{this};
     log::detail::RequestScope scope{app_.core_->log, &req};
     h.resume();
@@ -403,8 +425,17 @@ void async_handler_done(Request& rq) { rq.exchange->handler_done(); }
 
 }  // namespace detail
 
-void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&&)> done) {
-  run(new detail::Exchange(*this, std::move(req), std::move(done)));
+void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop) {
+  run(new detail::Exchange(*this, std::move(req), std::move(done), loop));
+}
+
+bool Crocket::async_route(http::Method method, std::string_view path) const {
+  if (!core_->ignited) return false;
+  auto candidates = core_->router->match(method, path);
+  if (candidates.empty()) return false;  // 404 and 405 answers: a worker, as for any synchronous work
+  for (const auto* c : candidates)
+    if (!c->def->async || c->def->builtin != detail::Builtin::None) return false;
+  return true;
 }
 
 Response Crocket::handle(Request req) {
@@ -428,6 +459,8 @@ void Crocket::run(detail::Exchange* ex) {
   prepare(req);
   detail::ExchangeScope current{ex};
   log::detail::RequestScope scope{core_->log, &req};  // log lines from here on carry this request
+  std::optional<detail::LoopHold> hold;
+  if (ex->loop) hold.emplace();
   core_->stats.in_flight.fetch_add(1, std::memory_order_relaxed);
 
   bool finished = false;
@@ -450,7 +483,21 @@ void Crocket::run(detail::Exchange* ex) {
       break;
     }
   }
-  if (!finished && run_routes(req, res) && ex->suspend()) return;  // the handler completes it
+  bool suspended = !finished && run_routes(req, res);
+  if (hold) {  // reported now, while the request is certainly alive
+    hold->handler = req.handler;
+    hold.reset();
+  }
+  if (ex->reroute) {  // after the last use of req here: the worker takes it over
+    ex->reroute = false;
+    detail::Executor* workers = core_->executor.load();
+    (workers ? *workers : detail::fallback_executor()).post([this, ex] {
+      detail::ExchangeScope current{ex};
+      log::detail::RequestScope scope{core_->log, &ex->req};
+      if (!run_routes(ex->req, ex->res)) ex->handler_done();  // else its async handler finishes it
+    });
+  }
+  if (suspended && ex->suspend()) return;  // the handler completes it
   complete(ex);
 }
 
@@ -509,6 +556,13 @@ bool Crocket::run_routes(Request& req, Response& res) {
   std::string forward_detail;
   for (const auto* cand : candidates) {
     const RouteDef& def = *cand->def;
+    if (req.exchange && req.exchange->loop && (!def.async || def.builtin != detail::Builtin::None)) {
+      // On an event loop, but this handler may block (a fairing rewrote the
+      // request, or an async candidate forwarded): run() routes it again on a worker.
+      req.exchange->loop = nullptr;
+      req.exchange->reroute = true;
+      return true;
+    }
     req.route_template = def.path;
     req.handler = def.handler;
     req.captures = candidates.captures(*cand);

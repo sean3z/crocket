@@ -104,6 +104,7 @@ struct RouteDef {
   std::vector<detail::StateDep> needs;
   detail::Invoker invoke = nullptr;
   detail::Builtin builtin = detail::Builtin::None;
+  bool async = false;  // the handler returns Task<T> (or another awaitable): it runs on the event loop
   Mode mode = Mode::Http;
   std::string_view service;  // gRPC: "Greeter"
   std::string_view rpc;      // gRPC: "SayHello"
@@ -178,15 +179,20 @@ struct Executor {
 class Exchange {
  public:
   using Done = std::move_only_function<void(Response&&)>;
-  Exchange(Crocket& app, Request&& rq, Done done) : req(std::move(rq)), app_(app), done_(std::move(done)) {}
+  Exchange(Crocket& app, Request&& rq, Done done, Executor* loop)
+      : req(std::move(rq)), loop(loop), app_(app), done_(std::move(done)) {}
 
   Request req;
   Response res;
+  /// The event loop running this request (async handlers stay on it), or null
+  /// on a worker or in LocalClient.
+  Executor* loop;
+  bool reroute = false;  // routing found a handler that may block: route again on a worker
 
   /// The async handler finished filling `res`. Completes the request, unless
   /// the pipeline has not yet seen it suspend (it completes it then).
   void handler_done();
-  /// Resumes `h` on a worker with this request's context.
+  /// Resumes `h` with this request's context: on its event loop, else on a worker.
   void post(std::coroutine_handle<> h);
 
  private:
@@ -200,6 +206,19 @@ class Exchange {
   Crocket& app_;
   Done done_;
   std::atomic<int> state_{Running};
+};
+
+/// Workers when no engine runs (LocalClient, tasks outside requests).
+Executor& fallback_executor();
+
+/// Measures how long a request holds its event loop; warns (once per handler)
+/// past kLoopHoldWarning, since every connection on the loop waits meanwhile.
+inline constexpr std::chrono::milliseconds kLoopHoldWarning{10};
+struct LoopHold {
+  std::string_view handler;  // static storage (RouteDef); may be set after construction
+  std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+  explicit LoopHold(std::string_view h = {}) : handler(h) {}
+  ~LoopHold();
 };
 
 /// Counters the framework maintains itself (read by Metrics).
@@ -308,9 +327,13 @@ class Crocket {
 
   /// The full request pipeline: request id, fairings, routing, extractors,
   /// handler, responder, error mapping. `done` gets the response exactly once:
-  /// before handle_async returns, or later, from a worker, when an async
-  /// handler finishes. Used by the engine.
-  void handle_async(Request&& req, std::move_only_function<void(Response&&)> done);
+  /// before handle_async returns, or later, when an async handler finishes.
+  /// Called on an event loop (`loop`), async handlers run and resume there, and
+  /// a synchronous handler moves to a worker. Used by the engine.
+  void handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop = nullptr);
+  /// Whether every route that can answer method+path has an async handler, so
+  /// the event loop can run the request itself.
+  [[nodiscard]] bool async_route(http::Method method, std::string_view path) const;
   /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);
 

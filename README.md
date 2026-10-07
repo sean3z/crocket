@@ -756,9 +756,16 @@ In the dev profile, lines are readable text instead of JSON:
 
 ### Async handlers
 
-Return `Task<T>` from the same annotations. While the task waits, its worker goes back
-to the pool and serves other requests, so slow I/O does not limit how many requests run
-at once.
+Return `Task<T>` from the same annotations. A plain function and a `Task` differ in where
+they run:
+
+- **A plain function runs on a worker**, so it may block: a synchronous database call,
+  a file read, a lock. The network threads carry on meanwhile.
+- **A `Task` runs on the event loop of its connection**, with no handoff to a worker, so
+  it is the fastest kind of handler. While it waits on a `co_await`, the loop serves
+  other connections. **It must not block.** It awaits instead, because blocking a loop
+  stalls every connection on it. This is the same rule as async code in Rocket, Node
+  and FastAPI.
 
 ```cpp
 [[= http::get("/quote/{sym}")]]
@@ -769,22 +776,27 @@ auto quote(std::string sym, State<PriceClient> prices) -> Task<Json<Quote>> {
 }
 ```
 
-- **`co_await sleep_for(d)`** waits without holding a worker. It ends early when the
+- **`co_await sleep_for(d)`** waits without holding a thread. It ends early when the
   request is cancelled (deadline, client gone, shutdown), so check `Deadline::expired()`
   afterwards when that matters.
 - **`callback<T>()`** adapts a library that reports results through a callback: call
   `resolve(value)` once, from any thread. If every `resolve` is destroyed unused, the
   `co_await` throws and the request is a 500.
 - **Other awaitables** work too: another `Task`, or an async client's own awaitable.
-- **Code in a task always runs on a crocket worker.** If a library resumes the task on
-  its own thread, it moves back to a worker before continuing. So log lines keep their
-  request context, and `Deadline` keeps working.
-- **Code after a `co_await` may run on a different worker**, so `thread_local` state
-  does not carry over, and a mutex must not be held across a `co_await`.
-- **Blocking calls still block.** A synchronous database driver inside a `Task` occupies
-  its worker as it would in a plain handler.
+- **Code in a task always runs on its connection's event loop.** If a library resumes
+  the task on its own thread, it moves back to the loop before continuing. So log lines
+  keep their request context, and `Deadline` keeps working.
+- **Extractors and `on_request` fairings run on the loop too** for a `Task` route, so an
+  `Authenticator` that verifies a token must not block either.
+- **Blocking inside a `Task` is reported.** A task that holds its loop for more than
+  10 ms is named in a `warn` log line, once, so a synchronous call that slipped in is
+  found: `api::quote held its event loop for 48 ms, stalling the other connections on
+  it`. Move blocking work into a plain function, or await it.
+- **A mutex must not be held across a `co_await`.**
 
-`LocalClient` waits for an async handler like any other.
+If an `on_request` fairing rewrites a request bound for a `Task` route so that it reaches
+a plain function, that request moves to a worker before the function runs. `LocalClient`
+waits for an async handler like any other.
 
 ### Deadlines and cancellation
 
@@ -928,8 +940,8 @@ What you get:
   run `on_shutdown`, then destroy managed state.
 
 Network I/O runs on one event loop per core (`LaunchOptions::event_loops`), each with its
-own listening socket on the port, and handlers on a pool of `LaunchOptions::workers`
-threads.
+own listening socket on the port. `Task<T>` handlers run on the loops, and plain functions
+on a pool of `LaunchOptions::workers` threads.
 
 Requests whose headers exceed `LaunchOptions::max_header_bytes` (8 KiB) or
 `max_header_count` (100) get 431 `headers.too_large`. The threading model and the other
@@ -1077,6 +1089,7 @@ requests per second, p50 and p99 latency, and non-2xx responses:
 | `router` | `GET /api/v39/users/7/orders/9` | A route matched last among about 200 |
 | `wait` | `GET /wait` | A handler that blocks its worker for 20 ms |
 | `wait_async` | `GET /wait_async` | A handler that suspends for 20 ms without holding a worker |
+| `plaintext_async`, `json_async`, `orders_async`, `router_async` | the same under `/async` | The same handlers as `Task<T>`, which run on the event loop with no handoff |
 
 `micro` ([bench/micro.cpp](bench/micro.cpp)) times routing, the in-process request
 pipeline and JSON, and counts heap allocations per operation. Results are saved in

@@ -433,7 +433,7 @@ void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&
 bool Crocket::loop_route(http::Method method, std::string_view path) const {
   if (!core_->ignited) return false;
   auto candidates = core_->router->match(method, path);
-  if (candidates.empty()) return false;  // 404 and 405 answers: a worker, as for any synchronous work
+  if (candidates.empty()) return true;  // a 404 or 405 crocket writes itself: nothing that can block
   for (const auto* c : candidates)
     if (!runs_on_loop(*c->def)) return false;
   return true;

@@ -256,10 +256,10 @@ bench_load() { # [scenario...] -> rows
   CROCKET_PORT=$BENCH_PORT "$(tree release)/crocket_bench" >"$work/server.log" 2>&1 &
   local pid=$! rpid=''
   # shellcheck disable=SC2064
-  trap "kill $pid \${rpid:-} 2>/dev/null; wait $pid \${rpid:-} 2>/dev/null; rm -rf '$work'; trap - RETURN" RETURN
+  trap "kill $pid \${rpid:-} 2>/dev/null || true; wait $pid \${rpid:-} 2>/dev/null || true; rm -rf '$work'; trap - RETURN" RETURN
   bench_wait_up "$BENCH_PORT" "$work/server.log" crocket_bench
   bench_scenarios "" "$BENCH_PORT" "$work" "h1 h2c" "$@"
-  kill "$pid"; wait "$pid" 2>/dev/null
+  kill "$pid"; wait "$pid" 2>/dev/null || true  # its exit status is not the benchmark's
   if [[ -n $BENCH_VS_ROCKET ]]; then
     # Rocket 0.5 serves HTTP/2 only over TLS, so the comparison is HTTP/1.1.
     ROCKET_PORT=$ROCKET_BENCH_PORT ROCKET_ADDRESS=127.0.0.1 ROCKET_LOG_LEVEL=off \

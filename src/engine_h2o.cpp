@@ -101,7 +101,7 @@ struct Session {
   // h2o handed over a piece of the body (req->entity) that proceed_req has not
   // released yet. h2o allows exactly one proceed_req(req, nullptr) per piece.
   bool piece_held = false;
-  std::shared_ptr<std::stop_source> stop = std::make_shared<std::stop_source>();
+  std::stop_source stop;  // tokens handed out keep its state alive past the session
   Response res;          // kept here until h2o has sent it
   TimerRef deadline{};   // request_timeout -> 504
   TimerRef kick{};       // the next proceed_req, run outside h2o's own callbacks
@@ -356,7 +356,7 @@ int Loop::on_req(h2o_req_t* req) {
 
   std::size_t header_bytes = 0, header_count = 0;
   s->meta = build_request(req, header_bytes, header_count);
-  s->meta.deadline.stop = s->stop->get_token();
+  s->meta.deadline.stop = s->stop.get_token();
   app_.prepare(s->meta);  // request id + deadline, fixed before anything can fail
   s->head_only = s->meta.method == http::Method::Head;
 
@@ -487,7 +487,7 @@ void Loop::complete(std::uint64_t txn, Response&& res) {
 
 void Loop::on_deadline(Session* s) {
   if (s->phase == Phase::Writing) return;
-  s->stop->request_stop();
+  s->stop.request_stop();
   if (s->phase == Phase::Running) {
     // The worker keeps running until it notices the token; its late result is
     // discarded because the txn no longer maps to a waiting session.
@@ -555,7 +555,7 @@ void Loop::respond(Session* s, Response res) {
 }
 
 void Loop::forget(Session* s) {
-  s->stop->request_stop();  // the client is gone (or done): cancel blocking extractors
+  s->stop.request_stop();  // the client is gone (or done): cancel blocking extractors
   if (h2o_timer_is_linked(&s->deadline.timer)) h2o_timer_unlink(&s->deadline.timer);
   if (h2o_timer_is_linked(&s->kick.timer)) h2o_timer_unlink(&s->kick.timer);
   if (s->txn) live_.erase(s->txn);
@@ -716,7 +716,7 @@ void Loop::serve() {
   auto drain_until = Clock::now() + cfg_.drain_timeout;
   while ((!live_.empty() || e_.outstanding_.load() > 0) && Clock::now() < drain_until) h2o_evloop_run(ctx_.loop, 50);
   drained_ = live_.empty() && e_.outstanding_.load() == 0;
-  for (auto& [txn, s] : live_) s->stop->request_stop();  // what is left is told to stop
+  for (auto& [txn, s] : live_) s->stop.request_stop();  // what is left is told to stop
   e_.loops_drained_->count_down();
 
   // 2. Engine::run waits for the handlers and stops the workers; keep delivering meanwhile.

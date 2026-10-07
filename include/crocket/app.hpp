@@ -362,7 +362,7 @@ class Crocket {
   void handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop = nullptr);
   /// Whether every route that can answer method+path runs on the event loop
   /// (an async handler, or a plain function adaptive placement has promoted),
-  /// so the loop can run the request itself.
+  /// or none does (crocket answers 404 or 405), so the loop can run the request itself.
   [[nodiscard]] bool loop_route(http::Method method, std::string_view path) const;
   /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);

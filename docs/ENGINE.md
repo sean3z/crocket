@@ -84,7 +84,8 @@ only it takes. Shutdown is in three phases:
 
 A request whose every candidate route runs on the loop (`Crocket::loop_route`) is handled
 on its loop. That is an async handler (`RouteDef::async`), or a plain function that
-adaptive placement has promoted. `run_routes` times each plain function: on a worker it
+adaptive placement has promoted. A request no route matches is handled there too: its
+404 or 405 is crocket's own, with nothing that could block. `run_routes` times each plain function: on a worker it
 counts consecutive runs under 100 µs and promotes the route after 1,000. On a loop, one
 run over 50 ms demotes it, and so do 8 runs over 1 ms within a second. A single slow run
 may only mean the thread was descheduled. The back-off grows with each demotion (`detail::Placement`, one per route,

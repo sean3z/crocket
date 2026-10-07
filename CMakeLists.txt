@@ -77,6 +77,12 @@ target_link_libraries(crocket_bench PRIVATE crocket)
 add_executable(crocket_microbench EXCLUDE_FROM_ALL bench/micro.cpp)
 target_link_libraries(crocket_microbench PRIVATE crocket)
 target_include_directories(crocket_microbench PRIVATE src)  # the router, measured directly
+# h2o alone, answering the same scenarios from constants: crocket's floor (./dev bench --vs-h2o).
+add_executable(crocket_bench_h2o EXCLUDE_FROM_ALL bench/h2o.cpp src/cpus.cpp)
+target_include_directories(crocket_bench_h2o SYSTEM PRIVATE ${CROCKET_H2O_INCLUDE_DIRS})
+target_include_directories(crocket_bench_h2o PRIVATE src)  # cpus.hpp: the same event loop count as crocket
+target_compile_definitions(crocket_bench_h2o PRIVATE ${CROCKET_H2O_DEFINITIONS})
+target_link_libraries(crocket_bench_h2o PRIVATE libh2o-evloop Threads::Threads)
 
 if(CROCKET_BUILD_TESTS)
   enable_testing()

@@ -47,6 +47,9 @@ ${B}./dev${R} <command> [args]
                                               a production app would
                               --vs-rocket     also run Rocket 0.5 (bench/rocket) on the
                                               same scenarios over HTTP/1.1; needs cargo
+                              --vs-h2o        also run h2o alone (bench/h2o.cpp), answering
+                                              from constants: the CPU crocket adds per
+                                              request, over HTTP/1.1 and h2c
                             Numbers compare only on the same machine. h2load comes from
                             nghttp2-client (./dev setup); $H2LOAD overrides the path.
   h2o-update [ref]          Pin h2o to the newest master commit (or a branch, tag
@@ -185,6 +188,9 @@ cmd_clean() {
 
 BENCH_PORT=18600
 ROCKET_BENCH_PORT=18601
+H2O_BENCH_PORT=18602
+# The scenarios bench/h2o.cpp answers (not the waits: there is no work to compare).
+H2O_SCENARIOS=(plaintext json orders router plaintext_async json_async orders_async router_async)
 # name method path [body]
 BENCH_SCENARIOS=(
   "plaintext GET /plaintext"
@@ -290,9 +296,9 @@ bench_load() { # [scenario...] -> rows
   bench_body >"$work/body.json"
   local fairings=(); [[ -n $BENCH_REALISTIC ]] && fairings=(CROCKET_BENCH_LOGGER=1 CROCKET_BENCH_METRICS=1)
   env CROCKET_PORT=$BENCH_PORT "${fairings[@]}" "$(tree release)/crocket_bench" >"$work/server.log" 2>&1 &
-  local pid=$! rpid=''
+  local pid=$! rpid='' hpid=''
   # shellcheck disable=SC2064
-  trap "kill $pid \${rpid:-} 2>/dev/null || true; wait $pid \${rpid:-} 2>/dev/null || true; rm -rf '$work'; trap - RETURN" RETURN
+  trap "kill $pid \${rpid:-} \${hpid:-} 2>/dev/null || true; wait $pid \${rpid:-} \${hpid:-} 2>/dev/null || true; rm -rf '$work'; trap - RETURN" RETURN
   bench_wait_up "$BENCH_PORT" "$work/server.log" crocket_bench
   bench_scenarios "" "$BENCH_PORT" "$work" "h1 h2c" "$pid" "$@"
   kill "$pid"; wait "$pid" 2>/dev/null || true  # its exit status is not the benchmark's
@@ -303,6 +309,21 @@ bench_load() { # [scenario...] -> rows
     rpid=$!
     bench_wait_up "$ROCKET_BENCH_PORT" "$work/rocket.log" rocket-bench
     bench_scenarios "rocket:" "$ROCKET_BENCH_PORT" "$work" "h1" "$rpid" "$@"
+    kill "$rpid"; wait "$rpid" 2>/dev/null || true
+  fi
+  if [[ -n $BENCH_VS_H2O ]]; then
+    local chosen=() sc
+    for sc in "${H2O_SCENARIOS[@]}"; do
+      if (($# == 0)) || [[ " $* " == *" $sc "* ]]; then chosen+=("$sc"); fi
+    done
+    if ((${#chosen[@]} == 0)); then
+      warn "--vs-h2o: bench/h2o.cpp answers none of these scenarios (only ${H2O_SCENARIOS[*]})"
+      return
+    fi
+    CROCKET_PORT=$H2O_BENCH_PORT "$(tree release)/crocket_bench_h2o" >"$work/h2o.log" 2>&1 &
+    hpid=$!
+    bench_wait_up "$H2O_BENCH_PORT" "$work/h2o.log" crocket_bench_h2o
+    bench_scenarios "h2o:" "$H2O_BENCH_PORT" "$work" "h1 h2c" "$hpid" "${chosen[@]}"
   fi
 }
 
@@ -313,19 +334,21 @@ bench_build_rocket() {
     die "bench/rocket did not build"
 }
 
-bench_vs_rocket() { # rows -> a crocket/Rocket table for the HTTP/1.1 scenarios
-  awk -F'\t' '
+bench_vs() { # rows prefix name -> a crocket/<name> table for every scenario both ran
+  awk -F'\t' -v p="$2" -v other="$3" '
     { v[$1 FS $2] = $3 }
-    $1 !~ /^rocket:/ && $1 ~ /\.h1$/ && $2 == "req_per_s" { names[++n] = substr($1, 1, length($1) - 3) }
+    index($1, ":") == 0 && $2 == "req_per_s" { names[++n] = $1 }
     END {
-      printf "  %-16s %14s %14s %8s   %-17s %-17s %-17s\n", "", "crocket req/s", "Rocket req/s", "ratio", "p50 ms (c / R)", "p99 ms (c / R)", "CPU us/req (c / R)"
+      printf "  %-20s %13s %13s %7s   %-15s %-15s %-17s %9s\n", "", "crocket req/s", other " req/s", "ratio",
+             "p50 ms (c / " substr(other, 1, 1) ")", "p99 ms (c / " substr(other, 1, 1) ")",
+             "CPU us/req (c / " substr(other, 1, 1) ")", "c - " substr(other, 1, 1) " us"
       for (i = 1; i <= n; i++) {
-        c = names[i] ".h1"; r = "rocket:" names[i] ".h1"
+        c = names[i]; r = p ":" names[i]
         if (!((r FS "req_per_s") in v)) continue
         cr = v[c FS "req_per_s"]; rr = v[r FS "req_per_s"]
-        printf "  %-16s %14.0f %14.0f %7.2fx   %6.2f / %-8.2f %6.2f / %-8.2f %6.2f / %-8.2f\n", names[i], cr, rr,
-               (rr > 0 ? cr / rr : 0), v[c FS "p50_ms"], v[r FS "p50_ms"], v[c FS "p99_ms"], v[r FS "p99_ms"],
-               v[c FS "server_us_per_req"], v[r FS "server_us_per_req"]
+        cc = v[c FS "server_us_per_req"]; rc = v[r FS "server_us_per_req"]
+        printf "  %-20s %13.0f %13.0f %6.2fx   %5.2f / %-7.2f %5.2f / %-7.2f %6.2f / %-8.2f %+9.2f\n", names[i], cr, rr,
+               (rr > 0 ? cr / rr : 0), v[c FS "p50_ms"], v[r FS "p50_ms"], v[c FS "p99_ms"], v[r FS "p99_ms"], cc, rc, cc - rc
       }
     }' "$1"
 }
@@ -353,7 +376,7 @@ bench_compare() { # baseline current -> table; returns 1 on a >10% regression
 
 cmd_bench() {
   local save='' compare='' kinds=() scenarios=()
-  BENCH_VS_ROCKET='' BENCH_REALISTIC=
+  BENCH_VS_ROCKET='' BENCH_VS_H2O='' BENCH_REALISTIC=
   BENCH_DURATION=10 BENCH_CLIENTS=64
   BENCH_THREADS=$(( $(nproc) >= 16 ? 8 : $(nproc) >= 8 ? 4 : 2 ))
   H2LOAD=${H2LOAD:-h2load}
@@ -364,6 +387,7 @@ cmd_bench() {
       --duration) BENCH_DURATION=$2; shift 2 ;;
       --clients) BENCH_CLIENTS=$2; shift 2 ;;
       --vs-rocket) BENCH_VS_ROCKET=1; shift ;;
+      --vs-h2o) BENCH_VS_H2O=1; shift ;;
       --realistic) BENCH_REALISTIC=1; shift ;;
       --threads) BENCH_THREADS=$2; shift 2 ;;
       load|micro) kinds+=("$1"); shift ;;
@@ -374,7 +398,8 @@ cmd_bench() {
   ((${#kinds[@]})) || kinds=(load micro)
   if [[ -n $compare && ! -f $ROOT/bench/results/$compare.tsv ]]; then die "no bench/results/$compare.tsv; make one with --save $compare"; fi
   [[ -n $BENCH_VS_ROCKET && " ${kinds[*]} " != *" load "* ]] && die "--vs-rocket compares load runs; drop 'micro'"
-  build release crocket_bench crocket_microbench
+  [[ -n $BENCH_VS_H2O && " ${kinds[*]} " != *" load "* ]] && die "--vs-h2o compares load runs; drop 'micro'"
+  build release crocket_bench crocket_microbench ${BENCH_VS_H2O:+crocket_bench_h2o}
   [[ -n $BENCH_VS_ROCKET ]] && bench_build_rocket
   local out; out=$(mktemp)
   local k; for k in "${kinds[@]}"; do
@@ -386,7 +411,11 @@ cmd_bench() {
   local rc=0
   if [[ -n $BENCH_VS_ROCKET ]]; then
     ok "crocket and Rocket 0.5, HTTP/1.1"
-    bench_vs_rocket "$out"
+    bench_vs "$out" rocket Rocket
+  fi
+  if [[ -n $BENCH_VS_H2O ]]; then
+    ok "crocket and h2o alone (the last column: CPU crocket adds per request)"
+    bench_vs "$out" h2o h2o
   fi
   if [[ -n $compare ]]; then
     ok "compared with $compare (baseline, now, change)"

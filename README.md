@@ -1109,6 +1109,7 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 ./dev bench micro                # in-process only (seconds)
 ./dev bench load router wait     # chosen load scenarios
 ./dev bench --vs-rocket load     # the same scenarios against Rocket 0.5 too (needs cargo)
+./dev bench --vs-h2o load        # and against h2o alone: what crocket adds per request
 ```
 
 `load` runs [h2load](https://nghttp2.org/documentation/h2load-howto.html) against
@@ -1142,8 +1143,16 @@ with cargo, runs the same scenarios against it over HTTP/1.1 (Rocket serves HTTP
 over TLS), and prints the two side by side. The load is closed-loop: each connection waits
 for its response before sending the next request. So with few connections the numbers
 mostly reflect per-request latency, and with many (`--clients 256` or more) the server's
-throughput, until the client runs out of CPU. The last column, CPU per request, compares
-the two servers whatever the client's limit.
+throughput, until the client runs out of CPU. The CPU per request columns compare the two
+servers whatever the client's limit.
+
+`--vs-h2o` runs [bench/h2o.cpp](bench/h2o.cpp), h2o with crocket's engine setup (one event
+loop per physical core, the same listeners, h2c with prior knowledge) and a handler that
+answers from constants with only a `content-type` header. It covers the `plaintext`,
+`json`, `orders` and `router` scenarios and their `_async` twins, over HTTP/1.1 and h2c.
+The last column, crocket's CPU per request minus h2o's, is what crocket adds to a request:
+routing, extractors, JSON, fairings, and the headers it sends by default (`x-request-id`,
+an ETag and `Shield`'s four).
 
 ## Tests
 

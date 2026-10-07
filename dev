@@ -205,15 +205,36 @@ bench_body() { # a 1 KB order for POST /orders
   printf '{"id":1001,"email":"customer@example.com","tags":["priority","gift","eu"],"items":[%s]}' "$items"
 }
 
+# CPU time a process has used, user + kernel, all threads, in clock ticks.
+bench_ticks() { # pid
+  local stat; stat=$(cat "/proc/$1/stat" 2>/dev/null) || { echo 0; return; }
+  awk '{ print $12 + $13 }' <<<"${stat##*) }"  # fields after "pid (comm) ": utime is 12th, stime 13th
+}
+bench_now_ns() { date +%s%N; }
+
 # One h2load run -> rows "name.proto<TAB>metric<TAB>value<TAB>better" on stdout.
-bench_load_one() { # name method path body proto work port
-  local name=$1 method=$2 path=$3 body=$4 proto=$5 work=$6 port=$7
+#
+# Besides h2load's own numbers it measures the server's CPU time per request,
+# between two samples inside the run. That does not depend on the client: on a
+# machine shared with h2load, req/s can measure the client's limit instead of
+# the server's, and then only CPU per request compares servers fairly.
+bench_load_one() { # name method path body proto work port server_pid
+  local name=$1 method=$2 path=$3 body=$4 proto=$5 work=$6 port=$7 server=$8
   local args=(-c "$BENCH_CLIENTS" -t "$BENCH_THREADS" -D "$BENCH_DURATION" --warm-up-time 1
               --log-file "$work/$name.$proto.log")
   [[ $proto == h1 ]] && args+=(--h1 -m 1) || args+=(-m 10)
   [[ -n $body ]] && args+=(-d "$work/body.json" -H 'content-type: application/json')
   [[ $method == GET ]] || [[ -n $body ]] || args+=(-H ":method: $method")
-  local out; out=$("$H2LOAD" "${args[@]}" "http://127.0.0.1:$port$path" 2>&1) || { warn "$name/$proto: h2load failed"; echo "$out" >&2; return; }
+  "$H2LOAD" "${args[@]}" "http://127.0.0.1:$port$path" >"$work/h2load.out" 2>&1 &
+  local client=$!
+  # Sample from just after the warm-up to a second before the end.
+  sleep 1.2
+  local s0 c0 t0 s1 c1 t1
+  s0=$(bench_ticks "$server") c0=$(bench_ticks "$client") t0=$(bench_now_ns)
+  sleep "$(awk -v d="$BENCH_DURATION" 'BEGIN { print (d > 2 ? d - 1 : 1) }')"
+  s1=$(bench_ticks "$server") c1=$(bench_ticks "$client") t1=$(bench_now_ns)
+  wait "$client" || { warn "$name/$proto: h2load failed"; cat "$work/h2load.out" >&2; return; }
+  local out; out=$(cat "$work/h2load.out")
   local rps done ok
   rps=$(sed -n 's/^finished in [^,]*, \([0-9.]*\) req\/s.*/\1/p' <<<"$out")
   read -r done ok < <(sed -n 's/^requests: [0-9]* total, [0-9]* started, \([0-9]*\) done, \([0-9]*\) succeeded.*/\1 \2/p' <<<"$out")
@@ -227,6 +248,18 @@ bench_load_one() { # name method path body proto work port
   printf '%s.%s\tp50_ms\t%s\tlower\n' "$name" "$proto" "$p50"
   printf '%s.%s\tp99_ms\t%s\tlower\n' "$name" "$proto" "$p99"
   printf '%s.%s\tnon_2xx\t%s\tlower\n' "$name" "$proto" "$(( ${done:-0} - ${ok:-0} ))"
+  local hz; hz=$(getconf CLK_TCK)
+  local cpu busy
+  read -r cpu busy < <(awk -v s=$((s1 - s0)) -v c=$((c1 - c0)) -v ns=$((t1 - t0)) -v hz="$hz" -v r="${rps:-0}" \
+                           -v th="$BENCH_THREADS" 'BEGIN {
+    secs = ns / 1e9; cpu = 0; busy = 0
+    if (r > 0 && secs > 0) cpu = s / hz / (r * secs) * 1e6
+    if (secs > 0) busy = c / hz / secs / th * 100
+    printf "%.2f %.0f\n", cpu, busy }')
+  printf '%s.%s\tserver_us_per_req\t%s\tlower\n' "$name" "$proto" "$cpu"
+  if ((busy >= 90)); then
+    warn "$name/$proto: h2load's threads were ${busy}% busy, so req/s is the client's limit; compare server_us_per_req"
+  fi
   rm -f "$work/$name.$proto.log"
 }
 
@@ -236,15 +269,15 @@ bench_wait_up() { # port log name
 }
 
 # Every chosen scenario against one server -> rows; rows are prefixed with `label`.
-bench_scenarios() { # label port work protos [scenario...]
-  local label=$1 port=$2 work=$3 protos=$4; shift 4
+bench_scenarios() { # label port work protos server_pid [scenario...]
+  local label=$1 port=$2 work=$3 protos=$4 server=$5; shift 5
   local sc name method path body proto
   for sc in "${BENCH_SCENARIOS[@]}"; do
     read -r name method path body <<<"$sc"
     if (($# > 0)) && [[ " $* " != *" $name "* ]]; then continue; fi
     for proto in $protos; do
       say "load: ${label}$name over $proto (${BENCH_DURATION}s, $BENCH_CLIENTS connections)"
-      bench_load_one "${label}$name" "$method" "$path" "$body" "$proto" "$work" "$port"
+      bench_load_one "${label}$name" "$method" "$path" "$body" "$proto" "$work" "$port" "$server"
     done
   done
 }
@@ -258,7 +291,7 @@ bench_load() { # [scenario...] -> rows
   # shellcheck disable=SC2064
   trap "kill $pid \${rpid:-} 2>/dev/null || true; wait $pid \${rpid:-} 2>/dev/null || true; rm -rf '$work'; trap - RETURN" RETURN
   bench_wait_up "$BENCH_PORT" "$work/server.log" crocket_bench
-  bench_scenarios "" "$BENCH_PORT" "$work" "h1 h2c" "$@"
+  bench_scenarios "" "$BENCH_PORT" "$work" "h1 h2c" "$pid" "$@"
   kill "$pid"; wait "$pid" 2>/dev/null || true  # its exit status is not the benchmark's
   if [[ -n $BENCH_VS_ROCKET ]]; then
     # Rocket 0.5 serves HTTP/2 only over TLS, so the comparison is HTTP/1.1.
@@ -266,7 +299,7 @@ bench_load() { # [scenario...] -> rows
       "$(tree release)/rocket/release/rocket-bench" >"$work/rocket.log" 2>&1 &
     rpid=$!
     bench_wait_up "$ROCKET_BENCH_PORT" "$work/rocket.log" rocket-bench
-    bench_scenarios "rocket:" "$ROCKET_BENCH_PORT" "$work" "h1" "$@"
+    bench_scenarios "rocket:" "$ROCKET_BENCH_PORT" "$work" "h1" "$rpid" "$@"
   fi
 }
 
@@ -282,13 +315,14 @@ bench_vs_rocket() { # rows -> a crocket/Rocket table for the HTTP/1.1 scenarios
     { v[$1 FS $2] = $3 }
     $1 !~ /^rocket:/ && $1 ~ /\.h1$/ && $2 == "req_per_s" { names[++n] = substr($1, 1, length($1) - 3) }
     END {
-      printf "  %-16s %14s %14s %8s   %-17s %-17s\n", "", "crocket req/s", "Rocket req/s", "ratio", "p50 ms (c / R)", "p99 ms (c / R)"
+      printf "  %-16s %14s %14s %8s   %-17s %-17s %-17s\n", "", "crocket req/s", "Rocket req/s", "ratio", "p50 ms (c / R)", "p99 ms (c / R)", "CPU us/req (c / R)"
       for (i = 1; i <= n; i++) {
         c = names[i] ".h1"; r = "rocket:" names[i] ".h1"
         if (!((r FS "req_per_s") in v)) continue
         cr = v[c FS "req_per_s"]; rr = v[r FS "req_per_s"]
-        printf "  %-16s %14.0f %14.0f %7.2fx   %6.2f / %-8.2f %6.2f / %-8.2f\n", names[i], cr, rr, (rr > 0 ? cr / rr : 0),
-               v[c FS "p50_ms"], v[r FS "p50_ms"], v[c FS "p99_ms"], v[r FS "p99_ms"]
+        printf "  %-16s %14.0f %14.0f %7.2fx   %6.2f / %-8.2f %6.2f / %-8.2f %6.2f / %-8.2f\n", names[i], cr, rr,
+               (rr > 0 ? cr / rr : 0), v[c FS "p50_ms"], v[r FS "p50_ms"], v[c FS "p99_ms"], v[r FS "p99_ms"],
+               v[c FS "server_us_per_req"], v[r FS "server_us_per_req"]
       }
     }' "$1"
 }

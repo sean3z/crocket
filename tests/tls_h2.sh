@@ -33,6 +33,12 @@ CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.
 SRV_PID=$!
 wait_up "$BASE/healthz" || { echo "server did not start"; cat "$WORK/serve.log"; exit 1; }
 
+# Each event loop listens with SO_REUSEPORT; a second server on the same port
+# must still be refused, not quietly handed a share of the connections.
+second=$(CROCKET_PORT=$PORT CROCKET_TLS_CERT="$WORK/cert.pem" CROCKET_TLS_KEY="$WORK/key.pem" "$SERVE" 2>&1)
+expect "a second server on the port exits 1" "1" "$?"
+expect_match "  ... saying why" "address already in use" "$second"
+
 echo "[TLS + ALPN]"
 expect "h2 negotiated when offered" "2" "$(curl -sk --http2 -o /dev/null -w '%{http_version}' "$BASE/healthz")"
 expect "http/1.1 when h2 not offered" "1.1" "$(curl -sk --http1.1 -o /dev/null -w '%{http_version}' "$BASE/healthz")"

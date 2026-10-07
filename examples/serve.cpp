@@ -5,6 +5,7 @@
 //   CROCKET_PORT=8443 CROCKET_TLS_CERT=cert.pem CROCKET_TLS_KEY=key.pem ./build/crocket_serve
 //   CROCKET_DEBUG_ROUTES=1 ./build/crocket_serve          # exposes GET /__routes
 //   CROCKET_WORKERS=2 ./build/crocket_serve                # handler threads (default: one per core)
+//   CROCKET_EVENT_LOOPS=4 ./build/crocket_serve            # network I/O threads (default: one per core)
 //
 //   curl localhost:8000/api/users/1
 //   curl -X POST localhost:8000/api/users -H 'authorization: Bearer alice' \
@@ -179,6 +180,7 @@ int main() {
   launch.tls_cert = env("CROCKET_TLS_CERT");
   launch.tls_key = env("CROCKET_TLS_KEY");
   if (auto w = env("CROCKET_WORKERS"); !w.empty()) launch.workers = unsigned(std::stoi(w));
+  if (auto l = env("CROCKET_EVENT_LOOPS"); !l.empty()) launch.event_loops = unsigned(std::stoi(l));
 
   return build(cfg)
       .manage(std::move(pool))  // Pool::ready() also drives GET /readyz

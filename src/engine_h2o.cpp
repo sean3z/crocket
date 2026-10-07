@@ -1,5 +1,6 @@
-// The wire engine: h2o (libh2o-evloop) on one event-loop thread, handlers on a
-// worker pool. This is the only translation unit that includes h2o.
+// The wire engine: h2o (libh2o-evloop) on several event-loop threads, each with
+// its own listening socket on the port, and handlers on a shared worker pool.
+// This is the only translation unit that includes h2o.
 //
 // Flow per HTTP transaction (an h1 request or an h2 stream; h2o gives each its
 // own h2o_req_t):
@@ -24,12 +25,14 @@
 #include <h2o/http2.h>
 #include <h2o/httpclient.h>
 
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -37,6 +40,8 @@
 #include <cstdio>
 #include <deque>
 #include <functional>
+#include <latch>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -56,20 +61,23 @@ using namespace std::chrono_literals;
 constexpr std::size_t kMaxDiscard = 8 << 20;
 
 std::atomic<bool> g_stop{false};
-std::atomic<int> g_wake_fd{-1};
+constexpr std::size_t kMaxLoops = 256;
+std::array<std::atomic<int>, kMaxLoops> g_wake_fds{};  // each loop's eventfd, -1 when unused
+std::atomic<std::size_t> g_wake_count{0};
 
 extern "C" void on_signal(int) {
   g_stop.store(true);
-  // write() is async-signal-safe; the event loop reads the eventfd and wakes.
-  if (int fd = g_wake_fd.load(); fd >= 0) {
-    std::uint64_t one = 1;
-    (void)!::write(fd, &one, sizeof one);
-  }
+  // write() is async-signal-safe; each event loop reads its eventfd and wakes.
+  for (std::size_t i = 0, n = g_wake_count.load(); i < n; ++i)
+    if (int fd = g_wake_fds[i].load(); fd >= 0) {
+      std::uint64_t one = 1;
+      (void)!::write(fd, &one, sizeof one);
+    }
 }
 
 enum class Phase : std::uint8_t { Body, Running, Writing };
 
-class Engine;
+class Loop;
 struct Session;
 
 /// An h2o timer that knows its session. h2o hands back the h2o_timer_t*, which
@@ -80,7 +88,7 @@ struct TimerRef {
 };
 
 struct Session {
-  Engine* engine = nullptr;
+  Loop* loop = nullptr;
   h2o_req_t* req = nullptr;  // valid until dispose_session
   std::uint64_t txn = 0;     // 0 once the request no longer waits for a worker
   Phase phase = Phase::Body;
@@ -104,14 +112,9 @@ struct SessionRef {
   Session* s;
 };
 
-struct Handler {
-  h2o_handler_t super;
-  Engine* engine;
-};
-
 struct Receiver {
   h2o_multithread_receiver_t rx;
-  Engine* engine;
+  Loop* loop;
 };
 
 /// A finished handler, posted from a worker to the event loop.
@@ -129,9 +132,15 @@ constexpr bool status_has_body(int st) { return !(st < 200 || st == 204 || st ==
 
 std::string_view view(h2o_iovec_t v) { return {v.base ? v.base : "", v.len}; }
 
+class Loop;
+
+/// What every event loop shares: h2o's configuration, TLS, the worker pool and
+/// its queues, and the counts the drain waits on.
 class Engine final : public Executor {
  public:
   Engine(Crocket& app, const LaunchOptions& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
+
+  int run();
 
   /// Executor: resumes a suspended handler on a worker. Ahead of new requests,
   /// and kept at shutdown (unlike requests that have not started).
@@ -143,39 +152,92 @@ class Engine final : public Executor {
     jobs_cv_.notify_one();
   }
 
-  int run();
+  static int on_req_cb(h2o_handler_t* self, h2o_req_t* req);
 
-  // h2o callbacks (C function pointers into the engine).
-  static int on_req_cb(h2o_handler_t* self, h2o_req_t* req) {
-    return reinterpret_cast<Handler*>(self)->engine->on_req(req);
+ private:
+  friend class Loop;
+
+  bool setup_tls();
+  int open_listener(std::uint16_t port, bool reuse_port);
+
+  // --- worker side ---------------------------------------------------------------
+  void start_workers(unsigned n);
+  void worker_loop();
+  bool wait_workers_idle(Clock::time_point until);
+  void stop_workers();
+  void queue_job(std::move_only_function<void()> job) {
+    {
+      std::lock_guard lk(jobs_m_);
+      jobs_.push_back(std::move(job));
+    }
+    jobs_cv_.notify_one();
   }
+
+  Crocket& app_;
+  const LaunchOptions& opts_;
+  const Config& cfg_;
+
+  h2o_globalconf_t config_{};
+  SSL_CTX* ssl_ = nullptr;
+  std::vector<std::unique_ptr<Loop>> loops_;
+
+  std::mutex jobs_m_;
+  std::condition_variable jobs_cv_;
+  std::condition_variable idle_cv_;
+  std::deque<std::move_only_function<void()>> jobs_;     // new requests
+  std::deque<std::move_only_function<void()>> resumes_;  // suspended handlers to continue
+  unsigned busy_ = 0;
+  bool stopping_ = false;
+  std::vector<std::thread> workers_;
+  std::atomic<std::size_t> outstanding_{0};  // dispatched, response not yet delivered
+
+  // Shutdown, in phases the loops and run() take in turn.
+  std::optional<std::latch> loops_drained_;
+  std::atomic<bool> workers_stopped_{false};
+};
+
+/// One event loop: an h2o context, its own listening socket (SO_REUSEPORT
+/// spreads connections across loops), and every request on its connections.
+/// Everything here runs on the loop's thread, except the completion messages
+/// workers post to it.
+class Loop {
+ public:
+  Loop(Engine& e, int listen_fd);
+  ~Loop();
+
+  /// The loop's thread: serve until stop, then drain and close (see Engine::run).
+  void serve();
+  [[nodiscard]] bool drained() const { return drained_; }
+  [[nodiscard]] bool cleaned_up() const { return cleaned_up_; }
+  [[nodiscard]] int wake_fd() const { return wake_fd_; }
+
+  // h2o callbacks (C function pointers into the loop).
+  int on_req(h2o_req_t* req);
   static int on_body_cb(void* ctx, int is_end_stream) {
     auto* s = static_cast<Session*>(ctx);
-    return s->engine->on_body(s, is_end_stream != 0);
+    return s->loop->on_body(s, is_end_stream != 0);
   }
   static void on_deadline_cb(h2o_timer_t* t) {
     auto* s = reinterpret_cast<TimerRef*>(t)->s;
-    s->engine->on_deadline(s);
+    s->loop->on_deadline(s);
   }
   static void on_kick_cb(h2o_timer_t* t) {
     auto* s = reinterpret_cast<TimerRef*>(t)->s;
-    s->engine->on_kick(s);
+    s->loop->on_kick(s);
   }
   static void dispose_session(void* p) {
     auto* s = static_cast<SessionRef*>(p)->s;
-    s->engine->forget(s);
+    s->loop->forget(s);
   }
   static void on_completions_cb(h2o_multithread_receiver_t* rx, h2o_linklist_t* messages) {
-    reinterpret_cast<Receiver*>(rx)->engine->on_completions(messages);
+    reinterpret_cast<Receiver*>(rx)->loop->on_completions(messages);
   }
   static void on_accept_cb(h2o_socket_t* listener, const char* err) {
-    static_cast<Engine*>(listener->data)->on_accept(listener, err);
+    static_cast<Loop*>(listener->data)->on_accept(listener, err);
   }
   static void on_wake_cb(h2o_socket_t* sock, const char*) { h2o_buffer_consume(&sock->input, sock->input->size); }
 
  private:
-  // --- event-loop side ----------------------------------------------------------
-  int on_req(h2o_req_t* req);
   int on_body(Session* s, bool end);
   void on_deadline(Session* s);
   void on_kick(Session* s);
@@ -191,52 +253,40 @@ class Engine final : public Executor {
   void kick(Session* s) {
     if (!h2o_timer_is_linked(&s->kick.timer)) h2o_timer_link(ctx_.loop, 0, &s->kick.timer);
   }
-
-  bool setup_tls();
-  int open_listener();
   [[nodiscard]] std::size_t open_connections() const {
     auto& n = ctx_._conns.num_conns;
     return n.idle + n.active + n.shutdown;
   }
 
-  // --- worker side ---------------------------------------------------------------
-  void start_workers(unsigned n);
-  void worker_loop();
-  bool wait_workers_idle(Clock::time_point until);
-  void stop_workers();
-
+  Engine& e_;
   Crocket& app_;
   const LaunchOptions& opts_;
   const Config& cfg_;
 
-  h2o_globalconf_t config_{};
   h2o_context_t ctx_{};
   h2o_accept_ctx_t accept_ctx_{};
-  SSL_CTX* ssl_ = nullptr;
   h2o_socket_t* listener_ = nullptr;
   h2o_socket_t* wake_ = nullptr;
+  int wake_fd_ = -1;
   Receiver done_rx_{};
+  bool drained_ = false;
+  bool cleaned_up_ = false;
 
   std::uint64_t next_txn_ = 1;
-  std::unordered_map<std::uint64_t, Session*> live_;  // event-loop thread only
-
-  std::mutex jobs_m_;
-  std::condition_variable jobs_cv_;
-  std::condition_variable idle_cv_;
-  std::deque<std::move_only_function<void()>> jobs_;     // new requests
-  std::deque<std::move_only_function<void()>> resumes_;  // suspended handlers to continue
-  unsigned busy_ = 0;
-  bool stopping_ = false;
-  std::vector<std::thread> workers_;
-  std::atomic<std::size_t> outstanding_{0};  // dispatched, response not yet delivered
+  std::unordered_map<std::uint64_t, Session*> live_;
 };
+
+/// The loop that runs on this thread (h2o calls one handler for every context).
+thread_local Loop* t_loop = nullptr;
+
+int Engine::on_req_cb(h2o_handler_t*, h2o_req_t* req) { return t_loop->on_req(req); }
 
 // ---- request construction ---------------------------------------------------------
 
-Request Engine::build_request(h2o_req_t* req, std::size_t& header_bytes, std::size_t& header_count) const {
+Request Loop::build_request(h2o_req_t* req, std::size_t& header_bytes, std::size_t& header_count) const {
   Request rq;
   rq.protocol = req->version >= 0x200 ? std::string_view("h2") : std::string_view("http/1.1");
-  rq.tls = ssl_ != nullptr;  // one listener: TLS or not, whatever :scheme claims
+  rq.tls = e_.ssl_ != nullptr;  // TLS or not for every listener, whatever :scheme claims
   rq.method_text = std::string(view(req->method));
   rq.method = http::parse_method(rq.method_text);
 
@@ -267,9 +317,9 @@ Request Engine::build_request(h2o_req_t* req, std::size_t& header_bytes, std::si
 
 // ---- event loop handlers -------------------------------------------------------------
 
-int Engine::on_req(h2o_req_t* req) {
+int Loop::on_req(h2o_req_t* req) {
   auto* s = new Session;
-  s->engine = this;
+  s->loop = this;
   s->req = req;
   s->txn = next_txn_++;
   h2o_timer_init(&s->deadline.timer, on_deadline_cb);
@@ -316,7 +366,7 @@ int Engine::on_req(h2o_req_t* req) {
 }
 
 /// Appends a piece of the body, or answers 413 when it goes past the limit.
-bool Engine::take_body(Session* s, h2o_iovec_t chunk) {
+bool Loop::take_body(Session* s, h2o_iovec_t chunk) {
   if (s->body.size() + chunk.len > cfg_.max_body_bytes) {
     reject(s, {413, "body.too_large", "request body too large", {}});
     return false;
@@ -325,7 +375,7 @@ bool Engine::take_body(Session* s, h2o_iovec_t chunk) {
   return true;
 }
 
-int Engine::on_body(Session* s, bool end) {
+int Loop::on_body(Session* s, bool end) {
   h2o_iovec_t chunk = s->req->entity;
   s->piece_held = !end;  // the last piece needs no proceed_req
   if (s->discarding) {
@@ -341,7 +391,7 @@ int Engine::on_body(Session* s, bool end) {
 
 /// Releases the piece of the body h2o handed over and asks for the next one.
 /// Runs from a zero-delay timer, so never inside one of h2o's own callbacks.
-void Engine::on_kick(Session* s) {
+void Loop::on_kick(Session* s) {
   h2o_req_t* req = s->req;
   if (!req->proceed_req) return;
   // Answered already: h2 resets the stream (NO_ERROR) once the response is out,
@@ -357,40 +407,36 @@ void Engine::on_kick(Session* s) {
   }
 }
 
-void Engine::dispatch(Session* s) {
-  if (outstanding_.load() >= cfg_.max_in_flight) {
+void Loop::dispatch(Session* s) {
+  if (e_.outstanding_.load() >= cfg_.max_in_flight) {
     reject(s, {503, "server.busy", "server is at capacity", {}});
     return;
   }
   s->phase = Phase::Running;
   Request rq = s->meta;
   rq.body = std::move(s->body);
-  outstanding_.fetch_add(1);
+  e_.outstanding_.fetch_add(1);
   std::uint64_t txn = s->txn;
-  {
-    std::lock_guard lk(jobs_m_);
-    jobs_.emplace_back([this, txn, rq = std::move(rq)]() mutable {
-      // The response may come back here, or later from another worker when an
-      // async handler finishes.
-      auto deliver = [this, txn](Response&& res) {
-        h2o_multithread_send_message(&done_rx_.rx, &(new Done{{}, txn, new Response(std::move(res))})->msg);
-        outstanding_.fetch_sub(1);
-      };
-      try {
-        app_.handle_async(std::move(rq), deliver);
-      } catch (...) {  // handle_async maps handler exceptions; this is a last resort
-        Response res;
-        res.status = 500;
-        res.body = R"({"title":"Internal Server Error","status":500,"detail":"internal error","code":"internal"})";
-        res.set_content_type("application/problem+json");
-        deliver(std::move(res));
-      }
-    });
-  }
-  jobs_cv_.notify_one();
+  e_.queue_job([this, txn, rq = std::move(rq)]() mutable {
+    // The response comes back to this loop, from this worker or, when an async
+    // handler finishes, from another.
+    auto deliver = [this, txn](Response&& res) {
+      h2o_multithread_send_message(&done_rx_.rx, &(new Done{{}, txn, new Response(std::move(res))})->msg);
+      e_.outstanding_.fetch_sub(1);
+    };
+    try {
+      app_.handle_async(std::move(rq), deliver);
+    } catch (...) {  // handle_async maps handler exceptions; this is a last resort
+      Response res;
+      res.status = 500;
+      res.body = R"({"title":"Internal Server Error","status":500,"detail":"internal error","code":"internal"})";
+      res.set_content_type("application/problem+json");
+      deliver(std::move(res));
+    }
+  });
 }
 
-void Engine::on_completions(h2o_linklist_t* messages) {
+void Loop::on_completions(h2o_linklist_t* messages) {
   while (!h2o_linklist_is_empty(messages)) {
     auto* d = reinterpret_cast<Done*>(messages->next);
     h2o_linklist_unlink(&d->msg.link);
@@ -402,7 +448,7 @@ void Engine::on_completions(h2o_linklist_t* messages) {
   }
 }
 
-void Engine::on_deadline(Session* s) {
+void Loop::on_deadline(Session* s) {
   if (s->phase == Phase::Writing) return;
   s->stop->request_stop();
   if (s->phase == Phase::Running) {
@@ -429,7 +475,7 @@ void add_headers(h2o_req_t* req, h2o_headers_t* out, const Headers& fields, cons
   }
 }
 
-void Engine::respond(Session* s, Response res) {
+void Loop::respond(Session* s, Response res) {
   if (s->phase == Phase::Writing) return;
   if (h2o_timer_is_linked(&s->deadline.timer)) h2o_timer_unlink(&s->deadline.timer);
   s->phase = Phase::Writing;
@@ -471,7 +517,7 @@ void Engine::respond(Session* s, Response res) {
   }
 }
 
-void Engine::forget(Session* s) {
+void Loop::forget(Session* s) {
   s->stop->request_stop();  // the client is gone (or done): cancel blocking extractors
   if (h2o_timer_is_linked(&s->deadline.timer)) h2o_timer_unlink(&s->deadline.timer);
   if (h2o_timer_is_linked(&s->kick.timer)) h2o_timer_unlink(&s->kick.timer);
@@ -479,7 +525,7 @@ void Engine::forget(Session* s) {
   delete s;
 }
 
-void Engine::on_accept(h2o_socket_t* listener, const char* err) {
+void Loop::on_accept(h2o_socket_t* listener, const char* err) {
   if (err) return;
   for (int i = 0; i < 64; ++i) {  // take what is queued, a bounded batch per wakeup
     h2o_socket_t* sock = h2o_evloop_socket_accept(listener);
@@ -491,7 +537,7 @@ void Engine::on_accept(h2o_socket_t* listener, const char* err) {
 // ---- workers ----------------------------------------------------------------------------
 
 void Engine::start_workers(unsigned n) {
-  // Workers never take SIGINT/SIGTERM; the event-loop thread does.
+  // Workers never take SIGINT/SIGTERM; Engine::run's thread does.
   sigset_t block, old;
   sigemptyset(&block);
   sigaddset(&block, SIGINT);
@@ -558,13 +604,13 @@ bool Engine::setup_tls() {
   return true;
 }
 
-int Engine::open_listener() {
+int Engine::open_listener(std::uint16_t listen_port, bool reuse_port) {
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV;
   addrinfo* found = nullptr;
-  auto port = std::to_string(opts_.port);
+  auto port = std::to_string(listen_port);
   if (int rc = getaddrinfo(opts_.host.empty() ? nullptr : opts_.host.c_str(), port.c_str(), &hints, &found); rc != 0) {
     std::fprintf(stderr, "crocket: cannot resolve %s: %s\n", opts_.host.c_str(), gai_strerror(rc));
     return -1;
@@ -574,8 +620,9 @@ int Engine::open_listener() {
     fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
     if (fd < 0) continue;
     int on = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) != 0 || ::bind(fd, ai->ai_addr, ai->ai_addrlen) != 0 ||
-        ::listen(fd, SOMAXCONN) != 0) {
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) != 0 ||
+        (reuse_port && setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on) != 0) ||
+        ::bind(fd, ai->ai_addr, ai->ai_addrlen) != 0 || ::listen(fd, SOMAXCONN) != 0) {
       ::close(fd);
       fd = -1;
     }
@@ -584,6 +631,67 @@ int Engine::open_listener() {
   if (fd < 0) std::fprintf(stderr, "crocket: could not listen on %s:%u\n", opts_.host.c_str(), unsigned(opts_.port));
   return fd;
 }
+
+// ---- one event loop ------------------------------------------------------------------
+
+Loop::Loop(Engine& e, int listen_fd) : e_(e), app_(e.app_), opts_(e.opts_), cfg_(e.cfg_) {
+  wake_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  h2o_context_init(&ctx_, h2o_evloop_create(), &e_.config_);
+  accept_ctx_.ctx = &ctx_;
+  accept_ctx_.hosts = e_.config_.hosts;
+  accept_ctx_.ssl_ctx = e_.ssl_;
+  done_rx_.loop = this;
+  h2o_multithread_register_receiver(ctx_.queue, &done_rx_.rx, on_completions_cb);
+  listener_ = h2o_evloop_socket_create(ctx_.loop, listen_fd, H2O_SOCKET_FLAG_DONT_READ);
+  listener_->data = this;
+  h2o_socket_read_start(listener_, on_accept_cb);
+  wake_ = h2o_evloop_socket_create(ctx_.loop, wake_fd_, 0);
+  h2o_socket_read_start(wake_, on_wake_cb);
+}
+
+Loop::~Loop() {
+  // A connection that is still open owns a request (and a session) h2o has not
+  // freed; tearing the loop down under it is not safe, so it is left to exit.
+  if (!cleaned_up_) return;
+  h2o_multithread_unregister_receiver(ctx_.queue, &done_rx_.rx);
+  h2o_evloop_t* loop = ctx_.loop;
+  h2o_context_dispose(&ctx_);
+  h2o_evloop_destroy(loop);
+}
+
+void Loop::serve() {
+  t_loop = this;
+  while (!g_stop.load()) h2o_evloop_run(ctx_.loop, INT32_MAX);
+
+  // 1. Stop accepting and drain this loop's requests (Engine::run waits for every loop).
+  h2o_socket_read_stop(listener_);
+  h2o_socket_close(listener_);  // new connections are refused from here on
+  listener_ = nullptr;
+  h2o_context_request_shutdown(&ctx_);  // GOAWAY on h2; idle h1 connections close
+  auto drain_until = Clock::now() + cfg_.drain_timeout;
+  while ((!live_.empty() || e_.outstanding_.load() > 0) && Clock::now() < drain_until) h2o_evloop_run(ctx_.loop, 50);
+  drained_ = live_.empty() && e_.outstanding_.load() == 0;
+  for (auto& [txn, s] : live_) s->stop->request_stop();  // what is left is told to stop
+  e_.loops_drained_->count_down();
+
+  // 2. Engine::run waits for the handlers and stops the workers; keep delivering meanwhile.
+  while (!e_.workers_stopped_.load()) h2o_evloop_run(ctx_.loop, 10);
+
+  // 3. Deliver the last completions (dropped: nobody waits), let h2o finish
+  // writing, and close what is left.
+  auto close_until = Clock::now() + 1s;
+  do {
+    h2o_context_close_idle_connections(&ctx_, SIZE_MAX, 0);
+    h2o_evloop_run(ctx_.loop, 10);
+  } while (open_connections() > 0 && Clock::now() < close_until);
+  h2o_socket_read_stop(wake_);
+  h2o_socket_close(wake_);
+  wake_ = nullptr;
+  cleaned_up_ = open_connections() == 0 && live_.empty();
+  t_loop = nullptr;
+}
+
+// ---- the engine ------------------------------------------------------------------------
 
 int Engine::run() {
   bool tls = !opts_.tls_cert.empty() && !opts_.tls_key.empty();
@@ -598,45 +706,59 @@ int Engine::run() {
   config_.http2.graceful_shutdown_timeout = std::uint64_t(std::max<std::int64_t>(1, cfg_.drain_timeout.count()));
   h2o_hostconf_t* host = h2o_config_register_host(&config_, h2o_iovec_init(H2O_STRLIT("default")), 65535);
   h2o_pathconf_t* path = h2o_config_register_path(host, "/", 0);
-  auto* handler = reinterpret_cast<Handler*>(h2o_create_handler(path, sizeof(Handler)));
-  handler->super.on_req = on_req_cb;
-  handler->super.supports_request_streaming = 1;  // see on_req: crocket reads the body itself
-  handler->engine = this;
+  auto* handler = h2o_create_handler(path, sizeof(h2o_handler_t));
+  handler->on_req = on_req_cb;
+  handler->supports_request_streaming = 1;  // see on_req: crocket reads the body itself
 
-  auto fail = [&] {
+  auto fail = [&](std::vector<int> fds) {
+    for (int fd : fds) ::close(fd);
     if (ssl_) SSL_CTX_free(ssl_);
     h2o_config_dispose(&config_);
     shut_down(app_);
     return 1;
   };
-  if (tls && !setup_tls()) return fail();
-  int fd = open_listener();
-  if (fd < 0) return fail();
-  int wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  if (wake_fd < 0) {
-    ::close(fd);
-    return fail();
+  if (tls && !setup_tls()) return fail({});
+
+  // One listening socket per event loop, all on the same port (SO_REUSEPORT):
+  // the kernel spreads new connections across them.
+  unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+  unsigned n_loops = std::min<unsigned>(opts_.event_loops ? opts_.event_loops : cores, kMaxLoops);
+  std::vector<int> fds;
+  std::uint16_t port = opts_.port;
+  for (unsigned i = 0; i < n_loops; ++i) {
+    int fd = open_listener(port, n_loops > 1);
+    if (fd < 0) return fail(fds);
+    fds.push_back(fd);
+    if (port == 0) {  // an ephemeral port: the other loops take the same one
+      sockaddr_storage ss{};
+      socklen_t len = sizeof ss;
+      getsockname(fd, reinterpret_cast<sockaddr*>(&ss), &len);
+      port = ntohs(ss.ss_family == AF_INET6 ? reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port
+                                            : reinterpret_cast<sockaddr_in*>(&ss)->sin_port);
+    }
   }
 
-  h2o_context_init(&ctx_, h2o_evloop_create(), &config_);
-  accept_ctx_.ctx = &ctx_;
-  accept_ctx_.hosts = config_.hosts;
-  accept_ctx_.ssl_ctx = ssl_;
-  done_rx_.engine = this;
-  h2o_multithread_register_receiver(ctx_.queue, &done_rx_.rx, on_completions_cb);
-
-  listener_ = h2o_evloop_socket_create(ctx_.loop, fd, H2O_SOCKET_FLAG_DONT_READ);
-  listener_->data = this;
-  h2o_socket_read_start(listener_, on_accept_cb);
-  wake_ = h2o_evloop_socket_create(ctx_.loop, wake_fd, 0);
-  h2o_socket_read_start(wake_, on_wake_cb);
-
-  unsigned n = opts_.workers ? opts_.workers : std::max(4u, std::thread::hardware_concurrency());
-  start_workers(n);
+  unsigned n_workers = opts_.workers ? opts_.workers : std::max(4u, cores);
+  start_workers(n_workers);
   app_.core().executor.store(this);
 
+  for (int fd : fds) loops_.push_back(std::make_unique<Loop>(*this, fd));
+  loops_drained_.emplace(std::ptrdiff_t(n_loops));
+  workers_stopped_.store(false);
   g_stop.store(false);
-  g_wake_fd.store(wake_fd);
+  for (std::size_t i = 0; i < loops_.size(); ++i) g_wake_fds[i].store(loops_[i]->wake_fd());
+  g_wake_count.store(loops_.size());
+
+  // SIGINT and SIGTERM stay blocked everywhere but in sigsuspend below: the
+  // event loops and workers never take them.
+  sigset_t block, old_mask;
+  sigemptyset(&block);
+  sigaddset(&block, SIGINT);
+  sigaddset(&block, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &block, &old_mask);
+  std::vector<std::thread> threads;
+  for (auto& loop : loops_) threads.emplace_back([l = loop.get()] { l->serve(); });
+
   struct sigaction sa{};
   sa.sa_handler = on_signal;
   sigemptyset(&sa.sa_mask);
@@ -647,23 +769,20 @@ int Engine::run() {
   sigaction(SIGPIPE, &ignore, &old_pipe);  // a peer closing mid-write is an error code, not a signal
 
   const char* h2 = tls && opts_.http2 ? ", h2 via ALPN" : !tls && opts_.h2_prior_knowledge ? ", h2 with prior knowledge" : "";
-  std::fprintf(stderr, "crocket: listening on %s://%s:%u (%u workers%s)\n", tls ? "https" : "http",
-               opts_.host.c_str(), unsigned(opts_.port), n, h2);
+  std::fprintf(stderr, "crocket: listening on %s://%s:%u (%u event loops, %u workers%s)\n", tls ? "https" : "http",
+               opts_.host.c_str(), unsigned(opts_.port), n_loops, n_workers, h2);
 
-  while (!g_stop.load()) h2o_evloop_run(ctx_.loop, INT32_MAX);
-
-  // ---- graceful shutdown: stop accepting, drain, then drop state ----
+  // ---- graceful shutdown: every loop stops accepting and drains, then the workers stop ----
+  // Wait for a signal. sigsuspend unblocks them only while it waits, so one
+  // arriving between the check and the wait is not lost.
+  sigset_t waiting = old_mask;
+  sigdelset(&waiting, SIGINT);
+  sigdelset(&waiting, SIGTERM);
+  while (!g_stop.load()) sigsuspend(&waiting);  // the handler sets g_stop and wakes the loops
+  pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
   app_.core().stats.draining.store(true);
-  h2o_socket_read_stop(listener_);
-  h2o_socket_close(listener_);  // new connections are refused from here on
-  listener_ = nullptr;
-  h2o_context_request_shutdown(&ctx_);  // GOAWAY on h2; idle h1 connections close
-  auto drain_until = Clock::now() + cfg_.drain_timeout;
-  while ((!live_.empty() || outstanding_.load() > 0) && Clock::now() < drain_until) h2o_evloop_run(ctx_.loop, 50);
-  bool drained = live_.empty() && outstanding_.load() == 0;
-
-  // Anything still open is told to stop; handlers get a short grace period.
-  for (auto& [txn, s] : live_) s->stop->request_stop();
+  loops_drained_->wait();
+  bool drained = std::ranges::all_of(loops_, [](auto& l) { return l->drained(); });
   {
     std::lock_guard lk(jobs_m_);
     jobs_.clear();  // never started: their sessions go with their connections
@@ -675,31 +794,16 @@ int Engine::run() {
   }
   app_.core().executor.store(nullptr);
   stop_workers();
+  workers_stopped_.store(true);
+  for (auto& t : threads) t.join();
 
-  // Deliver the last completions (dropped: nobody waits), let h2o finish
-  // writing, and close what is left.
-  auto close_until = Clock::now() + 1s;
-  do {
-    h2o_context_close_idle_connections(&ctx_, SIZE_MAX, 0);
-    h2o_evloop_run(ctx_.loop, 10);
-  } while (open_connections() > 0 && Clock::now() < close_until);
-
-  g_wake_fd.store(-1);
+  g_wake_count.store(0);
   sigaction(SIGINT, &old_int, nullptr);
   sigaction(SIGTERM, &old_term, nullptr);
   sigaction(SIGPIPE, &old_pipe, nullptr);
-  h2o_socket_read_stop(wake_);
-  h2o_socket_close(wake_);
-  wake_ = nullptr;
-  // A connection that is still open owns a request (and a session) h2o has not
-  // freed; tearing the loop down under it is not safe, so it is left to exit.
-  if (open_connections() == 0 && live_.empty()) {
-    h2o_multithread_unregister_receiver(ctx_.queue, &done_rx_.rx);
-    h2o_evloop_t* loop = ctx_.loop;
-    h2o_context_dispose(&ctx_);
-    h2o_evloop_destroy(loop);
-    h2o_config_dispose(&config_);
-  }
+  bool all_clean = std::ranges::all_of(loops_, [](auto& l) { return l->cleaned_up(); });
+  loops_.clear();  // a loop with connections still open is left as it is (see ~Loop)
+  if (all_clean) h2o_config_dispose(&config_);
   if (ssl_) SSL_CTX_free(ssl_);
 
   shut_down(app_);

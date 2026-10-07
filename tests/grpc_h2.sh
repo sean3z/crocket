@@ -40,7 +40,8 @@ printf '\x00\x00\x00\x00\x00' >"$WORK/empty.bin"
 # 2 MiB, over the default 1 MiB max_body_bytes (the frame header is all that matters)
 { printf '\x00\x00\x20\x00\x00'; head -c 2097152 /dev/zero; } >"$WORK/huge.bin"
 
-CROCKET_PORT=$PORT "$GRPC" >"$WORK/h2c.log" 2>&1 &
+# One event loop here (no SO_REUSEPORT); the TLS server below has the default, one per core.
+CROCKET_PORT=$PORT CROCKET_EVENT_LOOPS=1 "$GRPC" >"$WORK/h2c.log" 2>&1 &
 H2C_PID=$!
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$WORK/key.pem" -out "$WORK/cert.pem" >/dev/null 2>&1 || { echo "openssl failed"; exit 1; }

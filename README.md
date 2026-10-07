@@ -927,6 +927,10 @@ What you get:
 - **Graceful shutdown on SIGINT/SIGTERM:** stop accepting, drain in-flight requests,
   run `on_shutdown`, then destroy managed state.
 
+Network I/O runs on one event loop per core (`LaunchOptions::event_loops`), each with its
+own listening socket on the port, and handlers on a pool of `LaunchOptions::workers`
+threads.
+
 Requests whose headers exceed `LaunchOptions::max_header_bytes` (8 KiB) or
 `max_header_count` (100) get 431 `headers.too_large`. The threading model and the other
 limits are in [docs/ENGINE.md](docs/ENGINE.md).
@@ -1105,6 +1109,8 @@ differences of a few percent as noise. `--duration` and `--clients` change the l
 | `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | unset | Enable TLS; both must be set |
 | `CROCKET_REQUEST_TIMEOUT` | `10` (an hour in dev) | Request deadline in seconds |
 | `CROCKET_DEBUG_ROUTES` | unset | Set to any value to expose `GET /__routes` |
+| `CROCKET_WORKERS` | one per core | Handler threads |
+| `CROCKET_EVENT_LOOPS` | one per core | Network I/O threads |
 
 ## Differences from REQUIREMENTS.md
 

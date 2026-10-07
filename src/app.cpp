@@ -463,16 +463,29 @@ void Crocket::ran_on_worker(const RouteDef& def, std::chrono::steady_clock::dura
 
 void Crocket::ran_on_loop(const RouteDef& def, std::chrono::steady_clock::duration took) {
   using P = detail::Placement;
-  if (took <= P::kDemoteAfter) return;
+  if (took <= P::kSlow) return;  // the common case: nothing to record
   auto& p = core_->placement[std::size_t(&def - core_->routes.data())];
+  if (took <= P::kStall) {
+    // Slow, but maybe only descheduled: a strike. Enough of them close together is blocking.
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto since = p.strikes_since.load(std::memory_order_relaxed);
+    if (now - since > std::chrono::steady_clock::duration(P::kStrikeWindow).count() &&
+        p.strikes_since.compare_exchange_strong(since, now, std::memory_order_relaxed)) {
+      p.strikes.store(1, std::memory_order_relaxed);
+      return;
+    }
+    if (p.strikes.fetch_add(1, std::memory_order_relaxed) + 1 < P::kStrikes) return;
+  }
   if (!p.on_loop.exchange(false, std::memory_order_relaxed)) return;  // demoted already
+  p.strikes.store(0, std::memory_order_relaxed);
   auto n = p.demotions.fetch_add(1, std::memory_order_relaxed) + 1;
   auto wait = P::kRetryAfter * (1u << std::min(n - 1, 8u));  // 10 s, 20 s, ... about 43 minutes
   p.fast_runs.store(0, std::memory_order_relaxed);
   p.retry_at.store((std::chrono::steady_clock::now() + wait).time_since_epoch().count(), std::memory_order_relaxed);
-  log::warn("{function} took {ms} ms on an event loop, stalling the other connections on it, so it runs on workers "
-            "again; it may move back after {retry_s} s of fast runs",
+  log::warn("{function} blocked its event loop ({ms} ms, after {slow_runs} slow runs within {window_s} s), stalling "
+            "the other connections on it, so it runs on workers again; it may move back after {retry_s} s of fast runs",
             def.handler, std::chrono::duration_cast<std::chrono::milliseconds>(took).count(),
+            took > P::kStall ? 1u : P::kStrikes, std::chrono::duration_cast<std::chrono::seconds>(P::kStrikeWindow).count(),
             std::chrono::duration_cast<std::chrono::seconds>(wait).count());
 }
 

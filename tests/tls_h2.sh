@@ -123,9 +123,11 @@ expect "a plain function starts on workers" "workers" "$(runs_on)"
 curl -sk -o /dev/null "$BASE/api/slow/0?n=[1-1100]"  # one connection, 1,100 fast runs
 expect "after 1,000 fast runs it runs on the event loops" "event loop" "$(runs_on)"
 grep -q 'api::slow runs on the event loops from now on' "$WORK/serve.log" && pass "  ... and says so" || fail "  ... and says so"
-expect "a slow run on a loop" "slept 50 ms" "$(curl -sk "$BASE/api/slow/50")"
-expect "  ... moves it back to workers" "workers" "$(runs_on)"
-grep -q 'api::slow took [0-9]* ms on an event loop' "$WORK/serve.log" && pass "  ... and says why" || fail "  ... and says why"
+expect "one slow run on a loop (the thread may just have been descheduled)" "slept 5 ms" "$(curl -sk "$BASE/api/slow/5")"
+expect "  ... leaves it there" "event loop" "$(runs_on)"
+curl -sk -o /dev/null "$BASE/api/slow/5?n=[1-8]"  # slow every time: it blocks
+expect "eight within a second move it back to workers" "workers" "$(runs_on)"
+grep -q 'api::slow blocked its event loop ([0-9]* ms, after 8 slow runs within 1 s)' "$WORK/serve.log" && pass "  ... and says why" || fail "  ... and says why"
 pool_runs_on() { curl -sk "$BASE/__routes" | grep -o '"path":"/api/users/{id}","handler":"[^"]*","rank":[0-9-]*,"runs_on":"[^"]*"' | sed 's/.*"runs_on":"//; s/"$//'; }
 curl -sk -o /dev/null "$BASE/api/users/1?n=[1-1100]"
 expect "a handler taking a Pool stays on workers however fast" "workers" "$(pool_runs_on)"

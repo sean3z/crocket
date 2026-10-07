@@ -1062,6 +1062,7 @@ order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 ./dev bench --compare main       # on a branch: the change from main; exits 1 if >10% worse
 ./dev bench micro                # in-process only (seconds)
 ./dev bench load router wait     # chosen load scenarios
+./dev bench --vs-rocket load     # the same scenarios against Rocket 0.5 too (needs cargo)
 ```
 
 `load` runs [h2load](https://nghttp2.org/documentation/h2load-howto.html) against
@@ -1081,7 +1082,14 @@ requests per second, p50 and p99 latency, and non-2xx responses:
 pipeline and JSON, and counts heap allocations per operation. Results are saved in
 `bench/results/`, which git ignores: numbers compare only on the same machine, with the
 same load on it. The load generator shares the machine with the server, so treat
-differences of a few percent as noise. `--duration` and `--clients` change the load.
+differences of a few percent as noise. `--duration`, `--clients` and `--threads` (h2load's) change the load.
+
+`--vs-rocket` builds [bench/rocket](bench/rocket) (Rocket 0.5, the same routes and bodies)
+with cargo, runs the same scenarios against it over HTTP/1.1 (Rocket serves HTTP/2 only
+over TLS), and prints the two side by side. The load is closed-loop: each connection waits
+for its response before sending the next request. So with few connections the numbers
+mostly reflect per-request latency, and with many (`--clients 256` or more) the server's
+throughput.
 
 ## Tests
 

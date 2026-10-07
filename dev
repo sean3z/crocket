@@ -42,6 +42,9 @@ ${B}./dev${R} <command> [args]
                                               anything is more than 10% worse
                               --duration S    seconds per load run (default 10)
                               --clients N     connections per load run (default 64)
+                              --threads N     h2load threads (default 8, 4 or 2 by cores)
+                              --vs-rocket     also run Rocket 0.5 (bench/rocket) on the
+                                              same scenarios over HTTP/1.1; needs cargo
                             Numbers compare only on the same machine. h2load comes from
                             nghttp2-client (./dev setup); $H2LOAD overrides the path.
   h2o-update [ref]          Pin h2o to the newest master commit (or a branch, tag
@@ -179,6 +182,7 @@ cmd_clean() {
 # ---- bench -----------------------------------------------------------------------
 
 BENCH_PORT=18600
+ROCKET_BENCH_PORT=18601
 # name method path [body]
 BENCH_SCENARIOS=(
   "plaintext GET /plaintext"
@@ -198,14 +202,14 @@ bench_body() { # a 1 KB order for POST /orders
 }
 
 # One h2load run -> rows "name.proto<TAB>metric<TAB>value<TAB>better" on stdout.
-bench_load_one() { # name method path body proto work
-  local name=$1 method=$2 path=$3 body=$4 proto=$5 work=$6
+bench_load_one() { # name method path body proto work port
+  local name=$1 method=$2 path=$3 body=$4 proto=$5 work=$6 port=$7
   local args=(-c "$BENCH_CLIENTS" -t "$BENCH_THREADS" -D "$BENCH_DURATION" --warm-up-time 1
               --log-file "$work/$name.$proto.log")
   [[ $proto == h1 ]] && args+=(--h1 -m 1) || args+=(-m 10)
   [[ -n $body ]] && args+=(-d "$work/body.json" -H 'content-type: application/json')
   [[ $method == GET ]] || [[ -n $body ]] || args+=(-H ":method: $method")
-  local out; out=$("$H2LOAD" "${args[@]}" "http://127.0.0.1:$BENCH_PORT$path" 2>&1) || { warn "$name/$proto: h2load failed"; echo "$out" >&2; return; }
+  local out; out=$("$H2LOAD" "${args[@]}" "http://127.0.0.1:$port$path" 2>&1) || { warn "$name/$proto: h2load failed"; echo "$out" >&2; return; }
   local rps done ok
   rps=$(sed -n 's/^finished in [^,]*, \([0-9.]*\) req\/s.*/\1/p' <<<"$out")
   read -r done ok < <(sed -n 's/^requests: [0-9]* total, [0-9]* started, \([0-9]*\) done, \([0-9]*\) succeeded.*/\1 \2/p' <<<"$out")
@@ -222,25 +226,67 @@ bench_load_one() { # name method path body proto work
   rm -f "$work/$name.$proto.log"
 }
 
+bench_wait_up() { # port log name
+  local i; for i in $(seq 100); do curl -sf -o /dev/null "http://127.0.0.1:$1/plaintext" && return; sleep 0.1; done
+  cat "$2" >&2; die "$3 did not start"
+}
+
+# Every chosen scenario against one server -> rows; rows are prefixed with `label`.
+bench_scenarios() { # label port work protos [scenario...]
+  local label=$1 port=$2 work=$3 protos=$4; shift 4
+  local sc name method path body proto
+  for sc in "${BENCH_SCENARIOS[@]}"; do
+    read -r name method path body <<<"$sc"
+    if (($# > 0)) && [[ " $* " != *" $name "* ]]; then continue; fi
+    for proto in $protos; do
+      say "load: ${label}$name over $proto (${BENCH_DURATION}s, $BENCH_CLIENTS connections)"
+      bench_load_one "${label}$name" "$method" "$path" "$body" "$proto" "$work" "$port"
+    done
+  done
+}
+
 bench_load() { # [scenario...] -> rows
   command -v "$H2LOAD" >/dev/null || die "h2load not found; run ./dev setup (nghttp2-client) or set H2LOAD"
   local work; work=$(mktemp -d)
   bench_body >"$work/body.json"
   CROCKET_PORT=$BENCH_PORT "$(tree release)/crocket_bench" >"$work/server.log" 2>&1 &
-  local pid=$!
+  local pid=$! rpid=''
   # shellcheck disable=SC2064
-  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null; rm -rf '$work'" RETURN
-  local i; for i in $(seq 50); do curl -sf -o /dev/null "http://127.0.0.1:$BENCH_PORT/healthz" && break; sleep 0.1; done
-  curl -sf -o /dev/null "http://127.0.0.1:$BENCH_PORT/healthz" || { cat "$work/server.log" >&2; die "crocket_bench did not start"; }
-  local sc name method path body proto
-  for sc in "${BENCH_SCENARIOS[@]}"; do
-    read -r name method path body <<<"$sc"
-    if (($# > 0)) && [[ " $* " != *" $name "* ]]; then continue; fi
-    for proto in h1 h2c; do
-      say "load: $name over $proto (${BENCH_DURATION}s, $BENCH_CLIENTS connections)"
-      bench_load_one "$name" "$method" "$path" "$body" "$proto" "$work"
-    done
-  done
+  trap "kill $pid \${rpid:-} 2>/dev/null; wait $pid \${rpid:-} 2>/dev/null; rm -rf '$work'; trap - RETURN" RETURN
+  bench_wait_up "$BENCH_PORT" "$work/server.log" crocket_bench
+  bench_scenarios "" "$BENCH_PORT" "$work" "h1 h2c" "$@"
+  kill "$pid"; wait "$pid" 2>/dev/null
+  if [[ -n $BENCH_VS_ROCKET ]]; then
+    # Rocket 0.5 serves HTTP/2 only over TLS, so the comparison is HTTP/1.1.
+    ROCKET_PORT=$ROCKET_BENCH_PORT ROCKET_ADDRESS=127.0.0.1 ROCKET_LOG_LEVEL=off \
+      "$(tree release)/rocket/release/rocket-bench" >"$work/rocket.log" 2>&1 &
+    rpid=$!
+    bench_wait_up "$ROCKET_BENCH_PORT" "$work/rocket.log" rocket-bench
+    bench_scenarios "rocket:" "$ROCKET_BENCH_PORT" "$work" "h1" "$@"
+  fi
+}
+
+bench_build_rocket() {
+  command -v cargo >/dev/null || die "--vs-rocket needs cargo (a Rust toolchain: https://rustup.rs)"
+  say "building bench/rocket (Rocket 0.5, release)"
+  cargo build --release --quiet --manifest-path "$ROOT/bench/rocket/Cargo.toml" --target-dir "$(tree release)/rocket" ||
+    die "bench/rocket did not build"
+}
+
+bench_vs_rocket() { # rows -> a crocket/Rocket table for the HTTP/1.1 scenarios
+  awk -F'\t' '
+    { v[$1 FS $2] = $3 }
+    $1 !~ /^rocket:/ && $1 ~ /\.h1$/ && $2 == "req_per_s" { names[++n] = substr($1, 1, length($1) - 3) }
+    END {
+      printf "  %-12s %14s %14s %8s   %-17s %-17s\n", "", "crocket req/s", "Rocket req/s", "ratio", "p50 ms (c / R)", "p99 ms (c / R)"
+      for (i = 1; i <= n; i++) {
+        c = names[i] ".h1"; r = "rocket:" names[i] ".h1"
+        if (!((r FS "req_per_s") in v)) continue
+        cr = v[c FS "req_per_s"]; rr = v[r FS "req_per_s"]
+        printf "  %-12s %14.0f %14.0f %7.2fx   %6.2f / %-8.2f %6.2f / %-8.2f\n", names[i], cr, rr, (rr > 0 ? cr / rr : 0),
+               v[c FS "p50_ms"], v[r FS "p50_ms"], v[c FS "p99_ms"], v[r FS "p99_ms"]
+      }
+    }' "$1"
 }
 
 bench_print() { # file
@@ -266,8 +312,9 @@ bench_compare() { # baseline current -> table; returns 1 on a >10% regression
 
 cmd_bench() {
   local save='' compare='' kinds=() scenarios=()
+  BENCH_VS_ROCKET=
   BENCH_DURATION=10 BENCH_CLIENTS=64
-  BENCH_THREADS=$(( $(nproc) >= 8 ? 4 : 2 ))
+  BENCH_THREADS=$(( $(nproc) >= 16 ? 8 : $(nproc) >= 8 ? 4 : 2 ))
   H2LOAD=${H2LOAD:-h2load}
   while (($#)); do
     case $1 in
@@ -275,6 +322,8 @@ cmd_bench() {
       --compare) compare=$2; shift 2 ;;
       --duration) BENCH_DURATION=$2; shift 2 ;;
       --clients) BENCH_CLIENTS=$2; shift 2 ;;
+      --vs-rocket) BENCH_VS_ROCKET=1; shift ;;
+      --threads) BENCH_THREADS=$2; shift 2 ;;
       load|micro) kinds+=("$1"); shift ;;
       -*) die "unknown option $1" ;;
       *) scenarios+=("$1"); shift ;;
@@ -282,7 +331,9 @@ cmd_bench() {
   done
   ((${#kinds[@]})) || kinds=(load micro)
   if [[ -n $compare && ! -f $ROOT/bench/results/$compare.tsv ]]; then die "no bench/results/$compare.tsv; make one with --save $compare"; fi
+  [[ -n $BENCH_VS_ROCKET && " ${kinds[*]} " != *" load "* ]] && die "--vs-rocket compares load runs; drop 'micro'"
   build release crocket_bench crocket_microbench
+  [[ -n $BENCH_VS_ROCKET ]] && bench_build_rocket
   local out; out=$(mktemp)
   local k; for k in "${kinds[@]}"; do
     case $k in
@@ -291,6 +342,10 @@ cmd_bench() {
     esac
   done
   local rc=0
+  if [[ -n $BENCH_VS_ROCKET ]]; then
+    ok "crocket and Rocket 0.5, HTTP/1.1"
+    bench_vs_rocket "$out"
+  fi
   if [[ -n $compare ]]; then
     ok "compared with $compare (baseline, now, change)"
     bench_compare "$ROOT/bench/results/$compare.tsv" "$out" || rc=1

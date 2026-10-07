@@ -96,6 +96,7 @@ struct Deadline {
   }
 };
 
+struct RouteDef;
 namespace detail {
 class StateRegistry;
 class Exchange;
@@ -129,6 +130,7 @@ struct Request {
 
   // Set by the router for the candidate currently being tried.
   std::string_view route_template;  // "/users/{id}"; "" while unmatched
+  const RouteDef* route = nullptr;   // the candidate's definition; null while unmatched
   std::string_view handler;         // "api::create"
   Captures captures;
 

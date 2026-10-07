@@ -43,6 +43,8 @@ ${B}./dev${R} <command> [args]
                               --duration S    seconds per load run (default 10)
                               --clients N     connections per load run (default 64)
                               --threads N     h2load threads (default 8, 4 or 2 by cores)
+                              --realistic     attach Logger and Metrics to crocket_bench, as
+                                              a production app would
                               --vs-rocket     also run Rocket 0.5 (bench/rocket) on the
                                               same scenarios over HTTP/1.1; needs cargo
                             Numbers compare only on the same machine. h2load comes from
@@ -286,7 +288,8 @@ bench_load() { # [scenario...] -> rows
   command -v "$H2LOAD" >/dev/null || die "h2load not found; run ./dev setup (nghttp2-client) or set H2LOAD"
   local work; work=$(mktemp -d)
   bench_body >"$work/body.json"
-  CROCKET_PORT=$BENCH_PORT "$(tree release)/crocket_bench" >"$work/server.log" 2>&1 &
+  local fairings=(); [[ -n $BENCH_REALISTIC ]] && fairings=(CROCKET_BENCH_LOGGER=1 CROCKET_BENCH_METRICS=1)
+  env CROCKET_PORT=$BENCH_PORT "${fairings[@]}" "$(tree release)/crocket_bench" >"$work/server.log" 2>&1 &
   local pid=$! rpid=''
   # shellcheck disable=SC2064
   trap "kill $pid \${rpid:-} 2>/dev/null || true; wait $pid \${rpid:-} 2>/dev/null || true; rm -rf '$work'; trap - RETURN" RETURN
@@ -350,7 +353,7 @@ bench_compare() { # baseline current -> table; returns 1 on a >10% regression
 
 cmd_bench() {
   local save='' compare='' kinds=() scenarios=()
-  BENCH_VS_ROCKET=
+  BENCH_VS_ROCKET='' BENCH_REALISTIC=
   BENCH_DURATION=10 BENCH_CLIENTS=64
   BENCH_THREADS=$(( $(nproc) >= 16 ? 8 : $(nproc) >= 8 ? 4 : 2 ))
   H2LOAD=${H2LOAD:-h2load}
@@ -361,6 +364,7 @@ cmd_bench() {
       --duration) BENCH_DURATION=$2; shift 2 ;;
       --clients) BENCH_CLIENTS=$2; shift 2 ;;
       --vs-rocket) BENCH_VS_ROCKET=1; shift ;;
+      --realistic) BENCH_REALISTIC=1; shift ;;
       --threads) BENCH_THREADS=$2; shift 2 ;;
       load|micro) kinds+=("$1"); shift ;;
       -*) die "unknown option $1" ;;

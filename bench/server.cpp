@@ -11,7 +11,8 @@
 // Task<T> handlers under /async: they run on the event loop, with no handoff.
 //
 //   CROCKET_PORT (18600), CROCKET_WORKERS and CROCKET_EVENT_LOOPS (0: the defaults), CROCKET_BENCH_LOGGER=1
-//   to attach Logger (lines go to a sink that drops them), CROCKET_BENCH_LOGS=1 to keep warnings and
+//   to attach Logger (lines go to a sink that drops them), CROCKET_BENCH_METRICS=1 to attach
+//   Metrics, CROCKET_BENCH_LOGS=1 to keep warnings and
 //   errors on stderr (adaptive placement's moves, for one) and expose GET /__routes.
 
 #include <crocket/crocket.hpp>
@@ -123,6 +124,7 @@ int main() {
   }
   Crocket app{cfg};
   if (env_uint("CROCKET_BENCH_LOGGER", 0)) app.attach(Logger{});
+  if (env_uint("CROCKET_BENCH_METRICS", 0)) app.attach(Metrics{});
   app.mount("/", reflect_routes<^^bench>());
   app.mount("/async", reflect_routes<^^bench_async>());
   for (int i = 0; i < 40; ++i) app.mount("/api/v" + std::to_string(i), reflect_routes<^^resource>());

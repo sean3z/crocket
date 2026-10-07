@@ -246,22 +246,93 @@ namespace {
 constexpr std::array<double, 12> kBuckets{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10};
 }
 
+namespace {
+
+// Methods get a fixed label each; anything else a client sends is "_OTHER", so
+// made-up methods cannot add series without bound.
+constexpr std::size_t kMethods = 8;
+std::size_t method_index(http::Method m) {
+  return m == http::Method::Unknown ? kMethods - 1 : std::size_t(m);
+}
+std::string_view method_label(std::size_t i) {
+  return i == kMethods - 1 ? std::string_view("_OTHER") : http::method_name(http::Method(i));
+}
+
+std::atomic<std::uint64_t> g_next_store_id{1};
+
+/// A Prometheus label value, escaped.
+std::string label(std::string_view v) {
+  std::string o;
+  for (char c : v) {
+    if (c == '\\' || c == '"') o += '\\';
+    if (c == '\n') { o += "\\n"; continue; }
+    o += c;
+  }
+  return o;
+}
+
+}  // namespace
+
+/// Counters live in one shard per thread: a request touches only its own
+/// thread's, under a mutex no other request takes. render() adds them up.
 struct Metrics::Store {
-  struct Hist {
+  struct Series {  // one (route, method)
     std::array<std::uint64_t, kBuckets.size()> counts{};
     double sum = 0;
     std::uint64_t count = 0;
+    std::vector<std::pair<int, std::uint64_t>> statuses;  // usually one or two
   };
-  mutable std::mutex mu;
-  std::map<std::tuple<std::string, std::string, int>, std::uint64_t> requests;  // method, route, status
-  std::map<std::pair<std::string, std::string>, Hist> durations;               // method, route
-  std::map<std::pair<std::string, std::string>, std::uint64_t> failures;       // route, kind
+  struct Shard {
+    std::mutex mu;  // taken by its thread and by render(), never by other requests
+    std::vector<std::array<std::unique_ptr<Series>, kMethods>> slots;  // [route slot][method]
+    std::map<std::pair<std::size_t, std::string_view>, std::uint64_t> failures;  // slot, kind (static)
+  };
+
+  const std::uint64_t id = g_next_store_id.fetch_add(1);  // never reused, unlike an address
+  mutable std::mutex mu;  // the shard list and extra slots
+  std::vector<std::unique_ptr<Shard>> shards;
+  const RouteDef* routes = nullptr;  // slot i < n_routes is routes[i]
+  std::size_t n_routes = 0;          // slot n_routes is "<unmatched>"
+  std::vector<std::string> extra;    // later slots: templates a fairing set ("/metrics")
   const detail::Stats* stats = nullptr;
+
+  Shard& shard() {
+    // Per thread, the shard of each store this thread has recorded into.
+    thread_local std::vector<std::pair<std::uint64_t, Shard*>> mine;
+    for (auto& [store, sh] : mine)
+      if (store == id) return *sh;
+    std::lock_guard lk(mu);
+    shards.push_back(std::make_unique<Shard>());
+    if (mine.size() >= 16) mine.clear();  // entries of stores that are gone
+    mine.emplace_back(id, shards.back().get());
+    return *shards.back();
+  }
+
+  std::size_t slot_of(const Request& rq) {
+    if (rq.route && routes && rq.route >= routes && rq.route < routes + n_routes) return std::size_t(rq.route - routes);
+    if (rq.route_template.empty()) return n_routes;
+    std::lock_guard lk(mu);  // a template a fairing set: rare (a metrics scrape, say)
+    for (std::size_t i = 0; i < extra.size(); ++i)
+      if (extra[i] == rq.route_template) return n_routes + 1 + i;
+    extra.emplace_back(rq.route_template);
+    return n_routes + extra.size();
+  }
+
+  std::string slot_label(std::size_t slot) const {
+    if (slot < n_routes) return routes[slot].path;
+    if (slot == n_routes) return "<unmatched>";
+    return extra[slot - n_routes - 1];
+  }
 };
 
 Metrics::Metrics(std::string path) : path_(std::move(path)), store_(std::make_shared<Store>()) {}
 
-void Metrics::on_ignite(Ignite& ig) { store_->stats = &ig.stats(); }
+void Metrics::on_ignite(Ignite& ig) {
+  std::lock_guard lk(store_->mu);
+  store_->stats = &ig.stats();
+  store_->routes = ig.routes().data();
+  store_->n_routes = ig.routes().size();
+}
 
 std::optional<Response> Metrics::on_request(Request& rq) {
   if (rq.method != http::Method::Get || rq.path != path_) return std::nullopt;
@@ -273,40 +344,59 @@ std::optional<Response> Metrics::on_request(Request& rq) {
 }
 
 void Metrics::on_response(const Request& rq, Response& rs) {
-  std::string route = rq.route_template.empty() ? "<unmatched>" : std::string(rq.route_template);
   double secs = std::chrono::duration<double>(Clock::now() - rq.received).count();
-  std::lock_guard lk(store_->mu);
-  ++store_->requests[{rq.method_text, route, rs.status}];
-  auto& h = store_->durations[{rq.method_text, route}];
+  std::size_t slot = store_->slot_of(rq);
+  auto& sh = store_->shard();
+  std::lock_guard lk(sh.mu);
+  if (sh.slots.size() <= slot) sh.slots.resize(slot + 1);
+  auto& series = sh.slots[slot][method_index(rq.method)];
+  if (!series) series = std::make_unique<Store::Series>();
   for (std::size_t i = 0; i < kBuckets.size(); ++i)
-    if (secs <= kBuckets[i]) ++h.counts[i];
-  h.sum += secs;
-  ++h.count;
-  if (!rs.failure_kind.empty()) ++store_->failures[{route, std::string(rs.failure_kind)}];
+    if (secs <= kBuckets[i]) ++series->counts[i];
+  series->sum += secs;
+  ++series->count;
+  auto st = std::ranges::find(series->statuses, rs.status, &std::pair<int, std::uint64_t>::first);
+  if (st != series->statuses.end()) ++st->second;
+  else series->statuses.emplace_back(rs.status, 1);
+  if (!rs.failure_kind.empty()) ++sh.failures[{slot, rs.failure_kind}];
 }
-
-namespace {
-std::string label(std::string_view v) {
-  std::string o;
-  for (char c : v) {
-    if (c == '\\' || c == '"') o += '\\';
-    if (c == '\n') { o += "\\n"; continue; }
-    o += c;
-  }
-  return o;
-}
-}  // namespace
 
 std::string Metrics::render() const {
-  std::lock_guard lk(store_->mu);
+  // Add up every thread's shard, in the order the output has always had.
+  struct Hist {
+    std::array<std::uint64_t, kBuckets.size()> counts{};
+    double sum = 0;
+    std::uint64_t count = 0;
+  };
+  std::map<std::tuple<std::string, std::string, int>, std::uint64_t> requests;  // method, route, status
+  std::map<std::pair<std::string, std::string>, Hist> durations;               // method, route
+  std::map<std::pair<std::string, std::string>, std::uint64_t> failures;       // route, kind
+  {
+    std::lock_guard lk(store_->mu);
+    for (auto& shp : store_->shards) {
+      std::lock_guard slk(shp->mu);
+      for (std::size_t slot = 0; slot < shp->slots.size(); ++slot)
+        for (std::size_t m = 0; m < kMethods; ++m) {
+          auto& series = shp->slots[slot][m];
+          if (!series) continue;
+          std::string method(method_label(m)), route = store_->slot_label(slot);
+          for (auto& [status, n] : series->statuses) requests[{method, route, status}] += n;
+          auto& h = durations[{method, route}];
+          for (std::size_t i = 0; i < kBuckets.size(); ++i) h.counts[i] += series->counts[i];
+          h.sum += series->sum;
+          h.count += series->count;
+        }
+      for (auto& [k, n] : shp->failures) failures[{store_->slot_label(k.first), std::string(k.second)}] += n;
+    }
+  }
   std::string o;
   o += "# HELP crocket_http_requests_total Completed HTTP requests.\n# TYPE crocket_http_requests_total counter\n";
-  for (auto& [k, n] : store_->requests)
+  for (auto& [k, n] : requests)
     o += "crocket_http_requests_total{method=\"" + label(std::get<0>(k)) + "\",route=\"" + label(std::get<1>(k)) +
          "\",status=\"" + std::to_string(std::get<2>(k)) + "\"} " + std::to_string(n) + "\n";
   o += "# HELP crocket_http_request_duration_seconds Request duration.\n"
        "# TYPE crocket_http_request_duration_seconds histogram\n";
-  for (auto& [k, h] : store_->durations) {
+  for (auto& [k, h] : durations) {
     auto labels = "method=\"" + label(k.first) + "\",route=\"" + label(k.second) + "\"";
     for (std::size_t i = 0; i < kBuckets.size(); ++i) {
       char le[32];
@@ -328,7 +418,7 @@ std::string Metrics::render() const {
   o += "crocket_log_lines_dropped_total " + std::to_string(store_->stats ? store_->stats->log_dropped.load() : 0) + "\n";
   o += "# HELP crocket_extractor_failures_total Extractor failures by kind.\n"
        "# TYPE crocket_extractor_failures_total counter\n";
-  for (auto& [k, n] : store_->failures)
+  for (auto& [k, n] : failures)
     o += "crocket_extractor_failures_total{route=\"" + label(k.first) + "\",kind=\"" + label(k.second) + "\"} " +
          std::to_string(n) + "\n";
   return o;

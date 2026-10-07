@@ -972,6 +972,28 @@ int main() {
     app2.flush_logs();
     CHECK(contains(alog.last(), R"("msg":"background job reindex finished")"));
     CHECK(!contains(alog.last(), "request_id"));
+    // Many threads: every line arrives, in the order the lines were logged.
+    {
+      std::mutex turn;
+      int next = 0;
+      std::vector<std::thread> loggers;
+      for (int t = 0; t < 8; ++t)
+        loggers.emplace_back([&] {
+          for (int i = 0; i < 500; ++i) {
+            std::lock_guard lk(turn);
+            log::info("ordered {n}", next++);
+          }
+        });
+      for (auto& t : loggers) t.join();
+      app2.flush_logs();
+      int seen = 0;
+      bool in_order = true;
+      constexpr std::string_view needle = R"("msg":"ordered )";
+      for (auto& l : alog.all())
+        if (auto at = l.find(needle); at != l.npos) in_order &= std::stoi(l.substr(at + needle.size())) == seen++;
+      CHECK_EQ(seen, 4000);
+      CHECK(in_order);
+    }
   }
 
   section("logging: level, sampling and a full buffer");

@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -27,11 +28,25 @@ void field(std::string& o, std::string_view k, std::string_view v) {
   json::write_string(o, v);
 }
 std::string line_start(std::string_view level, std::string_view msg) {
-  std::string o = R"({"ts":)";
-  json::write_string(o, detail::iso8601_now());
+  std::string o = R"({"ts":")";
+  detail::append_iso8601_now(o);
+  o += '"';
   field(o, "level", level);
   field(o, "msg", msg);
   return o;
+}
+
+// The request line is built once per request: constant keys go in as they are
+// (no escaping to do), values through the JSON escaper, numbers via to_chars.
+void key(std::string& o, std::string_view k) {  // `k` is ,"name":
+  o += k;
+}
+void value(std::string& o, std::string_view v) { json::write_string(o, v); }
+template <class N>
+void number(std::string& o, N n) {
+  char buf[32];
+  auto r = std::to_chars(buf, buf + sizeof buf, n);
+  o.append(buf, r.ptr);
 }
 }  // namespace
 
@@ -64,28 +79,35 @@ void Logger::on_response(const Request& rq, Response& rs) {
     hub_->write(std::move(o));
     return;
   }
-  constexpr std::string_view names[] = {"debug", "info", "warn", "error"};
-  auto o = line_start(names[int(level)], "request");
-  field(o, "request_id", rq.request_id);
-  if (!rq.trace_id.empty()) field(o, "trace_id", rq.trace_id);
-  field(o, "method", rq.method_text);
-  field(o, "route", rq.route_template.empty() ? std::string_view("<unmatched>") : rq.route_template);
-  if (!rq.handler.empty()) field(o, "handler", rq.handler);
-  o += R"(,"status":)" + std::to_string(rs.status);
-  field(o, "code", rs.error_code);
+  constexpr std::string_view names[] = {R"(,"level":"debug")", R"(,"level":"info")", R"(,"level":"warn")",
+                                       R"(,"level":"error")"};
+  thread_local std::string o;  // reused: the hub copies the line, so nothing is allocated per request
+  o.clear();
+  o += R"({"ts":")";
+  detail::append_iso8601_now(o);
+  o += '"';
+  o += names[int(level)];
+  o += R"(,"msg":"request","request_id":)";
+  value(o, rq.request_id);
+  if (!rq.trace_id.empty()) key(o, R"(,"trace_id":)"), value(o, rq.trace_id);
+  key(o, R"(,"method":)"), value(o, rq.method_text);
+  key(o, R"(,"route":)"), value(o, rq.route_template.empty() ? std::string_view("<unmatched>") : rq.route_template);
+  if (!rq.handler.empty()) key(o, R"(,"handler":)"), value(o, rq.handler);
+  key(o, R"(,"status":)"), number(o, rs.status);
+  key(o, R"(,"code":)"), value(o, rs.error_code);
+  key(o, R"(,"duration_ms":)");
   char buf[32];
-  std::snprintf(buf, sizeof buf, "%.3f", dur);
-  o += R"(,"duration_ms":)";
-  o += buf;
-  o += R"(,"bytes_in":)" + std::to_string(rq.body.size());
-  o += R"(,"bytes_out":)" + std::to_string(rs.body.size());
-  field(o, "proto", rq.protocol);
-  if (!rq.remote_addr.empty()) field(o, "client", rq.remote_addr);
-  if (auto ua = rq.header("user-agent")) field(o, "user_agent", ua->substr(0, 256));
-  if (!rq.subject.empty()) field(o, "subject", rq.subject);
-  if (!rs.error_detail.empty()) field(o, "detail", rs.error_detail);
+  auto r = std::to_chars(buf, buf + sizeof buf, dur, std::chars_format::fixed, 3);
+  o.append(buf, r.ptr);
+  key(o, R"(,"bytes_in":)"), number(o, rq.body.size());
+  key(o, R"(,"bytes_out":)"), number(o, rs.body.size());
+  key(o, R"(,"proto":)"), value(o, rq.protocol);
+  if (!rq.remote_addr.empty()) key(o, R"(,"client":)"), value(o, rq.remote_addr);
+  if (auto ua = rq.header("user-agent")) key(o, R"(,"user_agent":)"), value(o, ua->substr(0, 256));
+  if (!rq.subject.empty()) key(o, R"(,"subject":)"), value(o, rq.subject);
+  if (!rs.error_detail.empty()) key(o, R"(,"detail":)"), value(o, rs.error_detail);
   o += '}';
-  hub_->write(std::move(o));
+  hub_->write(o);
 }
 
 void Logger::on_shutdown() {

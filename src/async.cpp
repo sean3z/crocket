@@ -62,8 +62,8 @@ class Timers {
 };
 
 Timers& timers() {
-  static Timers t;
-  return t;
+  static auto* t = new Timers;  // never destroyed: see fallback_pool() in app.cpp
+  return *t;
 }
 
 }  // namespace

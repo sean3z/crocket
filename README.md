@@ -728,8 +728,10 @@ auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>
   std::thread([ctx] { log::Scope scope{ctx}; log::info("indexing {count} rows", n); }).detach();
   ```
 - **Lines are written by a background thread**, so a slow terminal or log shipper never
-  holds up a request. `LocalClient` waits for a request's lines before `dispatch()`
-  returns, and `app.flush_logs()` waits for everything so far.
+  holds up a request. Under load it collects lines in batches, about a millisecond
+  apart, and writes them in the order they were logged across all threads.
+  `LocalClient` waits for a request's lines before `dispatch()` returns, and
+  `app.flush_logs()` waits for everything so far.
 
 `Config::log` controls everything:
 

@@ -4,8 +4,10 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <format>
@@ -68,8 +70,10 @@ json::Value redact_value(const Hub& hub, const json::Value& v) {
 
 // ---- Hub -------------------------------------------------------------------------
 
+std::atomic<std::uint64_t> g_next_hub_id{1};
+
 Hub::Hub(Options opts, bool text, std::atomic<std::uint64_t>* dropped)
-    : opts_(std::move(opts)), text_(text), dropped_(dropped) {
+    : opts_(std::move(opts)), text_(text), dropped_(dropped), id_(g_next_hub_id.fetch_add(1)) {
   for (auto& r : opts_.redact) redact_.push_back(lower(r));
   if (opts_.buffer == 0) opts_.buffer = 1;
   if (text_ && !opts_.sink) {
@@ -112,65 +116,143 @@ std::string Hub::redact(std::string json) const {
   return out;
 }
 
-void Hub::write(std::string line) {
-  std::unique_lock lk(mu_);
-  if (queue_.size() >= opts_.buffer) {
+Hub::Shard& Hub::shard() {
+  thread_local std::vector<std::pair<std::uint64_t, Shard*>> mine;  // hub id -> this thread's shard
+  for (auto& [hub, sh] : mine)
+    if (hub == id_) return *sh;
+  std::lock_guard lk(mu_);
+  shards_.push_back(std::make_unique<Shard>());
+  if (mine.size() >= 16) mine.clear();  // entries of hubs that are gone
+  mine.emplace_back(id_, shards_.back().get());
+  return *shards_.back();
+}
+
+void Hub::start_writer() {
+  std::lock_guard lk(mu_);
+  if (started_.load()) return;
+  writer_ = std::thread([this] { run(); });
+  started_.store(true);
+}
+
+void Hub::write(std::string_view line) {
+  if (pending() >= opts_.buffer) {
     if (opts_.when_full == WhenFull::drop) {
-      ++unreported_drops_;
+      unreported_drops_.fetch_add(1);
       if (dropped_) dropped_->fetch_add(1, std::memory_order_relaxed);
       return;
     }
-    room_.wait(lk, [&] { return queue_.size() < opts_.buffer || stop_; });
+    std::unique_lock lk(mu_);
+    room_.wait(lk, [&] { return pending() < opts_.buffer || stop_; });
   }
-  queue_.push_back(std::move(line));
-  ++queued_;
-  if (!writer_.joinable()) writer_ = std::thread([this] { run(); });
-  lk.unlock();
-  work_.notify_one();
+  {
+    auto& sh = shard();
+    std::lock_guard lk(sh.mu);
+    // Numbered while holding the shard, so a writer that sees the count go up
+    // finds the line once it takes the shard; raised before the sleeping_ check.
+    Record r{queued_.fetch_add(1), line.size()};
+    sh.buf.append(reinterpret_cast<const char*>(&r), sizeof r);
+    sh.buf.append(line);
+  }
+  if (!started_.load()) start_writer();
+  // Waking the writer is a system call: only when it sleeps, which it does
+  // between bursts, not per line. (It sets sleeping_ before it last looks at
+  // queued_, and this looks at sleeping_ after raising queued_, so one of the
+  // two always sees the other.)
+  if (sleeping_.load()) {
+    std::lock_guard lk(mu_);
+    work_.notify_one();
+  }
 }
 
 void Hub::flush() {
+  auto target = queued_.load();
   std::unique_lock lk(mu_);
-  auto target = queued_;
-  done_.wait(lk, [&] { return written_ >= target || !writer_.joinable(); });
+  flush_requested_ = true;
+  work_.notify_one();
+  done_.wait(lk, [&] { return written_.load() >= target || !started_.load(); });
 }
 
 void Hub::run() {
-  std::deque<std::string> batch;
-  std::unique_lock lk(mu_);
+  std::vector<std::string> batch;  // one buffer per shard that had lines
+  std::string spare;               // swapped into a shard, keeping its capacity
+  std::vector<std::pair<std::uint64_t, std::string_view>> order;  // (sequence, line) of one sweep
+  std::uint64_t collected = 0;
   while (true) {
-    work_.wait(lk, [&] { return !queue_.empty() || stop_; });
-    if (queue_.empty() && stop_) break;
-    batch.swap(queue_);
-    auto drops = std::exchange(unreported_drops_, 0);
-    lk.unlock();
-    room_.notify_all();
-    if (drops) {
-      std::string o = R"({"ts":)";
-      json::write_string(o, crocket::detail::iso8601_now());
-      o += R"(,"level":"warn","msg":"log lines dropped: the writer fell behind","count":)" + std::to_string(drops) + "}";
-      if (text_) o = local_clock() + " WARN  " + std::to_string(drops) + " log lines dropped: the writer fell behind";
-      batch.push_front(std::move(o));
-    }
-    for (auto& line : batch) {
-      if (opts_.sink) {
-        try {
-          opts_.sink(line);
-        } catch (...) {  // a throwing sink loses its line, not the writer
-        }
-      } else {
-        std::fwrite(line.data(), 1, line.size(), stderr);
-        std::fputc('\n', stderr);
+    {
+      std::unique_lock lk(mu_);
+      auto ready = [&] { return queued_.load() > collected || stop_; };
+      // After a sweep that found lines, let more gather for a moment: sweeping
+      // constantly takes every thread's shard lock constantly, and moves it
+      // between cores. A line waits at most about a millisecond for this;
+      // flush() and shutdown wake the writer at once.
+      if (pace_) work_.wait_for(lk, std::chrono::milliseconds(1), [&] { return stop_ || flush_requested_; });
+      flush_requested_ = false;
+      if (!ready()) {
+        sleeping_.store(true);  // before wait() looks at queued_ again: see write()
+        work_.wait(lk, ready);
+        sleeping_.store(false);
+      }
+      if (stop_ && queued_.load() == collected) break;
+      // Every thread's lines, in one pass.
+      for (auto& sh : shards_) {
+        std::lock_guard slk(sh->mu);
+        if (sh->buf.empty()) continue;
+        spare.clear();
+        spare.swap(sh->buf);  // the shard gets an empty buffer with the spare's capacity
+        batch.push_back(std::move(spare));
+        spare = {};
       }
     }
+    std::size_t lines = 0;
+    auto drops = unreported_drops_.exchange(0);
+    if (drops) {
+      std::string o = R"({"ts":")";
+      crocket::detail::append_iso8601_now(o);
+      o += R"(","level":"warn","msg":"log lines dropped: the writer fell behind","count":)" + std::to_string(drops) + "}";
+      if (text_) o = local_clock() + " WARN  " + std::to_string(drops) + " log lines dropped: the writer fell behind";
+      write_line(o);
+    }
+    // Back in the order the lines were logged, across threads.
+    order.clear();
+    for (auto& buf : batch) {
+      for (std::size_t at = 0; at + sizeof(Record) <= buf.size();) {
+        Record r;
+        std::memcpy(&r, buf.data() + at, sizeof r);
+        order.emplace_back(r.seq, std::string_view(buf).substr(at + sizeof r, r.size));
+        at += sizeof r + r.size;
+      }
+    }
+    if (batch.size() > 1) std::ranges::sort(order, {}, &std::pair<std::uint64_t, std::string_view>::first);
+    for (auto& [seq, line] : order) write_line(line);
+    lines = order.size();
     if (!opts_.sink) std::fflush(stderr);
-    std::size_t n = batch.size() - (drops ? 1 : 0);
+    collected += lines;
+    written_.fetch_add(lines);
+    pace_ = lines > 0;
+    // Keep one buffer's capacity for the next swap; the rest go.
+    if (!batch.empty()) {
+      spare = std::move(batch.back());
+      spare.clear();
+    }
     batch.clear();
-    lk.lock();
-    written_ += n;
+    std::lock_guard lk(mu_);
+    room_.notify_all();
     done_.notify_all();
   }
+  std::lock_guard lk(mu_);
   done_.notify_all();
+}
+
+void Hub::write_line(std::string_view line) {
+  if (opts_.sink) {
+    try {
+      opts_.sink(line);
+    } catch (...) {  // a throwing sink loses its line, not the writer
+    }
+  } else {
+    std::fwrite(line.data(), 1, line.size(), stderr);
+    std::fputc('\n', stderr);
+  }
 }
 
 // ---- context ---------------------------------------------------------------------
@@ -252,8 +334,9 @@ void emit(Hub* hub, Level level, std::string_view text, std::span<Field> fields)
                       : std::format("{} {} {}", local_clock(), upper[int(level)], msg);
     if (!request_id.empty()) o += hub->colour() ? std::format(" \x1b[2m[{}]\x1b[0m", request_id) : std::format(" [{}]", request_id);
   } else {
-    o = R"({"ts":)";
-    json::write_string(o, crocket::detail::iso8601_now());
+    o = R"({"ts":")";
+    crocket::detail::append_iso8601_now(o);
+    o += '"';
     field(o, "level", level_name(level));
     field(o, "msg", msg);
     if (!request_id.empty()) field(o, "request_id", request_id);

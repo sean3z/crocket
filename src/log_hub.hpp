@@ -31,13 +31,14 @@ class Hub {
   /// `json` with the values of redacted members (at any depth) replaced.
   [[nodiscard]] std::string redact(std::string json) const;
 
-  /// Queues a finished line for the writer thread.
-  void write(std::string line);
+  /// Copies a finished line into this thread's shard for the writer thread.
+  void write(std::string_view line);
   /// Returns once every line queued so far has reached the sink.
   void flush();
 
  private:
   void run();
+  void write_line(std::string_view line);
 
   Options opts_;
   bool text_;
@@ -45,11 +46,30 @@ class Hub {
   std::atomic<std::uint64_t>* dropped_;
   std::vector<std::string> redact_;  // lower case
 
-  std::mutex mu_;
+  /// Lines a thread has logged and the writer has not collected yet. Only that
+  /// thread and the writer take its mutex, so threads never wait on each other.
+  struct Shard {
+    std::mutex mu;
+    std::string buf;  // lines, each a Record then its bytes: no allocation per line
+  };
+  struct Record {
+    std::uint64_t seq;  // the order lines were logged in, across threads
+    std::uint64_t size;
+  };
+  Shard& shard();  // this thread's
+  void start_writer();
+  [[nodiscard]] std::uint64_t pending() const { return queued_.load() - written_.load(); }
+
+  const std::uint64_t id_;  // never reused, unlike an address (per-thread shard caches)
+  std::mutex mu_;           // the shard list, the writer's sleep, and the waits below
   std::condition_variable work_, room_, done_;
-  std::deque<std::string> queue_;
-  std::uint64_t queued_ = 0, written_ = 0, unreported_drops_ = 0;
+  std::vector<std::unique_ptr<Shard>> shards_;
+  std::atomic<std::uint64_t> queued_{0}, written_{0}, unreported_drops_{0};
+  std::atomic<bool> sleeping_{false};  // the writer waits on work_
+  std::atomic<bool> started_{false};
   bool stop_ = false;
+  bool flush_requested_ = false;  // guarded by mu_: skip the writer's pause
+  bool pace_ = false;             // writer thread only: its last sweep found lines
   std::thread writer_;  // started by the first line
 };
 

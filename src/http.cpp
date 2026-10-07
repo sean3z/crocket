@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <random>
 
@@ -145,18 +146,35 @@ std::string_view reason_phrase(int status) {
   }
 }
 
-std::string iso8601_now() {
+void append_iso8601_now(std::string& out) {
   using namespace std::chrono;
   auto now = system_clock::now();
   auto secs = time_point_cast<seconds>(now);
   auto ms = duration_cast<milliseconds>(now - secs).count();
-  std::time_t t = system_clock::to_time_t(secs);
-  std::tm tm{};
-  gmtime_r(&t, &tm);
-  char buf[64];  // room for any int the compiler assumes tm fields may hold
-  std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900, tm.tm_mon + 1,
-                tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, int(ms));
-  return buf;
+  // The date and time change once a second: format them then, per thread.
+  thread_local std::int64_t cached_secs = -1;
+  thread_local char cached[24];  // "2026-10-07T16:53:20."
+  if (secs.time_since_epoch().count() != cached_secs) {
+    std::time_t t = system_clock::to_time_t(secs);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[64];  // room for any int the compiler assumes tm fields may hold
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec);
+    std::memcpy(cached, buf, 20);
+    cached_secs = secs.time_since_epoch().count();
+  }
+  out.append(cached, 20);
+  out += char('0' + ms / 100);
+  out += char('0' + ms / 10 % 10);
+  out += char('0' + ms % 10);
+  out += 'Z';
+}
+
+std::string iso8601_now() {
+  std::string s;
+  append_iso8601_now(s);
+  return s;
 }
 
 }  // namespace detail

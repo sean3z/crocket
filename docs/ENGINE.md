@@ -84,9 +84,11 @@ only it takes. Shutdown is in three phases:
 
 A request whose every candidate route runs on the loop (`Crocket::loop_route`) is handled
 on its loop. That is an async handler (`RouteDef::async`), or a plain function that
-adaptive placement has promoted. `run_routes` times each plain function: on a worker it
-counts consecutive runs under 100 µs and promotes the route after 1,000, and on a loop
-one run over 1 ms demotes it, with a growing back-off (`detail::Placement`, one per route,
+adaptive placement has promoted. A request no route matches is handled there too: its
+404 or 405 is crocket's own, with nothing that could block. `run_routes` times each plain function: on a worker it
+counts consecutive runs under 100 µs and promotes the route after 1,000. On a loop, one
+run over 50 ms demotes it, and so do 8 runs over 1 ms within a second. A single slow run
+may only mean the thread was descheduled. The back-off grows with each demotion (`detail::Placement`, one per route,
 built at ignite). Routes that take an extractor with `may_block` (a `Pool`) are never
 promoted. Such a request runs on its loop: fairings, routing, extractors and the handler, with no handoff. The loop is the
 exchange's executor, so the task resumes there, through a second `h2o_multithread`

@@ -803,21 +803,24 @@ waits for an async handler like any other.
 
 A plain function that turns out to be fast doesn't need a worker. Crocket times every
 run, and moves a route to the event loops once 1,000 runs in a row have each taken under
-100 µs. There it skips the handoff to a worker and back, as a `Task` does. The first time
-it then takes more than 1 ms on a loop, it moves back to workers. It can try the loops
-again after 10 s, then 20 s, and so on, so a route that is only sometimes slow settles on
-workers. Both moves are logged:
+100 µs. There it skips the handoff to a worker and back, as a `Task` does. When it turns
+out to block there, it moves back to workers: one run over 50 ms does it, and so do 8 runs
+over 1 ms within a second. A single run over 1 ms is not enough, because a run's time also
+counts moments when the operating system gave the thread's core to something else. It can
+try the loops again after 10 s, then 20 s, and so on, so a route that is only sometimes
+slow settles on workers. Both moves are logged:
 
 ```
 INFO  api::get_user runs on the event loops from now on: 1000 runs in a row each took under 100 us
-WARN  api::get_user took 48 ms on an event loop, stalling the other connections on it, so it runs on workers again; it may move back after 10 s of fast runs
+WARN  api::get_user blocked its event loop (48 ms, after 8 slow runs within 1 s), stalling the other connections on it, so it runs on workers again; it may move back after 10 s of fast runs
 ```
 
 - **Routes that may wait never move.** A route taking a `State<Pool<T>>` stays on workers
   however fast it is, because a checkout is quick until the pool runs dry. A managed type
   of your own can say the same with `static constexpr bool crocket_may_block = true;`.
-- **The one stall it allows** is the run that gets a route moved back: a route that has
-  been fast 1,000 times and then blocks holds its loop once.
+- **The stalls it allows** are the runs that get a route moved back: a route that has
+  been fast 1,000 times and then blocks holds its loop once for a long call, or up to
+  8 times for short ones.
 - **`GET /__routes`** shows where each route runs now (`"runs_on"`).
 - **`Config::adaptive_placement = false`** keeps every plain function on workers.
 

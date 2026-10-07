@@ -54,8 +54,9 @@ struct Config {
   std::vector<std::string> allowed_hosts = {};
   json::ReadOptions json = {};                        // limits for Json<T> bodies
   /// Run a plain-function route on the event loops once it has proved fast
-  /// (1,000 runs in a row under 100 us), and back on workers the first time it
-  /// takes over 1 ms there. Off: plain functions always run on workers.
+  /// (1,000 runs in a row under 100 us), and back on workers when it turns out
+  /// to block there (one run over 50 ms, or 8 over 1 ms within a second). Off:
+  /// plain functions always run on workers.
   bool adaptive_placement = true;
   log::Options log = {};                              // level, sampling, redaction, sink
 
@@ -222,9 +223,16 @@ Executor& fallback_executor();
 struct Placement {
   static constexpr std::uint32_t kPromoteAfter = 1000;               // fast runs in a row on workers
   static constexpr std::chrono::microseconds kFast{100};              // ... each under this
-  static constexpr std::chrono::milliseconds kDemoteAfter{1};        // one run on a loop over this
-  static constexpr std::chrono::seconds kRetryAfter{10};             // doubled per demotion
+  // On a loop, a run's wall time also counts time the thread was not on a CPU
+  // (the OS ran something else), so one slow run is not proof of blocking:
+  static constexpr std::chrono::milliseconds kStall{50};      // one run over this: demoted at once
+  static constexpr std::chrono::milliseconds kSlow{1};        // kStrikes runs over this ...
+  static constexpr std::uint32_t kStrikes = 8;
+  static constexpr std::chrono::seconds kStrikeWindow{1};     // ... within this: demoted
+  static constexpr std::chrono::seconds kRetryAfter{10};      // doubled per demotion
   std::atomic<bool> on_loop{false};
+  std::atomic<std::uint32_t> strikes{0};
+  std::atomic<std::int64_t> strikes_since{0};  // steady_clock ticks: start of the strike window
   std::atomic<std::uint32_t> fast_runs{0};
   std::atomic<std::uint32_t> demotions{0};
   std::atomic<std::int64_t> retry_at{0};  // steady_clock ticks; no promotion before
@@ -354,7 +362,7 @@ class Crocket {
   void handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop = nullptr);
   /// Whether every route that can answer method+path runs on the event loop
   /// (an async handler, or a plain function adaptive placement has promoted),
-  /// so the loop can run the request itself.
+  /// or none does (crocket answers 404 or 405), so the loop can run the request itself.
   [[nodiscard]] bool loop_route(http::Method method, std::string_view path) const;
   /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);

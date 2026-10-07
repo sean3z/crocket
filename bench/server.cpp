@@ -11,7 +11,8 @@
 // Task<T> handlers under /async: they run on the event loop, with no handoff.
 //
 //   CROCKET_PORT (18600), CROCKET_WORKERS and CROCKET_EVENT_LOOPS (0: the defaults), CROCKET_BENCH_LOGGER=1
-//   to attach Logger (lines go to a sink that drops them).
+//   to attach Logger (lines go to a sink that drops them), CROCKET_BENCH_LOGS=1 to keep warnings and
+//   errors on stderr (adaptive placement's moves, for one) and expose GET /__routes.
 
 #include <crocket/crocket.hpp>
 
@@ -114,7 +115,12 @@ static unsigned env_uint(const char* name, unsigned fallback) {
 int main() {
   Config cfg;
   cfg.max_in_flight = 1'000'000;  // measure the server, not the admission limit
-  cfg.log.sink = [](std::string_view) {};
+  if (env_uint("CROCKET_BENCH_LOGS", 0)) {
+    cfg.log.level = log::Level::warn;
+    cfg.debug_routes = true;
+  } else {
+    cfg.log.sink = [](std::string_view) {};
+  }
   Crocket app{cfg};
   if (env_uint("CROCKET_BENCH_LOGGER", 0)) app.attach(Logger{});
   app.mount("/", reflect_routes<^^bench>());

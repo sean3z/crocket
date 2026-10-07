@@ -159,12 +159,15 @@ class Headers {
   using value_type = std::pair<std::string, std::string>;
 
   void add(std::string_view name, std::string_view value) {
+    reserve();
     items_.emplace_back(lower(name), std::string(value));
   }
+  /// Replaces every field named `name` with one, or adds it.
   void set(std::string_view name, std::string_view value) {
-    auto n = lower(name);
-    std::erase_if(items_, [&](auto& kv) { return kv.first == n; });
-    items_.emplace_back(std::move(n), std::string(value));
+    auto it = std::ranges::find_if(items_, [&](auto& kv) { return iequals(kv.first, name); });
+    if (it == items_.end()) return add(name, value);
+    it->second.assign(value);
+    items_.erase(std::remove_if(it + 1, items_.end(), [&](auto& kv) { return iequals(kv.first, name); }), items_.end());
   }
   void remove(std::string_view name) {
     auto n = lower(name);
@@ -187,6 +190,10 @@ class Headers {
 
  private:
   static constexpr char ascii_lower(char c) { return (c >= 'A' && c <= 'Z') ? char(c + 32) : c; }
+  // Most messages carry a handful of fields: no regrowth for the first 8.
+  void reserve() {
+    if (items_.capacity() == 0) items_.reserve(8);
+  }
   static std::string lower(std::string_view s) {
     std::string r(s);
     for (auto& c : r) c = ascii_lower(c);

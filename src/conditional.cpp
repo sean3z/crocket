@@ -138,7 +138,15 @@ std::optional<std::pair<std::size_t, std::size_t>> parse_range(std::string_view 
 
 void conditional(const Request& rq, Response& rs) {
   if (rs.status != 200 || (rq.method != http::Method::Get && rq.method != http::Method::Head)) return;
-  if (!rs.headers.contains("etag")) rs.headers.set("etag", std::format("\"{:016x}\"", body_hash(rs.body)));
+  if (!rs.headers.contains("etag")) {
+    // "<16 hex digits>", written directly: this runs for every GET.
+    static constexpr char hex[] = "0123456789abcdef";
+    char tag[18] = {'"'};
+    std::uint64_t h = body_hash(rs.body);
+    for (int i = 16; i >= 1; --i, h >>= 4) tag[i] = hex[h & 0xF];
+    tag[17] = '"';
+    rs.headers.add("etag", std::string_view(tag, sizeof tag));
+  }
   std::string etag(*rs.headers.get("etag"));
   auto last_modified = rs.headers.get("last-modified");
 

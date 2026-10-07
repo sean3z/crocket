@@ -358,8 +358,10 @@ class FallbackPool final : public Executor {
 };
 
 Executor& fallback_pool() {
-  static FallbackPool pool;
-  return pool;
+  // Never destroyed: at exit, the sleep_for timer thread may still post to it,
+  // and static destructors run in no order the two could agree on.
+  static auto* pool = new FallbackPool;
+  return *pool;
 }
 
 }  // namespace

@@ -450,6 +450,8 @@ std::vector<std::pair<std::string, std::string>> parse_query(std::string_view q)
 std::string generate_request_id();
 std::string_view reason_phrase(int status);
 std::string iso8601_now();
+/// iso8601_now() appended to `out`, without a temporary (log lines use it).
+void append_iso8601_now(std::string& out);
 }  // namespace detail
 
 }  // namespace crocket

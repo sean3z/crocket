@@ -123,6 +123,26 @@ expect "a deadline wakes a sleeping task: 504" "504" \
   "$(curl -sk -o /dev/null -w '%{http_code}' -H 'grpc-timeout: 200m' "$BASE/api/nap/5000")"
 expect "the server is free again" "napped 1 ms" "$(curl -sk "$BASE/api/nap/1")"
 
+echo "[dead work]"
+# Both workers sleep through a 300 ms deadline; three requests queued behind
+# them time out before a worker is free, and their handler never runs.
+metric() { curl -sk "$BASE/metrics" | grep "^$1 " | cut -d' ' -f2; }
+abandoned=$(metric crocket_requests_abandoned_total)
+stubs=()
+for i in 1 2; do curl -sk -o /dev/null -H 'grpc-timeout: 300m' "$BASE/api/stubborn/1500" & stubs+=($!); done
+sleep 0.2
+queued=()
+for i in 1 2 3; do curl -sk -o /dev/null -w '%{http_code}' -H 'grpc-timeout: 300m' "$BASE/api/stubborn/10" >"$WORK/queued.$i" & queued+=($!); done
+wait "${queued[@]}"
+expect "requests still queued at their deadline: 504" "504504504" "$(cat "$WORK"/queued.* | grep -o '504' | tr -d '\n')"
+expect "workers past their request's deadline: crocket_workers_stuck" "2" "$(metric crocket_workers_stuck)"
+wait "${stubs[@]}"  # answered 504 at the deadline; the handlers sleep on
+sleep 1.5
+expect "  ... then free again" "0" "$(metric crocket_workers_stuck)"
+expect "the queued handlers never ran" "2" "$(grep -c 'stubborn handler started' "$WORK/serve.log")"
+expect "  ... counted in crocket_requests_abandoned_total" "3" "$(( $(metric crocket_requests_abandoned_total) - abandoned ))"
+expect "a handler that outlives its deadline is logged" "2" "$(grep -c "after its request's deadline" "$WORK/serve.log")"
+
 echo "[adaptive placement]"
 runs_on() { curl -sk "$BASE/__routes" | grep -o '"path":"/api/slow/{ms}","handler":"[^"]*","rank":[0-9-]*,"runs_on":"[^"]*"' | sed 's/.*"runs_on":"//; s/"$//'; }
 expect "a plain function starts on workers" "workers" "$(runs_on)"

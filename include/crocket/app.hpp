@@ -254,6 +254,13 @@ struct Stats {
   std::atomic<std::int64_t> in_flight{0};
   std::atomic<bool> draining{false};
   std::atomic<std::uint64_t> log_dropped{0};
+  /// Requests whose handler never ran: the deadline passed, or the client went
+  /// away, while they waited for a worker.
+  std::atomic<std::uint64_t> abandoned{0};
+  /// The engine's workers while launched (0 otherwise), and the deadline of
+  /// each one's current request (steady_clock nanoseconds; 0 when idle).
+  std::atomic<unsigned> workers{0};
+  std::unique_ptr<std::atomic<std::int64_t>[]> worker_deadline;
 };
 
 /// An address range from Config::trusted_proxies (IPv4 as IPv4-mapped IPv6).
@@ -385,6 +392,7 @@ class Crocket {
   friend class detail::Exchange;
   void run(detail::Exchange* ex);       // the pipeline; completes ex unless its handler suspended
   void complete(detail::Exchange* ex);  // finish, deliver and free
+  void warn_if_late(const Request& req) const;  // logs a handler that outlived its deadline
   /// Routes req; true if the handler suspended (it completes the exchange later).
   bool run_routes(Request& req, Response& res);
   [[nodiscard]] bool runs_on_loop(const RouteDef& def) const;
@@ -448,6 +456,9 @@ namespace detail {
 std::string percent_decode(std::string_view s, bool plus_is_space);
 std::vector<std::pair<std::string, std::string>> parse_query(std::string_view q);
 std::string generate_request_id();
+/// On a worker thread: the deadline of the request it now runs (for
+/// crocket_workers_stuck). Elsewhere, nothing.
+void note_worker_deadline(Clock::time_point at);
 std::string_view reason_phrase(int status);
 std::string iso8601_now();
 /// iso8601_now() appended to `out`, without a temporary (log lines use it).

@@ -94,6 +94,8 @@ class Shield {
 ///   crocket_http_request_duration_seconds{method,route} (histogram)
 ///   crocket_http_requests_in_flight
 ///   crocket_extractor_failures_total{route,kind}
+///   crocket_workers, crocket_workers_busy, crocket_workers_stuck (past their request's deadline)
+///   crocket_requests_abandoned_total (the deadline passed, or the client left, before a worker took it)
 /// Served at GET `path` (default /metrics) from on_request.
 class Metrics {
  public:

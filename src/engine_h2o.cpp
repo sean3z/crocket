@@ -45,6 +45,7 @@
 #include <functional>
 #include <latch>
 #include <optional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -173,7 +174,7 @@ class Engine final : public Executor {
 
   // --- worker side ---------------------------------------------------------------
   void start_workers(unsigned n);
-  void worker_loop();
+  void worker_loop(unsigned index);
   bool wait_workers_idle(Clock::time_point until);
   void stop_workers();
   void queue_job(std::move_only_function<void()> job) {
@@ -304,6 +305,8 @@ class Loop final : public Executor {
 
 /// The loop that runs on this thread (h2o calls one handler for every context).
 thread_local Loop* t_loop = nullptr;
+/// This worker's slot in Stats::worker_deadline.
+thread_local std::atomic<std::int64_t>* t_worker_deadline = nullptr;
 
 int Engine::on_req_cb(h2o_handler_t*, h2o_req_t* req) { return t_loop->on_req(req); }
 
@@ -454,6 +457,14 @@ void Loop::dispatch(Session* s) {
     return;
   }
   e_.queue_job([this, txn, rq = std::move(rq)]() mutable {
+    if (rq.deadline.expired()) {
+      // Past its deadline (the loop answers 504, if it has not yet) or nobody
+      // is waiting: whatever the handler did would be thrown away.
+      app_.core().stats.abandoned.fetch_add(1, std::memory_order_relaxed);
+      e_.outstanding_.fetch_sub(1);
+      return;
+    }
+    note_worker_deadline(rq.deadline.at);
     // The response comes back to this loop, from this worker or, when an async
     // handler finishes, from another.
     auto deliver = [this, txn](Response&& res) {
@@ -584,11 +595,17 @@ void Engine::start_workers(unsigned n) {
   sigaddset(&block, SIGINT);
   sigaddset(&block, SIGTERM);
   pthread_sigmask(SIG_BLOCK, &block, &old);
-  for (unsigned i = 0; i < n; ++i) workers_.emplace_back([this] { worker_loop(); });
+  auto& stats = app_.core().stats;
+  stats.workers.store(0);  // nobody reads the old slots while they are replaced
+  stats.worker_deadline = std::make_unique<std::atomic<std::int64_t>[]>(n);
+  stats.workers.store(n);
+  for (unsigned i = 0; i < n; ++i) workers_.emplace_back([this, i] { worker_loop(i); });
   pthread_sigmask(SIG_SETMASK, &old, nullptr);
 }
 
-void Engine::worker_loop() {
+void Engine::worker_loop(unsigned index) {
+  auto& deadline = app_.core().stats.worker_deadline[index];
+  t_worker_deadline = &deadline;
   for (;;) {
     std::move_only_function<void()> job;
     {
@@ -600,7 +617,10 @@ void Engine::worker_loop() {
       q.pop_front();
       ++busy_;
     }
+    // Busy, with no deadline until the job names its request's.
+    deadline.store(std::numeric_limits<std::int64_t>::max(), std::memory_order_relaxed);
     job();
+    deadline.store(0, std::memory_order_relaxed);
     {
       std::lock_guard lk(jobs_m_);
       --busy_;
@@ -630,6 +650,7 @@ void Engine::stop_workers() {
   jobs_cv_.notify_all();
   for (auto& w : workers_) w.join();
   workers_.clear();
+  app_.core().stats.workers.store(0);
 }
 
 // ---- lifecycle -------------------------------------------------------------------------
@@ -872,6 +893,12 @@ int Engine::run() {
 }
 
 }  // namespace
+
+void note_worker_deadline(Clock::time_point at) {
+  if (t_worker_deadline)
+    t_worker_deadline->store(std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count(),
+                             std::memory_order_relaxed);
+}
 
 int run_engine(Crocket& app, const LaunchOptions& opts) {
   Engine engine(app, opts);

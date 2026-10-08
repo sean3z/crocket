@@ -118,6 +118,16 @@ auto slow(std::uint32_t ms, Deadline d) -> Result<std::string, ApiError> {
   return std::format("slept {} ms", ms);
 }
 
+/// What not to do: sleeps through its deadline, holding a worker all the while.
+/// Crocket answers 504 on time, counts the worker in crocket_workers_stuck, and
+/// warns when the handler finally returns.
+[[= http::get("/stubborn/{ms}")]]
+auto stubborn(std::uint32_t ms) -> std::string {
+  log::info("stubborn handler started");
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+  return std::format("slept {} ms", ms);
+}
+
 // The same wait without holding a worker: the task suspends, and the worker
 // serves other requests until the timer (or the deadline) wakes it.
 [[= http::get("/nap/{ms}")]]

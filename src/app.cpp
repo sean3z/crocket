@@ -400,6 +400,7 @@ void Exchange::post(std::coroutine_handle<> h) {
     if (loop) hold.emplace(req.handler);
     ExchangeScope current{this};
     log::detail::RequestScope scope{app_.core_->log, &req};
+    note_worker_deadline(req.deadline.at);
     h.resume();
   });
 }
@@ -537,6 +538,7 @@ void Crocket::run(detail::Exchange* ex) {
     }
   }
   bool suspended = !finished && run_routes(req, res);
+  if (!suspended && !finished) warn_if_late(req);
   if (hold) {  // reported now, while the request is certainly alive
     hold->handler = req.handler;
     hold->report = !ex->loop_hold_reported;
@@ -548,11 +550,30 @@ void Crocket::run(detail::Exchange* ex) {
     (workers ? *workers : detail::fallback_executor()).post([this, ex] {
       detail::ExchangeScope current{ex};
       log::detail::RequestScope scope{core_->log, &ex->req};
-      if (!run_routes(ex->req, ex->res)) ex->handler_done();  // else its async handler finishes it
+      if (ex->req.deadline.expired()) {  // nobody would see what the handler did
+        core_->stats.abandoned.fetch_add(1, std::memory_order_relaxed);
+        write_error({504, "deadline.exceeded", "request deadline exceeded", {}}, ex->req, ex->res);
+        ex->handler_done();
+        return;
+      }
+      detail::note_worker_deadline(ex->req.deadline.at);
+      if (run_routes(ex->req, ex->res)) return;  // its async handler finishes it
+      warn_if_late(ex->req);
+      ex->handler_done();
     });
   }
   if (suspended && ex->suspend()) return;  // the handler completes it
   complete(ex);
+}
+
+void Crocket::warn_if_late(const Request& req) const {
+  auto now = Clock::now();
+  if (now <= req.deadline.at || req.deadline.at == Clock::time_point::max()) return;
+  // The client already has a 504: the handler's thread was busy for nothing.
+  auto late = std::chrono::duration_cast<std::chrono::milliseconds>(now - req.deadline.at).count();
+  log::warn("the handler returned {late_ms} ms after its request's deadline; long work should stop once "
+            "Deadline::expired() (or its stop_token) says so",
+            std::int64_t(late));
 }
 
 void Crocket::complete(detail::Exchange* ex) {

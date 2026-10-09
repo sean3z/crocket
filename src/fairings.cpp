@@ -438,6 +438,25 @@ std::string Metrics::render() const {
   o += "# HELP crocket_log_lines_dropped_total Log lines discarded because the writer fell behind.\n"
        "# TYPE crocket_log_lines_dropped_total counter\n";
   o += "crocket_log_lines_dropped_total " + std::to_string(store_->stats ? store_->stats->log_dropped.load() : 0) + "\n";
+  if (const auto* st = store_->stats) {
+    unsigned n = st->workers.load(), busy = 0, stuck = 0;
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    for (unsigned i = 0; i < n; ++i) {
+      auto deadline = st->worker_deadline[i].load(std::memory_order_relaxed);
+      if (deadline == 0) continue;
+      ++busy;
+      if (now > deadline) ++stuck;
+    }
+    o += "# HELP crocket_workers Handler threads.\n# TYPE crocket_workers gauge\ncrocket_workers " + std::to_string(n) + "\n";
+    o += "# HELP crocket_workers_busy Workers running a handler now.\n# TYPE crocket_workers_busy gauge\n"
+         "crocket_workers_busy " + std::to_string(busy) + "\n";
+    o += "# HELP crocket_workers_stuck Workers still running a handler after its request's deadline: it ignores "
+         "the deadline, and holds the worker.\n# TYPE crocket_workers_stuck gauge\ncrocket_workers_stuck " +
+         std::to_string(stuck) + "\n";
+    o += "# HELP crocket_requests_abandoned_total Requests whose handler never ran: the deadline passed, or the "
+         "client went away, while they waited for a worker.\n# TYPE crocket_requests_abandoned_total counter\n"
+         "crocket_requests_abandoned_total " + std::to_string(st->abandoned.load()) + "\n";
+  }
   o += "# HELP crocket_extractor_failures_total Extractor failures by kind.\n"
        "# TYPE crocket_extractor_failures_total counter\n";
   for (auto& [k, n] : failures)

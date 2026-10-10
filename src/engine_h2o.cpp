@@ -30,28 +30,30 @@
 #include <netdb.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
-#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <latch>
-#include <optional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace crocket::detail {
@@ -65,9 +67,12 @@ using namespace std::chrono_literals;
 constexpr std::size_t kMaxDiscard = 8 << 20;
 
 std::atomic<bool> g_stop{false};
+std::atomic<bool> g_reload{false};  // SIGHUP: load the TLS certificate and key again
 constexpr std::size_t kMaxLoops = 256;
 std::array<std::atomic<int>, kMaxLoops> g_wake_fds{};  // each loop's eventfd, -1 when unused
 std::atomic<std::size_t> g_wake_count{0};
+
+extern "C" void on_hangup(int) { g_reload.store(true); }
 
 extern "C" void on_signal(int) {
   g_stop.store(true);
@@ -168,6 +173,20 @@ class Engine final : public Executor {
   friend class Loop;
 
   bool setup_tls();
+  /// A TLS context from the certificate and key files, or nullptr.
+  SSL_CTX* load_tls() const;
+  /// Loads the certificate again and hands it to every loop for new connections;
+  /// on failure, keeps the current one and logs why.
+  void reload_tls(const char* why);
+  /// What the certificate and key files are now (inode, mtime, size), to notice a change.
+  struct TlsFiles {
+    std::uint64_t cert_ino;
+    std::int64_t cert_mtime, cert_size;
+    std::uint64_t key_ino;
+    std::int64_t key_mtime, key_size;
+    bool operator==(const TlsFiles&) const = default;
+  };
+  TlsFiles tls_files() const;
   /// A bound socket on the port: listening, or with `probe` only bound (to
   /// check that nobody else holds the port).
   int open_listener(std::uint16_t port, bool reuse_port, bool probe = false);
@@ -190,7 +209,9 @@ class Engine final : public Executor {
   const Config& cfg_;
 
   h2o_globalconf_t config_{};
-  SSL_CTX* ssl_ = nullptr;
+  SSL_CTX* ssl_ = nullptr;  // the current one; each loop holds a reference of its own
+  bool tls_ = false;
+  TlsFiles tls_files_{};
   std::vector<std::unique_ptr<Loop>> loops_;
 
   std::mutex jobs_m_;
@@ -227,6 +248,8 @@ class Loop final : public Executor {
   [[nodiscard]] bool drained() const { return drained_; }
   [[nodiscard]] bool cleaned_up() const { return cleaned_up_; }
   [[nodiscard]] int wake_fd() const { return wake_fd_; }
+  /// New connections use `fresh` (whose reference this loop takes over).
+  void use_tls(SSL_CTX* fresh);
 
   // h2o callbacks (C function pointers into the loop).
   int on_req(h2o_req_t* req);
@@ -315,7 +338,7 @@ int Engine::on_req_cb(h2o_handler_t*, h2o_req_t* req) { return t_loop->on_req(re
 Request Loop::build_request(h2o_req_t* req, std::size_t& header_bytes, std::size_t& header_count) const {
   Request rq;
   rq.protocol = req->version >= 0x200 ? std::string_view("h2") : std::string_view("http/1.1");
-  rq.tls = e_.ssl_ != nullptr;  // TLS or not for every listener, whatever :scheme claims
+  rq.tls = e_.tls_;  // TLS or not for every listener, whatever :scheme claims
   rq.method_text = std::string(view(req->method));
   rq.method = http::parse_method(rq.method_text);
 
@@ -589,11 +612,12 @@ void Loop::on_accept(h2o_socket_t* listener, const char* err) {
 // ---- workers ----------------------------------------------------------------------------
 
 void Engine::start_workers(unsigned n) {
-  // Workers never take SIGINT/SIGTERM; Engine::run's thread does.
+  // Workers never take SIGINT/SIGTERM/SIGHUP; Engine::run's thread does.
   sigset_t block, old;
   sigemptyset(&block);
   sigaddset(&block, SIGINT);
   sigaddset(&block, SIGTERM);
+  sigaddset(&block, SIGHUP);
   pthread_sigmask(SIG_BLOCK, &block, &old);
   auto& stats = app_.core().stats;
   stats.workers.store(0);  // nobody reads the old slots while they are replaced
@@ -655,20 +679,58 @@ void Engine::stop_workers() {
 
 // ---- lifecycle -------------------------------------------------------------------------
 
+SSL_CTX* Engine::load_tls() const {
+  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+  if (!ctx) return nullptr;
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
+  if (SSL_CTX_use_certificate_chain_file(ctx, opts_.tls_cert.c_str()) != 1 ||
+      SSL_CTX_use_PrivateKey_file(ctx, opts_.tls_key.c_str(), SSL_FILETYPE_PEM) != 1 ||
+      SSL_CTX_check_private_key(ctx) != 1) {
+    SSL_CTX_free(ctx);
+    return nullptr;
+  }
+  h2o_ssl_register_alpn_protocols(ctx, opts_.http2 ? h2o_alpn_protocols : kHttp1Alpn);
+  return ctx;
+}
+
 bool Engine::setup_tls() {
-  ssl_ = SSL_CTX_new(TLS_server_method());
-  if (!ssl_) return false;
-  SSL_CTX_set_min_proto_version(ssl_, TLS1_2_VERSION);
-  SSL_CTX_set_options(ssl_, SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
-  if (SSL_CTX_use_certificate_chain_file(ssl_, opts_.tls_cert.c_str()) != 1 ||
-      SSL_CTX_use_PrivateKey_file(ssl_, opts_.tls_key.c_str(), SSL_FILETYPE_PEM) != 1 ||
-      SSL_CTX_check_private_key(ssl_) != 1) {
+  ssl_ = load_tls();
+  if (!ssl_)
     std::fprintf(stderr, "crocket: could not load TLS certificate %s and key %s\n", opts_.tls_cert.c_str(),
                  opts_.tls_key.c_str());
-    return false;
+  tls_files_ = tls_files();
+  return ssl_ != nullptr;
+}
+
+Engine::TlsFiles Engine::tls_files() const {
+  TlsFiles out{};
+  auto sig = [](const std::string& path, struct stat& st) { return ::stat(path.c_str(), &st) == 0; };
+  struct stat c{}, k{};
+  if (!sig(opts_.tls_cert, c) || !sig(opts_.tls_key, k)) return out;  // all zero: missing for now
+  out = {std::uint64_t(c.st_ino), std::int64_t(c.st_mtim.tv_sec) * 1'000'000'000 + c.st_mtim.tv_nsec,
+         std::int64_t(c.st_size), std::uint64_t(k.st_ino),
+         std::int64_t(k.st_mtim.tv_sec) * 1'000'000'000 + k.st_mtim.tv_nsec, std::int64_t(k.st_size)};
+  return out;
+}
+
+void Engine::reload_tls(const char* why) {
+  SSL_CTX* fresh = load_tls();
+  if (!fresh) {
+    log::error("TLS certificate not reloaded ({why}): could not load {cert} and {key}, or they do not match; "
+               "still serving the previous one",
+               std::string_view(why), std::string_view(opts_.tls_cert), std::string_view(opts_.tls_key));
+    return;
   }
-  h2o_ssl_register_alpn_protocols(ssl_, opts_.http2 ? h2o_alpn_protocols : kHttp1Alpn);
-  return true;
+  // Each loop takes its own reference and drops the old one; a connection
+  // holds its context until it closes, so nothing open is disturbed.
+  for (auto& loop : loops_) {
+    SSL_CTX_up_ref(fresh);
+    loop->post([l = loop.get(), fresh] { l->use_tls(fresh); });
+  }
+  SSL_CTX_free(ssl_);
+  ssl_ = fresh;
+  log::info("TLS certificate reloaded ({why}): {cert}", std::string_view(why), std::string_view(opts_.tls_cert));
 }
 
 int Engine::open_listener(std::uint16_t listen_port, bool reuse_port, bool probe) {
@@ -710,6 +772,7 @@ Loop::Loop(Engine& e, int listen_fd) : e_(e), app_(e.app_), opts_(e.opts_), cfg_
   accept_ctx_.ctx = &ctx_;
   accept_ctx_.hosts = e_.config_.hosts;
   accept_ctx_.ssl_ctx = e_.ssl_;
+  if (e_.ssl_) SSL_CTX_up_ref(e_.ssl_);  // dropped in ~Loop, or for a reloaded one (use_tls)
   done_rx_.loop = this;
   h2o_multithread_register_receiver(ctx_.queue, &done_rx_.rx, on_completions_cb);
   jobs_rx_.loop = this;
@@ -730,6 +793,12 @@ Loop::~Loop() {
   h2o_evloop_t* loop = ctx_.loop;
   h2o_context_dispose(&ctx_);
   h2o_evloop_destroy(loop);
+  if (accept_ctx_.ssl_ctx) SSL_CTX_free(accept_ctx_.ssl_ctx);
+}
+
+void Loop::use_tls(SSL_CTX* fresh) {
+  SSL_CTX* old = std::exchange(accept_ctx_.ssl_ctx, fresh);
+  if (old) SSL_CTX_free(old);
 }
 
 void Loop::serve() {
@@ -790,6 +859,7 @@ int Engine::run() {
     shut_down(app_);
     return 1;
   };
+  tls_ = tls;
   if (tls && !setup_tls()) return fail({});
 
   // One listening socket per event loop, all on the same port (SO_REUSEPORT):
@@ -836,6 +906,7 @@ int Engine::run() {
   sigemptyset(&block);
   sigaddset(&block, SIGINT);
   sigaddset(&block, SIGTERM);
+  sigaddset(&block, SIGHUP);
   pthread_sigmask(SIG_BLOCK, &block, &old_mask);
   std::vector<std::thread> threads;
   for (auto& loop : loops_) threads.emplace_back([l = loop.get()] { l->serve(); });
@@ -843,9 +914,14 @@ int Engine::run() {
   struct sigaction sa{};
   sa.sa_handler = on_signal;
   sigemptyset(&sa.sa_mask);
-  struct sigaction old_int{}, old_term{}, old_pipe{}, ignore{};
+  struct sigaction old_int{}, old_term{}, old_hup{}, old_pipe{}, ignore{}, hup{};
   sigaction(SIGINT, &sa, &old_int);
   sigaction(SIGTERM, &sa, &old_term);
+  // SIGHUP reloads the TLS certificate. Handled, not left to its default (exit),
+  // on a thread of the application's own that has it unblocked as well.
+  hup.sa_handler = on_hangup;
+  sigemptyset(&hup.sa_mask);
+  sigaction(SIGHUP, &hup, &old_hup);
   ignore.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &ignore, &old_pipe);  // a peer closing mid-write is an error code, not a signal
 
@@ -853,13 +929,35 @@ int Engine::run() {
   std::fprintf(stderr, "crocket: listening on %s://%s:%u (%u event loops, %u workers%s)\n", tls ? "https" : "http",
                opts_.host.c_str(), unsigned(opts_.port), n_loops, n_workers, h2);
 
-  // ---- graceful shutdown: every loop stops accepting and drains, then the workers stop ----
-  // Wait for a signal. sigsuspend unblocks them only while it waits, so one
-  // arriving between the check and the wait is not lost.
-  sigset_t waiting = old_mask;
-  sigdelset(&waiting, SIGINT);
-  sigdelset(&waiting, SIGTERM);
-  while (!g_stop.load()) sigsuspend(&waiting);  // the handler sets g_stop and wakes the loops
+  // Until SIGINT or SIGTERM: wait for signals, a second at a time. With TLS,
+  // SIGHUP reloads the certificate and key, and so does a change to either
+  // file (cert-manager and ACME clients replace them in place), once the
+  // files have stayed the same for a second: not half-written.
+  sigset_t signals;
+  sigemptyset(&signals);
+  sigaddset(&signals, SIGINT);
+  sigaddset(&signals, SIGTERM);
+  sigaddset(&signals, SIGHUP);
+  TlsFiles seen = tls_files_;
+  while (!g_stop.load()) {
+    timespec tick{1, 0};
+    int sig = sigtimedwait(&signals, nullptr, &tick);
+    if (sig == SIGINT || sig == SIGTERM) on_signal(sig);  // sets g_stop and wakes the loops
+    if (sig == SIGHUP) g_reload.store(true);
+    if (g_stop.load() || !tls) {
+      g_reload.store(false);
+      continue;
+    }
+    TlsFiles now = tls_files();
+    if (g_reload.exchange(false)) {
+      reload_tls("SIGHUP");
+      tls_files_ = seen = now;
+    } else if (now != tls_files_ && now == seen && now != TlsFiles{}) {
+      reload_tls("the certificate or key file changed");
+      tls_files_ = now;
+    }
+    seen = now;
+  }
   pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
   app_.core().stats.draining.store(true);
   loops_drained_->wait();
@@ -881,6 +979,7 @@ int Engine::run() {
   g_wake_count.store(0);
   sigaction(SIGINT, &old_int, nullptr);
   sigaction(SIGTERM, &old_term, nullptr);
+  sigaction(SIGHUP, &old_hup, nullptr);
   sigaction(SIGPIPE, &old_pipe, nullptr);
   bool all_clean = std::ranges::all_of(loops_, [](auto& l) { return l->cleaned_up(); });
   loops_.clear();  // a loop with connections still open is left as it is (see ~Loop)

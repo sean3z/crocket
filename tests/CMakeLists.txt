@@ -29,6 +29,11 @@ add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)
 
+# OpenAPI generated from the handlers, checked piece by piece, and served.
+add_executable(crocket_openapi_test openapi.cpp)
+target_link_libraries(crocket_openapi_test PRIVATE crocket)
+add_test(NAME openapi COMMAND crocket_openapi_test)
+
 # Fuzzing the parsers of untrusted input (tests/fuzz). Here each target runs its
 # corpus and then a few seconds of mutations; ./dev fuzz runs them for longer,
 # with coverage guidance and AddressSanitizer.

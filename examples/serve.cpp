@@ -199,6 +199,7 @@ int main() {
       .attach(Logger{})
       .attach(Cors::allow_origins({"https://app.example.com"}))
       .attach(Metrics{})
+      .attach(OpenApi{{.title = "crocket-serve", .version = "0.1.0", .docs = "/docs"}})  // GET /openapi.json, /docs
       .mount("/api", reflect_routes<^^api>())
       .mount("/", reflect_routes<^^Info>())
       .launch(launch);

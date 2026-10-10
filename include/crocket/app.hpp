@@ -97,6 +97,9 @@ struct ParamInfo {
 
 namespace detail {
 enum class Builtin : std::uint8_t { None, Healthz, Readyz, Routes };
+namespace openapi {
+struct Operation;
+}
 }
 
 /// A route, as produced by reflect_routes() and adjusted by mount().
@@ -114,6 +117,7 @@ struct RouteDef {
   Mode mode = Mode::Http;
   std::string_view service;  // gRPC: "Greeter"
   std::string_view rpc;      // gRPC: "SayHello"
+  void (*openapi)(detail::openapi::Operation&) = nullptr;  // describes it for OpenApi (HTTP routes)
 };
 
 using Routes = std::vector<RouteDef>;

@@ -196,6 +196,47 @@ grep -q '"route":"/api/users/{id}"' "$WORK/serve.log" && pass "log uses route te
 curl -sk "$BASE/metrics" | grep -q 'route="/api/users/{id}"' && pass "metrics by route template" ||
   fail "metrics by route template"
 
+echo "[TLS certificate reload]"
+served_cert() { openssl s_client -connect "127.0.0.1:$PORT" -servername localhost </dev/null 2>/dev/null |
+                openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2; }
+file_cert() { openssl x509 -noout -fingerprint -sha256 -in "$1" | cut -d= -f2; }
+new_cert() { # dir
+  mkdir -p "$1"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
+    -keyout "$1/key.pem" -out "$1/cert.pem" >/dev/null 2>&1
+}
+expect "serving the certificate it started with" "$(file_cert "$WORK/cert.pem")" "$(served_cert)"
+# A request in flight across a reload keeps its connection.
+curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/slow/2500" >"$WORK/across.code" &
+ACROSS_PID=$!
+sleep 0.3
+# Replaced in place, the way cert-manager and ACME clients do: picked up once
+# the files have settled, without a signal.
+new_cert "$WORK/r1"
+cp "$WORK/r1/key.pem" "$WORK/key.pem"
+cp "$WORK/r1/cert.pem" "$WORK/cert.pem"
+for _ in $(seq 1 40); do [[ "$(served_cert)" == "$(file_cert "$WORK/r1/cert.pem")" ]] && break; sleep 0.1; done
+expect "a replaced certificate file is picked up" "$(file_cert "$WORK/r1/cert.pem")" "$(served_cert)"
+grep -q 'TLS certificate reloaded (the certificate or key file changed)' "$WORK/serve.log" &&
+  pass "  ... and logged" || fail "  ... and logged"
+wait $ACROSS_PID
+expect "a request in flight across the reload completes" "200" "$(cat "$WORK/across.code")"
+# A broken certificate keeps the one being served.
+echo "not a certificate" >"$WORK/cert.pem"
+sleep 2.5
+expect "a broken certificate file keeps the previous one" "$(file_cert "$WORK/r1/cert.pem")" "$(served_cert)"
+grep -q 'TLS certificate not reloaded' "$WORK/serve.log" && pass "  ... and says why" || fail "  ... and says why"
+expect "  ... and keeps serving" "200" "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/healthz")"
+# SIGHUP reloads at once (the file watch waits for the files to settle).
+new_cert "$WORK/r2"
+cp "$WORK/r2/key.pem" "$WORK/key.pem"
+cp "$WORK/r2/cert.pem" "$WORK/cert.pem"
+kill -HUP $SRV_PID
+sleep 0.3
+expect "SIGHUP reloads it at once" "$(file_cert "$WORK/r2/cert.pem")" "$(served_cert)"
+grep -q 'TLS certificate reloaded (SIGHUP)' "$WORK/serve.log" && pass "  ... and logged" || fail "  ... and logged"
+expect "  ... and the server keeps running" "200" "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/healthz")"
+
 echo "[graceful shutdown]"
 curl -sk --http2 -o "$WORK/slow.out" -w '%{http_code}' "$BASE/api/slow/1500" >"$WORK/slow.code" &
 CURL_PID=$!
@@ -227,6 +268,8 @@ raw=$(exec 3<>/dev/tcp/127.0.0.1/8000
       timeout 5 cat <&3)
 expect_match "413, then the next request on the same connection" "413 .*Hello, 36 year old named Ada!" \
   "$(tr -d '\r\n' <<<"$raw")"
+kill -HUP $HELLO_PID; sleep 0.2
+expect "SIGHUP without TLS changes nothing" "Hello, 42 year old named Rocketeer!" "$(curl -s http://127.0.0.1:8000/hello/Rocketeer/42)"
 kill -INT $HELLO_PID; wait $HELLO_PID
 expect "hello exits 0 on SIGINT" "0" "$?"
 

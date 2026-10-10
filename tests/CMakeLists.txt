@@ -29,6 +29,20 @@ add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)
 
+# Fuzzing the parsers of untrusted input (tests/fuzz). Here each target runs its
+# corpus and then a few seconds of mutations; ./dev fuzz runs them for longer,
+# with coverage guidance and AddressSanitizer.
+add_executable(crocket_fuzz fuzz/fuzz.cpp fuzz/targets.cpp fuzz/h2.cpp)
+target_link_libraries(crocket_fuzz PRIVATE crocket)
+target_include_directories(crocket_fuzz PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(crocket_fuzz PRIVATE CROCKET_FUZZ_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus")
+if(CROCKET_FUZZ_COVERAGE)
+  target_compile_options(crocket_fuzz PRIVATE -fsanitize-coverage=trace-pc)
+endif()
+foreach(target json json_typed proto query route request h2)
+  add_test(NAME fuzz.${target} COMMAND crocket_fuzz ${target} --seconds 2)
+endforeach()
+
 # Acceptance 5 and friends: programs that must NOT compile. Each is an
 # EXCLUDE_FROM_ALL object library; the test builds it and expects failure with
 # a diagnostic matching the regex (both identifiers for the capture mismatch).

@@ -1,0 +1,3 @@
+GET /users/42
+host: example.com
+

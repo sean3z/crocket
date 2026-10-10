@@ -4,6 +4,7 @@
 #include <crocket/crocket.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <format>
 #include <map>
@@ -552,6 +553,12 @@ int main() {
     std::string out;
     json::dump(*v, out);
     CHECK_EQ(out, std::string(R"({"a":[1,-2.5,"x",true,null,{"b":{}}],"big":18446744073709551616})"));
+    // -0 keeps its sign, as a double, so a document writes out the same twice.
+    auto zeros = json::parse("[-0,-0.0,0]");
+    out.clear();
+    json::dump(*zeros, out);
+    CHECK_EQ(out, std::string("[-0,-0,0]"));
+    CHECK(std::signbit(zeros->as_array()[0].as_double()));
     auto d = json::from_string<Doc>(R"({"any":[1,{"k":"v"}]})");
     CHECK(d.has_value() && d->any.is_array());
     CHECK_EQ(json::to_string(*d), std::string(R"({"any":[1,{"k":"v"}]})"));

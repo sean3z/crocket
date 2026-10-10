@@ -1,0 +1,6 @@
+GET /search?page=2&q=rust&exact=true
+host: a.example.org
+:peer 10.0.0.5
+x-forwarded-for: 198.51.100.4, 10.0.0.9
+x-forwarded-proto: https
+

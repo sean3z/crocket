@@ -831,6 +831,7 @@ void Loop::serve() {
   wake_ = nullptr;
   cleaned_up_ = open_connections() == 0 && live_.empty();
   t_loop = nullptr;
+  h2o_buffer_clear_recycle(1);  // h2o keeps freed buffers per thread, for reuse; this thread is ending
 }
 
 // ---- the engine ------------------------------------------------------------------------

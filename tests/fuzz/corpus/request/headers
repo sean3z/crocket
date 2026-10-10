@@ -1,0 +1,8 @@
+PUT /orders/5
+host: example.com
+x-tenant: acme
+x-page-size: 20
+authorization: Bearer alice
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+x-request-id: my-id.1
+

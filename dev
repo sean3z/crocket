@@ -52,6 +52,12 @@ ${B}./dev${R} <command> [args]
                                               request, over HTTP/1.1 and h2c
                             Numbers compare only on the same machine. h2load comes from
                             nghttp2-client (./dev setup); $H2LOAD overrides the path.
+  fuzz [target|all] [--seconds N] [--save] [--replay FILE...]
+                            Fuzz the parsers of untrusted input (tests/fuzz: json,
+                            json_typed, proto, query, route, request, h2) with
+                            AddressSanitizer and coverage guidance, N seconds per
+                            target (default 60). --save adds inputs reaching new code
+                            to tests/fuzz/corpus. Crashes go to build-fuzz/crashes/
   h2o-update [ref]          Pin h2o to the newest master commit (or a branch, tag
                             or commit), then run ./dev check
 
@@ -115,7 +121,13 @@ need_tools() {
 # ---- builds ------------------------------------------------------------------
 
 # preset -> build directory (kept in sync with CMakePresets.json)
-tree() { [[ $1 == dev ]] && echo "$ROOT/build-dev" || echo "$ROOT/build"; }
+tree() {
+  case $1 in
+    dev) echo "$ROOT/build-dev" ;;
+    fuzz) echo "$ROOT/build-fuzz" ;;
+    *) echo "$ROOT/build" ;;
+  esac
+}
 
 configure() { # preset
   local dir; dir=$(tree "$1")
@@ -179,7 +191,7 @@ cmd_clean() {
   case ${1:-dev} in
     dev)     rm -rf "$ROOT/build-dev" "$ROOT/compile_commands.json" ;;
     release) rm -rf "$ROOT/build" ;;
-    all)     rm -rf "$ROOT/build-dev" "$ROOT/build" "$ROOT/compile_commands.json" ;;
+    all)     rm -rf "$ROOT/build-dev" "$ROOT/build" "$ROOT/build-fuzz" "$ROOT/compile_commands.json" ;;
     *)       die "usage: ./dev clean [dev|release|all]" ;;
   esac
 }
@@ -434,6 +446,39 @@ cmd_bench() {
   return "$rc"
 }
 
+# ---- fuzz ------------------------------------------------------------------------
+
+# Builds tests/fuzz with AddressSanitizer and coverage (build-fuzz/) and runs
+# targets for longer than ctest does. Crashes land in build-fuzz/crashes/.
+cmd_fuzz() {
+  local seconds=60 args=() target=all replay=()
+  while (($#)); do
+    case $1 in
+      --seconds) seconds=$2; shift 2 ;;
+      --save) args+=(--save); shift ;;
+      --seed) args+=(--seed "$2"); shift 2 ;;
+      --replay) shift; replay=("$@"); break ;;
+      -*) die "unknown option $1" ;;
+      *) target=$1; shift ;;
+    esac
+  done
+  build fuzz crocket_fuzz
+  local exe; exe="$(tree fuzz)/tests/crocket_fuzz"
+  local crashes; crashes="$(tree fuzz)/crashes"
+  mkdir -p "$crashes"
+  if ((${#replay[@]})); then
+    local f files=(); for f in "${replay[@]}"; do files+=("$(realpath "$f")"); done
+    (cd "$crashes" && "$exe" "$target" --replay "${files[@]}")
+    return
+  fi
+  say "fuzzing ${target} (${seconds}s per target, AddressSanitizer, coverage)"
+  if (cd "$crashes" && ASAN_OPTIONS=${ASAN_OPTIONS:-abort_on_error=1} "$exe" "$target" --seconds "$seconds" "${args[@]}"); then
+    ok "no crashes"
+  else
+    die "found a problem; the input is in ${crashes#"$ROOT"/}/ (replay: ./dev fuzz <target> --replay FILE)"
+  fi
+}
+
 # ---- h2o -------------------------------------------------------------------------
 
 H2O_REPO=h2o/h2o
@@ -537,7 +582,7 @@ cmd_watch() {
 cmd=${1:-help}
 shift || true
 case $cmd in
-  setup|gcc|build|run|watch|test|check|clean|bench) "cmd_$cmd" "$@" ;;
+  setup|gcc|build|run|watch|test|check|clean|bench|fuzz) "cmd_$cmd" "$@" ;;
   h2o-update) cmd_h2o_update "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 1 ;;

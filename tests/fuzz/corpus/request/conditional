@@ -1,0 +1,7 @@
+GET /doc
+host: localhost
+range: bytes=10-99
+if-range: "abc"
+if-none-match: W/"x", "y"
+if-modified-since: Tue, 14 Nov 2023 22:13:20 GMT
+

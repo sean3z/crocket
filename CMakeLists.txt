@@ -5,6 +5,9 @@ project(crocket VERSION 0.1.0 LANGUAGES C CXX)
 # in with FetchContent or add_subdirectory doesn't build them.
 option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve and crocket_grpc" ${PROJECT_IS_TOP_LEVEL})
 option(CROCKET_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
+# ./dev fuzz: crocket and the fuzz targets report coverage to tests/fuzz, so
+# inputs that reach new code are kept and mutated further.
+option(CROCKET_FUZZ_COVERAGE "Instrument crocket for coverage-guided fuzzing" OFF)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +64,9 @@ target_compile_options(crocket PRIVATE -Wall -Wextra)
 target_include_directories(crocket SYSTEM PRIVATE ${CROCKET_H2O_INCLUDE_DIRS})
 target_compile_definitions(crocket PRIVATE ${CROCKET_H2O_DEFINITIONS})
 target_link_libraries(crocket PRIVATE libh2o-evloop PUBLIC Threads::Threads)
+if(CROCKET_FUZZ_COVERAGE)
+  target_compile_options(crocket PRIVATE -fsanitize-coverage=trace-pc)
+endif()
 
 if(CROCKET_BUILD_EXAMPLES)
   add_executable(crocket_hello examples/hello.cpp)

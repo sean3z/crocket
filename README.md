@@ -1111,8 +1111,8 @@ don't need it.
 ./dev check        # release build plus the full ctest, before calling a change done
 ```
 
-`./dev help` lists every command. Builds go to `build-dev/` (Debug) and `build/`
-(release), configured from `CMakePresets.json`. `./dev` picks the compiler in this
+`./dev help` lists every command. Builds go to `build-dev/` (Debug), `build/`
+(release) and `build-fuzz/` (see [Fuzzing](#fuzzing)), configured from `CMakePresets.json`. `./dev` picks the compiler in this
 order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 
 ### Benchmarks
@@ -1168,6 +1168,37 @@ The last column, crocket's CPU per request minus h2o's, is what crocket adds to 
 routing, extractors, JSON, fairings, and the headers it sends by default (`x-request-id`,
 an ETag and `Shield`'s four).
 
+### Fuzzing
+
+```bash
+./dev fuzz                         # every target, 60 s each
+./dev fuzz request --seconds 600   # one target, for longer
+./dev fuzz json --save             # keep inputs that reach new code in tests/fuzz/corpus
+./dev fuzz h2 --replay build-fuzz/crashes/crash-h2-…   # run one input again
+```
+
+A fuzzer feeds generated inputs to code that parses untrusted bytes, looking for
+crashes, memory errors, hangs and broken invariants. [tests/fuzz](tests/fuzz) has a
+target per parser:
+
+| Target | Input | Also checks |
+|---|---|---|
+| `json` | Any JSON document | It writes out and parses back to the same text |
+| `json_typed` | JSON read into a struct with every kind of member, annotation and variant | It writes out and reads back the same |
+| `proto` | A protobuf message with every field kind | It encodes the same twice |
+| `query` | Query strings and percent-encoding | Decoding never lengthens the text |
+| `route` | Paths against a route table, and the same text as a template | A literal template matches its own path |
+| `request` | Whole requests (method, target, headers, body, client address) through the pipeline, with every extractor, `Cors`, `Metrics`, trusted proxies, conditional and range requests, and gRPC | Status is 100–599, response headers are valid, JSON bodies parse |
+| `h2` | HTTP/2 frame sequences sent to a running server over h2c: bodies with and without content-length, padding, `CONTINUATION`, window updates, resets, settings | The server keeps answering, and no request is left in flight |
+
+Each target starts from its seed inputs in `tests/fuzz/corpus/<target>/` and mutates
+them. `./dev fuzz` builds `build-fuzz/` with AddressSanitizer and coverage
+instrumentation, so an input that reaches new code is kept and mutated further. (crocket
+needs GCC, so libFuzzer, which needs clang, is out; the harness in `tests/fuzz/fuzz.cpp`
+does the same job.) A problem leaves the input in `build-fuzz/crashes/`; fix it, then add
+the input to the target's corpus so it stays fixed. In `ctest`, each target runs its
+corpus and two seconds of mutations, without coverage.
+
 ## Tests
 
 | Test | What it checks |
@@ -1181,6 +1212,7 @@ an ETag and `Shield`'s four).
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
 | `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, 20 async handlers sharing 2 workers, and a deadline waking a sleeping task, requests queued past their deadline never running their handler, and `crocket_workers_stuck` for handlers that ignore the deadline. Also adaptive placement: a route promoted after 1,000 fast runs, demoted by one slow run, and a `Pool` route that is never promoted. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, TLS certificate reload (a replaced file, a broken one, SIGHUP, a request in flight across it), and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
+| `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
 ## `crocket_serve` configuration

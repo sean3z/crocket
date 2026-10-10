@@ -1,0 +1,6 @@
+OPTIONS /orders/5
+host: example.com
+origin: https://app.example.com
+access-control-request-method: PUT
+access-control-request-headers: x-tenant
+

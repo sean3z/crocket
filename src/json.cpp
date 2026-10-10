@@ -640,7 +640,7 @@ bool read_value(Reader& r, Value& out, const Path* path) {
       std::string_view text;
       bool integral;
       if (!r.number(text, integral, path)) return false;
-      if (integral) {
+      if (integral && text != "-0") {  // -0 is a double: an integer would lose its sign
         std::int64_t i;
         auto res = std::from_chars(text.data(), text.data() + text.size(), i);
         if (res.ec == std::errc()) { out = i; return true; }

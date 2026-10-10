@@ -27,6 +27,7 @@ Most C++ web frameworks bind routes with runtime registration (`app.get("/x", la
 - **No runtime cost.** Reflection runs only in the compiler. Each route becomes a plain function pointer to a generated invoker, with no string lookups, RTTI or type erasure per argument on the request path.
 - **The signature is the configuration.** Which state a route needs, whether it reads the body, and how its errors are counted are all derived from the parameter types. That is how a missing `.manage(...)` is caught at ignite rather than on the first request.
 - **One mechanism, no boilerplate.** The same reflection maps JSON bodies and query strings onto your structs, with no derive macros or field lists.
+- **The API describes itself.** The same signatures and structs produce an [OpenAPI document](#openapi) and a `.proto`, which can't drift from the code because they are read from it.
 - **Handlers stay testable.** Because they are plain functions, you can call them directly in unit tests, step into them in a debugger, and navigate to them in an IDE.
 
 The trade-off is toolchain reach and build time. You need a compiler with C++26 reflection (developed on GCC 16), and heavily annotated translation units compile more slowly than hand-registered routes.
@@ -90,8 +91,10 @@ If you know [Rocket](https://rocket.rs), almost every concept carries over. The 
 | `rocket::local::blocking::Client` | `LocalClient` |
 | `Shutdown` and grace period | SIGINT/SIGTERM drain with `drain_timeout` |
 
-Three things crocket adds that Rocket has no direct equivalent for:
+Four things crocket adds that Rocket has no direct equivalent for:
 - **Controllers:** classes whose member functions are routes, run on a managed instance.
+- **OpenAPI from the code:** the document, and an interactive docs page, generated from
+  the handlers and structs themselves (see [OpenAPI](#openapi)).
 - **gRPC:** unary methods next to your HTTP routes, with protobuf messages that are
   plain structs and a `.proto` generated from them (see [gRPC and protobuf](#grpc-and-protobuf)).
 - **A production kit in the box:** request ids, structured logs, Prometheus metrics,
@@ -696,6 +699,8 @@ Built-in fairings:
   - `crocket_workers`, `crocket_workers_busy` and `crocket_workers_stuck` (still running
     after their request's deadline), and `crocket_requests_abandoned_total`. See
     [Deadlines and cancellation](#deadlines-and-cancellation).
+- **`OpenApi`:** the OpenAPI document at `GET /openapi.json`, and with `.docs`, a page to
+  try the API. See [OpenAPI](#openapi).
 
 ### Logging
 
@@ -846,6 +851,48 @@ token. The token fires when the deadline passes or the client disconnects.
 - **A handler that ignores its deadline** keeps its worker until it returns. While it
   runs late, `crocket_workers_stuck` counts it. When it returns, crocket logs a warning
   naming the route and how late it was.
+
+### OpenAPI
+
+```cpp
+app.attach(OpenApi{{.title = "Orders", .version = "1.4.0", .docs = "/docs"}});
+```
+
+`GET /openapi.json` then serves an OpenAPI 3.1 document for every HTTP route, built at
+ignite from the handlers themselves, and `GET /docs` an interactive page (Swagger UI,
+loaded from cdn.jsdelivr.net) to read and try it. Nothing is written twice:
+
+| In the handler | In the document |
+|---|---|
+| `{id}` and its parameter's type | A required path parameter: `integer` with the type's range, `number`, `boolean` or `string` |
+| `Query<T>` | One query parameter per member; required unless optional or defaulted |
+| `Header<"x-tenant">`, `Header<"x-page-size", std::optional<int>>` | Header parameters, required unless optional |
+| `Json<T>` | A required `application/json` body; 415 and 422 responses |
+| `Auth` | A bearer security requirement; a 401 response |
+| `T`, `Json<T>`, `std::string`, `NoContent`, `Created<T>`, `std::optional<T>`, `Result<T>`, `Cacheable<T>`, `Task<T>` | The success response: status, media type and schema; 404 for an optional, 304 for a cacheable |
+| Any failure | `default`: `application/problem+json` with the shared `Problem` schema |
+
+Structs become schemas in `components/schemas`, following exactly what `Json<T>` reads
+and writes: `json::rename` and `rename_all`, `as_string`, time formats,
+enums as their names, maps, recursion, untagged variants (`anyOf`) and `json::tag`
+variants (`oneOf` with a `discriminator`). Validation annotations become their JSON
+Schema keywords (`minimum`, `maxLength`, `minItems`, `pattern`, `format: email`), and
+`json::from_path` members are `readOnly`. A member is `required` when a request must send
+it: neither `std::optional` nor given a default. Two structs with the same name get
+qualified names (`billing.Order`).
+
+Each operation has its handler's name as `operationId` (`shop.create_order`), its scope as
+the tag, and a summary from the function name ("Create order"). gRPC methods are left
+out (their contract is the `.proto`), as is `/__routes`.
+
+To write the document at build time instead, or to check it into a repository:
+
+```cpp
+if (argc > 1 && argv[1] == "--openapi"sv) {
+  std::cout << crocket::openapi_document(app, {.title = "Orders", .version = "1.4.0"});
+  return 0;
+}
+```
 
 ### gRPC and protobuf
 
@@ -1212,6 +1259,7 @@ corpus and two seconds of mutations, without coverage.
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |
 | `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, 20 async handlers sharing 2 workers, and a deadline waking a sleeping task, requests queued past their deadline never running their handler, and `crocket_workers_stuck` for handlers that ignore the deadline. Also adaptive placement: a route promoted after 1,000 fast runs, demoted by one slow run, and a `Pool` route that is never promoted. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, TLS certificate reload (a replaced file, a broken one, SIGHUP, a request in flight across it), and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
+| `openapi` | The OpenAPI document for an API using every parameter, body and return type, checked piece by piece (schemas for every member kind and annotation, variants, recursion, name clashes, every `$ref` resolving), and served by the `OpenApi` fairing with its docs page. |
 | `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 

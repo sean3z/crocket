@@ -114,4 +114,36 @@ class Metrics {
   std::shared_ptr<Store> store_;
 };
 
+/// The OpenAPI 3.1 description of the app's HTTP routes, generated from the
+/// handlers themselves: path captures, Query<T> and Header<...> parameters,
+/// Json<T> bodies, Auth, and what each handler returns, with JSON Schemas for
+/// the types as crocket reads and writes them. Served at GET `path`; with
+/// `docs` set, an interactive page (Swagger UI) there too.
+///
+///   app.attach(OpenApi{{.title = "Orders", .version = "1.4.0", .docs = "/docs"}});
+struct OpenApiOptions {
+  std::string title = "API";
+  std::string version = "0.1.0";
+  std::string description = {};
+  std::string path = "/openapi.json";
+  std::string docs = {};  // "/docs": Swagger UI, loaded from cdn.jsdelivr.net
+};
+class OpenApi {
+ public:
+  using Options = OpenApiOptions;
+  explicit OpenApi(Options o = {});
+
+  void on_ignite(Ignite& ig);
+  std::optional<Response> on_request(Request& rq);
+
+ private:
+  Options o_;
+  std::shared_ptr<const std::string> doc_;
+};
+
+/// The OpenAPI document for `app` (igniting it first), for writing openapi.json
+/// at build time or checking it into a repository:
+///   if (argv[1] == "--openapi"sv) { std::cout << crocket::openapi_document(app, {.title = "Orders"}); return 0; }
+std::string openapi_document(Crocket& app, const OpenApi::Options& o = {});
+
 }  // namespace crocket

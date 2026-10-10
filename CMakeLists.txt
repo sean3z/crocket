@@ -51,6 +51,7 @@ add_library(crocket STATIC
   src/json.cpp
   src/http.cpp
   src/fairings.cpp
+  src/openapi.cpp
   src/grpc.cpp
   src/engine_h2o.cpp)
 add_library(crocket::crocket ALIAS crocket)

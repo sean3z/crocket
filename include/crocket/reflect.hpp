@@ -18,6 +18,7 @@
 // service named after the scope (see grpc.hpp); mount them with Mode::Grpc.
 
 #include "crocket/app.hpp"
+#include "crocket/detail/openapi.hpp"
 #include "crocket/grpc.hpp"
 
 #include <meta>
@@ -244,6 +245,20 @@ void describe_param(RouteDef& d, std::string_view name, std::string_view type, B
   }
 }
 
+/// The OpenAPI operation of handler Fn: its path captures and extractors, and
+/// what it returns.
+template <std::meta::info Fn, const Binding* B>
+void describe_operation(openapi::Operation& op) {
+  constexpr auto params = std::define_static_array(std::meta::parameters_of(Fn));
+  template for (constexpr std::size_t i : std::define_static_array(std::views::iota(std::size_t{0}, params.size()))) {
+    using P = [:std::meta::type_of(params[i]):];
+    using T = std::remove_cvref_t<P>;
+    if constexpr (B[i].kind == BindKind::Path) op.parameter("path", B[i].name, true, openapi::param_schema<T>());
+    else if constexpr (B[i].kind == BindKind::Extract) openapi::DescribeExtractor<T>::apply(op);
+  }
+  openapi::respond<typename fn_traits<decltype(&[:Fn:])>::ret>(op);
+}
+
 }  // namespace detail::reflect
 
 /// Collect the annotated handlers of a namespace or class.
@@ -276,6 +291,7 @@ Routes reflect_routes() {
         d.rank = route.rank;
         d.invoke = &detail::invoke<&[:fn:], bindings.data()>;
         d.async = detail::Awaitable<std::remove_cvref_t<typename detail::fn_traits<decltype(&[:fn:])>::ret>>;
+        d.openapi = &r::describe_operation<fn, bindings.data()>;
       }
       constexpr auto params = std::define_static_array(std::meta::parameters_of(fn));
       template for (constexpr std::size_t i : std::define_static_array(std::views::iota(std::size_t{0}, params.size()))) {

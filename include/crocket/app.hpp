@@ -420,6 +420,7 @@ class Crocket {
   void warn_if_late(const Request& req) const;  // logs a handler that outlived its deadline
   /// Routes req; true if the handler suspended (it completes the exchange later).
   bool run_routes(Request& req, Response& res);
+  void label_route(Request& req) const;  // sets route/route_template from the router, for answers given before routing
   [[nodiscard]] bool runs_on_loop(const RouteDef& def) const;
   void ran_on_worker(const RouteDef& def, std::chrono::steady_clock::duration took);
   void ran_on_loop(const RouteDef& def, std::chrono::steady_clock::duration took);

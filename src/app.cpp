@@ -552,6 +552,7 @@ void Crocket::run(detail::Exchange* ex) {
       log::detail::RequestScope scope{core_->log, &ex->req};
       if (ex->req.deadline.expired()) {  // nobody would see what the handler did
         core_->stats.abandoned.fetch_add(1, std::memory_order_relaxed);
+        label_route(ex->req);
         write_error({504, "deadline.exceeded", "request deadline exceeded", {}}, ex->req, ex->res);
         ex->handler_done();
         return;
@@ -564,6 +565,17 @@ void Crocket::run(detail::Exchange* ex) {
   }
   if (suspended && ex->suspend()) return;  // the handler completes it
   complete(ex);
+}
+
+void Crocket::label_route(Request& req) const {
+  if (req.route || !core_->ignited || req.path.empty()) return;
+  auto candidates = core_->router->match(req.method, req.path);
+  for (const auto* c : candidates) {
+    req.route_template = c->def->path;
+    req.route = c->def;
+    req.handler = c->def->handler;
+    return;
+  }
 }
 
 void Crocket::warn_if_late(const Request& req) const {
@@ -588,6 +600,9 @@ void Crocket::complete(detail::Exchange* ex) {
 
 Response Crocket::reject(Request& req, const ApiError& err) {
   prepare(req);
+  // A deadline can pass before (or while) the request is routed: label it with
+  // the route it was headed for, not "<unmatched>", so metrics and logs see it.
+  if (err.status == 504) label_route(req);
   log::detail::RequestScope scope{core_->log, &req};
   Response res;
   write_error(err, req, res);

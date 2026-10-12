@@ -594,6 +594,18 @@ int main() {
     auto mb = client.get("/metrics").dispatch().body;
     CHECK(contains(mb, R"(crocket_http_requests_total{method="_OTHER",route="<unmatched>",status=")"));
     CHECK(!contains(mb, "JUNK"));
+    // A 504 the loop gives before the request is routed (the deadline passed in
+    // the queue, or while the handler ran) counts under the route it was headed for.
+    for (auto path : {"/deadline", "/hello/Ada/36"}) {
+      Request late;
+      late.method = http::Method::Get;
+      late.path = path;
+      (void)app.reject(late, {504, "deadline.exceeded", "request deadline exceeded", {}});
+    }
+    auto lb = client.get("/metrics").dispatch().body;
+    CHECK(contains(lb, R"(crocket_http_requests_total{method="GET",route="/deadline",status="504"} 1)"));
+    CHECK(contains(lb, R"(crocket_http_requests_total{method="GET",route="/hello/{name}/{age}",status="504"} 1)"));
+    CHECK(!contains(lb, R"(route="<unmatched>",status="504")"));
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/users",kind="auth"})"));
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/hello/{name}/{age}",kind="path"})"));
     CHECK(contains(m.body, "crocket_http_requests_in_flight 1"));  // the scrape itself

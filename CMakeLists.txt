@@ -34,6 +34,27 @@ if(CMAKE_LINKER_TYPE)
   message(STATUS "crocket: linking with ${CMAKE_LINKER_TYPE}")
 endif()
 
+# ---- reflection check ---------------------------------------------------------
+# crocket needs C++26 static reflection (P2996). Today that means GCC 16+ with
+# -freflection. Fail here with a clear message rather than deep in a header.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-std=c++26")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  string(APPEND CMAKE_REQUIRED_FLAGS " -freflection")
+endif()
+check_cxx_source_compiles("
+#include <meta>
+int main() { constexpr auto r = ^^int; return std::meta::is_type(r) ? 0 : 1; }
+" CROCKET_HAS_REFLECTION)
+unset(CMAKE_REQUIRED_FLAGS)
+if(NOT CROCKET_HAS_REFLECTION)
+  message(FATAL_ERROR
+    "crocket requires a C++26 compiler with static reflection (P2996): "
+    "GCC 16+ with -freflection. ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+    "(${CMAKE_CXX_COMPILER}) cannot compile a ^^int / std::meta test. "
+    "Set CMAKE_CXX_COMPILER to g++-16 or newer.")
+endif()
+
 # ---- h2o (the only wire engine) ---------------------------------------------
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/h2o.cmake)
 
@@ -58,7 +79,7 @@ add_library(crocket::crocket ALIAS crocket)
 target_include_directories(crocket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Users of crocket need C++26 and reflection too, so both are PUBLIC.
 target_compile_features(crocket PUBLIC cxx_std_26)
-target_compile_options(crocket PUBLIC -freflection)
+target_compile_options(crocket PUBLIC $<$<CXX_COMPILER_ID:GNU>:-freflection>)
 target_compile_options(crocket PRIVATE -Wall -Wextra)
 # h2o is PRIVATE: application code never sees h2o headers. Only the engine
 # includes them.

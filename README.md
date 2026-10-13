@@ -144,11 +144,15 @@ Add crocket to a CMake project with FetchContent:
 include(FetchContent)
 FetchContent_Declare(crocket
   GIT_REPOSITORY https://github.com/sean3z/crocket.git
-  GIT_TAG main) 
+  GIT_TAG 9f16a91c2e9ea453d8aa4fe0505ad56948a3e030)
 FetchContent_MakeAvailable(crocket)
 
 target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
+
+The full commit SHA pins a reproducible version. To update, replace `GIT_TAG` with a
+reviewed commit SHA or release tag. Use `GIT_TAG main` to follow the latest development
+branch instead.
 
 For a vendored copy or a git submodule, use
 `FetchContent_Declare(crocket SOURCE_DIR path/to/crocket)` instead.

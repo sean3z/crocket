@@ -3,6 +3,7 @@
 #include "log_hub.hpp"
 #include "crocket/json.hpp"
 #include "crocket/responder.hpp"
+#include "crocket/version.hpp"
 
 #include <unistd.h>
 
@@ -14,6 +15,7 @@
 #include <format>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <tuple>
 
 namespace crocket {
@@ -347,7 +349,61 @@ struct Metrics::Store {
   }
 };
 
-Metrics::Metrics(std::string path) : path_(std::move(path)), store_(std::make_shared<Store>()) {}
+namespace {
+bool label_name_ok(std::string_view n) {
+  if (n.empty() || (n[0] >= '0' && n[0] <= '9')) return false;
+  if (n.starts_with("__")) return false;  // reserved by Prometheus
+  for (char c : n)
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false;
+  return true;
+}
+std::string_view trim(std::string_view v) {
+  while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+  while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+  return v;
+}
+std::string render_labels(const Metrics::Labels& ls) {
+  std::string o;
+  for (auto& [k, v] : ls) {
+    if (!label_name_ok(k)) throw std::invalid_argument("crocket: bad metrics label name '" + k + "'");
+    if (!o.empty()) o += ',';
+    o += k + "=\"" + label(v) + "\"";
+  }
+  return o;
+}
+std::string host_name() {
+  char buf[256] = {};
+  if (::gethostname(buf, sizeof buf - 1) != 0) return "unknown";
+  return buf;
+}
+}  // namespace
+
+Metrics::Labels Metrics::parse_labels(std::string_view spec) {
+  Labels out;
+  while (!spec.empty()) {
+    auto comma = spec.find(',');
+    auto item = trim(spec.substr(0, comma));
+    spec = comma == std::string_view::npos ? std::string_view{} : spec.substr(comma + 1);
+    if (item.empty()) continue;
+    auto eq = item.find('=');
+    if (eq == std::string_view::npos)
+      throw std::invalid_argument("crocket: CROCKET_METRICS_LABELS item '" + std::string(item) + "' has no '='");
+    auto name = trim(item.substr(0, eq));
+    if (!label_name_ok(name))
+      throw std::invalid_argument("crocket: bad metrics label name '" + std::string(name) + "'");
+    out.emplace_back(std::string(name), std::string(trim(item.substr(eq + 1))));
+  }
+  return out;
+}
+
+Metrics::Metrics(std::string path, Labels constant_labels)
+    : path_(std::move(path)), store_(std::make_shared<Store>()), const_labels_(render_labels(constant_labels)) {}
+
+Metrics::Metrics(std::string path)
+    : Metrics(std::move(path), [] {
+        const char* env = std::getenv("CROCKET_METRICS_LABELS");
+        return env ? parse_labels(env) : Labels{};
+      }()) {}
 
 void Metrics::on_ignite(Ignite& ig) {
   std::lock_guard lk(store_->mu);
@@ -469,7 +525,37 @@ std::string Metrics::render() const {
   for (auto& [k, n] : failures)
     o += "crocket_extractor_failures_total{route=\"" + label(k.first) + "\",kind=\"" + label(k.second) + "\"} " +
          std::to_string(n) + "\n";
-  return o;
+  o += "# HELP crocket_build_info crocket version, commit and compiler, and this host. Always 1.\n"
+       "# TYPE crocket_build_info gauge\n"
+       "crocket_build_info{version=\"" + label(version::string) + "\",commit=\"" + label(version::commit) +
+       "\",compiler=\"" + label(version::compiler) + "\",hostname=\"" + label(host_name()) + "\"} 1\n";
+  if (const_labels_.empty()) return o;
+  // Constant labels on every sample line: name{a="b"} v -> name{a="b",k="v"} v.
+  std::string out;
+  out.reserve(o.size() + o.size() / 4);
+  std::string_view rest = o;
+  while (!rest.empty()) {
+    auto nl = rest.find('\n');
+    auto line = rest.substr(0, nl);
+    rest = nl == std::string_view::npos ? std::string_view{} : rest.substr(nl + 1);
+    if (line.empty() || line[0] == '#') {
+      out += line;
+    } else if (auto br = line.find('{'); br != std::string_view::npos && br < line.find(' ')) {
+      out += line.substr(0, br + 1);
+      out += const_labels_;
+      out += ',';
+      out += line.substr(br + 1);
+    } else {
+      auto sp = line.find(' ');
+      out += line.substr(0, sp);
+      out += '{';
+      out += const_labels_;
+      out += '}';
+      out += line.substr(sp);
+    }
+    out += '\n';
+  }
+  return out;
 }
 
 }  // namespace crocket

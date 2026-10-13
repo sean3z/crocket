@@ -100,7 +100,7 @@ To use crocket in your own project, see [Using crocket](#using-crocket).
 **Docker, no toolchain needed:**
 
 ```sh
-docker run --rm -p 8000:8000 ghcr.io/sean3z/crocket-hello
+docker run --rm -p 8000:8000 ghcr.io/sean3z/crocket-hello:stable
 curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
 ```
 
@@ -144,15 +144,32 @@ Add crocket to a CMake project with FetchContent:
 include(FetchContent)
 FetchContent_Declare(crocket
   GIT_REPOSITORY https://github.com/sean3z/crocket.git
-  GIT_TAG 9f16a91c2e9ea453d8aa4fe0505ad56948a3e030)
+  GIT_TAG v0.1.1)  # the current stable release
 FetchContent_MakeAvailable(crocket)
 
 target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
 
-The full commit SHA pins a reproducible version. To update, replace `GIT_TAG` with a
-reviewed commit SHA or release tag. Use `GIT_TAG main` to follow the latest development
-branch instead.
+`v0.1.1` is the current stable release. To update, change `GIT_TAG` to a newer release
+from [CHANGELOG.md](CHANGELOG.md). For the bleeding edge, opt in to `GIT_TAG main`
+(the latest channel); for reproducible builds off `main`, pin a full commit SHA.
+
+### Versions and channels
+
+crocket uses [Semantic Versioning](https://semver.org/). While on 0.x, a minor bump
+(0.1 → 0.2) may break the API, and patch releases are fixes and additions only. Each
+release is in [CHANGELOG.md](CHANGELOG.md) and on
+[GitHub Releases](https://github.com/sean3z/crocket/releases).
+
+| Channel | Git ref | Docker tags (`ghcr.io/sean3z/crocket-hello`) | For |
+|---|---|---|---|
+| **stable** (default) | the latest `vX.Y.Z` tag, now `v0.1.1` | `:0.1.1`, `:0.1`, `:stable` | Everyone |
+| latest (opt-in) | `main`, every merge | `:latest`, `:sha-<short>` | Trying what's next |
+| experimental (opt-in) | `vX.Y.Z-rc.N` pre-release tags | `:X.Y.Z-rc.N`, `:experimental` | Testing risky changes |
+
+The version is in `<crocket/version.hpp>` (included by `<crocket/crocket.hpp>`):
+`crocket::version::string` (`"0.1.1"`), `major`/`minor`/`patch`, `commit` (the short git
+commit at configure time, or `-DCROCKET_GIT_COMMIT=...`) and `compiler`.
 
 For a vendored copy or a git submodule, use
 `FetchContent_Declare(crocket SOURCE_DIR path/to/crocket)` instead.
@@ -814,6 +831,22 @@ Built-in fairings:
   - `crocket_workers`, `crocket_workers_busy` and `crocket_workers_stuck` (still running
     after their request's deadline), and `crocket_requests_abandoned_total`. See
     [Deadlines and cancellation](#deadlines-and-cancellation).
+  - `crocket_build_info{version,commit,compiler,hostname} 1`, which says what is running where.
+  - **Constant labels** on every series from `CROCKET_METRICS_LABELS`, a comma-separated
+    `name=value` list (or pass them: `Metrics{"/metrics", {{"pod", "web-1"}}}`). In
+    Kubernetes, fill it from the Downward API:
+    ```yaml
+    env:
+      - name: POD_NAME
+        valueFrom: {fieldRef: {fieldPath: metadata.name}}
+      - name: CROCKET_METRICS_LABELS
+        value: pod=$(POD_NAME)
+    ```
+  - **Scrape each pod directly**, never through a load balancer or Service: each scrape
+    would land on a different instance, so counters jump between them and `rate()` sees
+    fake resets. Prometheus' Kubernetes service discovery (or a ServiceMonitor) scrapes pod
+    IPs and adds `instance`/`pod` itself. Keep `/metrics` off the public listener, or
+    behind auth.
 - **`OpenApi`:** the OpenAPI document at `GET /openapi.json`, and with `.docs`, a page to
   try the API. See [OpenAPI](#openapi).
 

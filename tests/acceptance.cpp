@@ -11,6 +11,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <ranges>
 #include <thread>
 #include <algorithm>
 #include <functional>
@@ -610,6 +611,58 @@ int main() {
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/hello/{name}/{age}",kind="path"})"));
     CHECK(contains(m.body, "crocket_http_requests_in_flight 1"));  // the scrape itself
     CHECK(!contains(m.body, "Rocketeer"));
+    // crocket_build_info: the configured version, commit and compiler, and this host.
+    CHECK(contains(m.body, "# TYPE crocket_build_info gauge"));
+    CHECK(contains(m.body, std::format(R"(crocket_build_info{{version="{}",commit="{}",compiler="{}",hostname=")",
+                                       crocket::version::string, crocket::version::commit,
+                                       crocket::version::compiler)));
+    CHECK(contains(m.body, "\"} 1\n"));
+    CHECK_EQ(crocket::version::string, std::string_view(CROCKET_VERSION_STRING));
+    CHECK(!crocket::version::commit.empty());
+  }
+
+  section("metrics constant labels");
+  {
+    auto parsed = Metrics::parse_labels(" pod=web-1 , zone=us-east-1a,,");
+    CHECK_EQ(parsed.size(), std::size_t(2));
+    CHECK_EQ(parsed[0].first, std::string("pod"));
+    CHECK_EQ(parsed[0].second, std::string("web-1"));
+    CHECK_EQ(parsed[1].second, std::string("us-east-1a"));
+    bool threw = false;
+    try { (void)Metrics::parse_labels("pod"); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { (void)Metrics::parse_labels("bad-name=x"); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    Metrics lm{"/metrics", {{"pod", "web-1"}, {"note", "a\"b"}}};
+    Crocket lapp;
+    lapp.attach(lm).mount("/", reflect_routes<^^other>()).manage(Db{});
+    LocalClient lc(lapp);
+    (void)lc.get("/needs-db").dispatch();
+    auto body = lc.get("/metrics").dispatch().body;
+    CHECK(contains(body, R"(crocket_http_requests_in_flight{pod="web-1",note="a\"b"} )"));
+    CHECK(contains(body, R"(crocket_build_info{pod="web-1",note="a\"b",version=")"));
+    CHECK(contains(body, R"(crocket_http_requests_total{pod="web-1",note="a\"b",method="GET",route=")"));
+    CHECK(contains(body, R"(_bucket{pod="web-1",note="a\"b",method=")"));
+    // Every sample line carries them; comments do not.
+    std::size_t samples = 0, labelled = 0;
+    for (auto line : std::views::split(body, '\n')) {
+      std::string_view l(line.begin(), line.end());
+      if (l.empty() || l[0] == '#') continue;
+      ++samples;
+      if (contains(std::string(l), R"({pod="web-1",note="a\"b")")) ++labelled;
+    }
+    CHECK(samples > 10);
+    CHECK_EQ(labelled, samples);
+
+    ::setenv("CROCKET_METRICS_LABELS", "pod=from-env", 1);
+    Metrics em;
+    ::unsetenv("CROCKET_METRICS_LABELS");
+    Crocket eapp;
+    eapp.attach(em).mount("/", reflect_routes<^^other>()).manage(Db{});
+    LocalClient ec(eapp);
+    CHECK(contains(ec.get("/metrics").dispatch().body, R"(crocket_build_info{pod="from-env",version=")"));
   }
 
   section("pool: 503 db.busy after the deadline");

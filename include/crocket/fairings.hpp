@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace crocket {
@@ -96,10 +97,22 @@ class Shield {
 ///   crocket_extractor_failures_total{route,kind}
 ///   crocket_workers, crocket_workers_busy, crocket_workers_stuck (past their request's deadline)
 ///   crocket_requests_abandoned_total (the deadline passed, or the client left, before a worker took it)
+///   crocket_build_info{version,commit,compiler,hostname} 1
 /// Served at GET `path` (default /metrics) from on_request.
+///
+/// Constant labels are added to every series. By default they come from
+/// CROCKET_METRICS_LABELS, a comma-separated list such as
+/// `pod=web-7f9c,zone=a` (in Kubernetes, fill it from the Downward API).
 class Metrics {
  public:
+  using Labels = std::vector<std::pair<std::string, std::string>>;
   explicit Metrics(std::string path = "/metrics");
+  /// Explicit constant labels; CROCKET_METRICS_LABELS is not read.
+  Metrics(std::string path, Labels constant_labels);
+
+  /// Parses `name=value,name=value`. Throws std::invalid_argument on a bad name
+  /// or a missing `=`; spaces around items are ignored.
+  static Labels parse_labels(std::string_view spec);
 
   void on_ignite(Ignite& ig);
   std::optional<Response> on_request(Request& rq);
@@ -112,6 +125,7 @@ class Metrics {
   struct Store;
   std::string path_;
   std::shared_ptr<Store> store_;
+  std::string const_labels_;  // rendered: name="value",name="value"
 };
 
 /// The OpenAPI 3.1 description of the app's HTTP routes, generated from the

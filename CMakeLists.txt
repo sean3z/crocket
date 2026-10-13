@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(crocket VERSION 0.1.0 LANGUAGES C CXX)
+project(crocket VERSION 0.1.1 LANGUAGES C CXX)
 
 # Examples and tests are for working on crocket; a project that pulls crocket
 # in with FetchContent or add_subdirectory doesn't build them.
@@ -76,6 +76,33 @@ add_library(crocket STATIC
   src/grpc.cpp
   src/engine_h2o.cpp)
 add_library(crocket::crocket ALIAS crocket)
+
+# ---- version ------------------------------------------------------------------
+# <crocket/version.hpp>: the project() version, the git commit and the compiler,
+# fixed at configure time. CROCKET_GIT_COMMIT can be passed in (Docker builds
+# without .git); otherwise git is asked, else "unknown".
+if(NOT CROCKET_GIT_COMMIT)
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=7 HEAD
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    OUTPUT_VARIABLE CROCKET_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET RESULT_VARIABLE _crocket_git_rc)
+    if(NOT _crocket_git_rc EQUAL 0)
+      set(CROCKET_GIT_COMMIT "")
+    endif()
+  endif()
+  if(NOT CROCKET_GIT_COMMIT)
+    set(CROCKET_GIT_COMMIT "unknown")
+  endif()
+endif()
+string(TOLOWER "${CMAKE_CXX_COMPILER_ID}" _crocket_cc)
+if(_crocket_cc STREQUAL "gnu")
+  set(_crocket_cc "gcc")
+endif()
+set(CROCKET_COMPILER "${_crocket_cc}-${CMAKE_CXX_COMPILER_VERSION}")
+configure_file(cmake/version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/crocket/version.hpp @ONLY)
+target_include_directories(crocket PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_include_directories(crocket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Users of crocket need C++26 and reflection too, so both are PUBLIC.
 target_compile_features(crocket PUBLIC cxx_std_26)

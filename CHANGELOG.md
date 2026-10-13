@@ -4,7 +4,7 @@ All notable changes to crocket. The format follows [Keep a Changelog](https://ke
 and crocket uses [Semantic Versioning](https://semver.org/). While on 0.x, a minor
 bump (0.1 → 0.2) may break the API; patch releases are fixes and additions only.
 
-Releases are cut by pushing a `vX.Y.Z` tag; the release workflow copies the matching
+Releases are cut by pushing a `X.Y.Z` tag; the release workflow copies the matching
 section below into the GitHub Release.
 
 ## [Unreleased]
@@ -18,7 +18,7 @@ The first tagged release: the stable channel starts here.
   `<crocket/version.hpp>` (`crocket::version::string`, `commit`, `compiler`), and a
   release workflow that publishes `ghcr.io/sean3z/crocket-hello` as `:X.Y.Z`, `:X.Y` and
   `:stable` for release tags, `:latest` and `:sha-<short>` for `main`, and
-  `:experimental` for `vX.Y.Z-rc.N` pre-releases (#31).
+  `:experimental` for `X.Y.Z-rc.N` pre-releases (#31).
 - `crocket_build_info{version,commit,compiler,hostname} 1` in `Metrics` (#31).
 - Constant labels on every metrics series via `CROCKET_METRICS_LABELS`
   (for example `pod=$(POD_NAME)`), or `Metrics{path, {{"pod", ...}}}` (#31).
@@ -36,5 +36,5 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labelled with their matched route instead of
   `<unmatched>` (#30).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/sean3z/crocket/releases/tag/v0.1.1
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/sean3z/crocket/releases/tag/0.1.1

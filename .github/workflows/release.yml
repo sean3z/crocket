@@ -2,13 +2,13 @@ name: Release
 
 # Channels (see README "Versions and channels"):
 #   latest:       every push to main        -> :latest, :sha-<short>
-#   stable:       tag vX.Y.Z                -> :X.Y.Z, :X.Y, :stable + GitHub Release
-#   experimental: tag vX.Y.Z-rc.N           -> :X.Y.Z-rc.N, :experimental + pre-release
+#   stable:       tag X.Y.Z                 -> :X.Y.Z, :X.Y, :stable + GitHub Release
+#   experimental: tag X.Y.Z-rc.N            -> :X.Y.Z-rc.N, :experimental + pre-release
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    tags: ['v*.*.*']
+    tags: ['[0-9]+.[0-9]+.[0-9]+', '[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+']
 
 permissions:
   contents: write
@@ -34,8 +34,8 @@ jobs:
           set -euo pipefail
           img=ghcr.io/${{ github.repository_owner }}/crocket-hello
           short=${GITHUB_SHA::7}
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            v=${GITHUB_REF_NAME#v}
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            v=$GITHUB_REF_NAME
             want=$(sed -n 's/^project(crocket VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
             base=${v%%-*}
             if [[ "$base" != "$want" ]]; then
@@ -48,7 +48,7 @@ jobs:
               channel=experimental
               tags="$img:$v,$img:experimental"
             else
-              echo "::error::unsupported tag $GITHUB_REF_NAME (use vX.Y.Z or vX.Y.Z-rc.N)"; exit 1
+              echo "::error::unsupported tag $GITHUB_REF_NAME (use X.Y.Z or X.Y.Z-rc.N)"; exit 1
             fi
           else
             v=""; channel=latest
@@ -86,7 +86,7 @@ jobs:
 
   release:
     needs: [meta, image]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

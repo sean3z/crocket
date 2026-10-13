@@ -9,7 +9,7 @@ section below into the GitHub Release.
 
 ## [Unreleased]
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-10-13
 
 One `Config` for everything, configurable from the environment. Breaking: settings
 moved, so code that sets them needs the new names.
@@ -73,5 +73,6 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labelled with their matched route instead of
   `<unmatched>` (#30).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/0.1.1...HEAD
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/sean3z/crocket/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/sean3z/crocket/releases/tag/0.1.1

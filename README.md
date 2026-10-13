@@ -144,13 +144,13 @@ Add crocket to a CMake project with FetchContent:
 include(FetchContent)
 FetchContent_Declare(crocket
   GIT_REPOSITORY https://github.com/sean3z/crocket.git
-  GIT_TAG 0.1.1)  # the current stable release
+  GIT_TAG 0.2.0)  # the current stable release
 FetchContent_MakeAvailable(crocket)
 
 target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
 
-`0.1.1` is the current stable release. To update, change `GIT_TAG` to a newer release
+`0.2.0` is the current stable release. To update, change `GIT_TAG` to a newer release
 from [CHANGELOG.md](CHANGELOG.md). For the bleeding edge, opt in to `GIT_TAG main`
 (the latest channel); for reproducible builds off `main`, pin a full commit SHA.
 
@@ -163,12 +163,12 @@ release is in [CHANGELOG.md](CHANGELOG.md) and on
 
 | Channel | Git ref | Docker tags (`ghcr.io/sean3z/crocket-hello`) | For |
 |---|---|---|---|
-| **stable** (default) | the latest `X.Y.Z` tag, now `0.1.1` | `:0.1.1`, `:0.1`, `:stable` | Everyone |
+| **stable** (default) | the latest `X.Y.Z` tag, now `0.2.0` | `:0.2.0`, `:0.2`, `:stable` | Everyone |
 | latest (opt-in) | `main`, every merge | `:latest`, `:sha-<short>` | Trying what's next |
 | experimental (opt-in) | `X.Y.Z-rc.N` pre-release tags | `:X.Y.Z-rc.N`, `:experimental` | Testing risky changes |
 
 The version is in `<crocket/version.hpp>` (included by `<crocket/crocket.hpp>`):
-`crocket::version::string` (`"0.1.1"`), `major`/`minor`/`patch`, `commit` (the short git
+`crocket::version::string` (`"0.2.0"`), `major`/`minor`/`patch`, `commit` (the short git
 commit at configure time, or `-DCROCKET_GIT_COMMIT=...`) and `compiler`.
 
 For a vendored copy or a git submodule, use

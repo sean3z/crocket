@@ -512,12 +512,12 @@ std::string Metrics::render() const {
     o += "# HELP crocket_requests_abandoned_total Requests whose handler never ran: the deadline passed, or the "
          "client went away, while they waited for a worker.\n# TYPE crocket_requests_abandoned_total counter\n"
          "crocket_requests_abandoned_total " + std::to_string(st->abandoned.load()) + "\n";
-    o += "# HELP crocket_connections Open connections (LaunchOptions::max_connections).\n"
+    o += "# HELP crocket_connections Open connections (Config::limits.max_connections).\n"
          "# TYPE crocket_connections gauge\ncrocket_connections " + std::to_string(st->connections.load()) + "\n";
     o += "# HELP crocket_connections_per_ip_closed_total Connections closed on arrival: their address had "
          "max_connections_per_ip open.\n# TYPE crocket_connections_per_ip_closed_total counter\n"
          "crocket_connections_per_ip_closed_total " + std::to_string(st->connections_per_ip_closed.load()) + "\n";
-    o += "# HELP crocket_request_body_bytes Request bodies held in memory now (Config::max_body_memory).\n"
+    o += "# HELP crocket_request_body_bytes Request bodies held in memory now (Config::limits.max_body_memory).\n"
          "# TYPE crocket_request_body_bytes gauge\ncrocket_request_body_bytes " + std::to_string(st->body_bytes.load()) + "\n";
   }
   o += "# HELP crocket_extractor_failures_total Extractor failures by kind.\n"

@@ -181,7 +181,7 @@ have proved fast (adaptive placement). Fairings stay synchronous.
 
 h2o only, as the static library `libh2o-evloop`. FetchContent pins a commit, which
 `./dev h2o-update` moves to the newest h2o. The certificate and key are
-`LaunchOptions`. ALPN chooses HTTP/1.1 or HTTP/2 inside h2o, and plain-text HTTP/2
+`Config::server`. ALPN chooses HTTP/1.1 or HTTP/2 inside h2o, and plain-text HTTP/2
 (prior knowledge) is available for gRPC. Application code never branches on protocol.
 
 ## Compiler and modules

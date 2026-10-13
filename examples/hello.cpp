@@ -27,8 +27,9 @@ auto index() -> std::string { return "Try GET /hello/<name>/<age>\n"; }
 
 int main() {
   // CROCKET_PROFILE=dev: readable logs, a route banner, error details, 127.0.0.1.
+  // CROCKET_PORT, CROCKET_LISTEN and every other CROCKET_* variable apply too.
   return build(Config::from_env())
       .attach(Logger{})
       .mount("/", reflect_routes<^^api>())
-      .launch({.port = 8000});
+      .launch();  // or .launch({.listen = "8080"})
 }

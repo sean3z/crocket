@@ -150,9 +150,9 @@ void check_server() {
 void setup() {
   Config cfg;
   cfg.log.sink = [](std::string_view) {};
-  cfg.max_body_bytes = 32 << 10;
-  cfg.request_timeout = 1s;
-  cfg.drain_timeout = 2s;
+  cfg.limits.max_body_bytes = 32 << 10;
+  cfg.timeouts.request = 1s;
+  cfg.timeouts.drain = 2s;
   g_app = std::make_unique<Crocket>(cfg);
   g_app->mount("/", reflect_routes<^^api>()).mount("demo", reflect_routes<^^greeter>(), Mode::Grpc);
   g_server = std::thread([] {

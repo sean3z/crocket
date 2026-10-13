@@ -43,7 +43,7 @@ block(SCOPE_FOR VARIABLES)
   # the parts of h2o crocket never calls (HTTP/3, proxying, file serving).
   string(APPEND CMAKE_C_FLAGS " -g -w -ffunction-sections -fdata-sections")
   # h2o answers a request with more headers than this itself (400, connection
-  # closed). Above crocket's LaunchOptions::max_header_count, so crocket sends
+  # closed). Above crocket's Config::limits.max_header_count, so crocket sends
   # the 431 instead. Code including h2o.h gets the same value (below).
   string(APPEND CMAKE_C_FLAGS " -DH2O_MAX_HEADERS=128")
   FetchContent_Declare(h2o

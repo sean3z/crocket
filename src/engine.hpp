@@ -5,7 +5,7 @@
 
 namespace crocket::detail {
 /// Serve until a stop signal, drain, then return an exit status.
-int run_engine(Crocket& app, const LaunchOptions& opts);
+int run_engine(Crocket& app, const ServerConfig& opts);
 /// on_shutdown fairings (reverse attach order), then drop managed state.
 void shut_down(Crocket& app);
 }  // namespace crocket::detail

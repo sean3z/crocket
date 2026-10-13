@@ -277,9 +277,9 @@ std::unique_ptr<Crocket> g_app;
 void setup() {
   Config cfg;
   cfg.log.sink = [](std::string_view) {};
-  cfg.trusted_proxies = {"10.0.0.0/8", "fd00::/8"};
-  cfg.allowed_hosts = {"example.com", "*.example.org", "localhost"};
-  cfg.max_body_bytes = 64 << 10;
+  cfg.proxy.trusted = {"10.0.0.0/8", "fd00::/8"};
+  cfg.proxy.allowed_hosts = {"example.com", "*.example.org", "localhost"};
+  cfg.limits.max_body_bytes = 64 << 10;
   g_app = std::make_unique<Crocket>(cfg);
   g_app->manage(Authenticator{[](std::string_view token) -> std::expected<Auth, ApiError> {
     if (token == "alice") return Auth{"alice", {}};

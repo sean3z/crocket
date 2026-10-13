@@ -160,11 +160,6 @@ class Info {
 
 // ---- wiring -------------------------------------------------------------------------
 
-static std::string env(const char* name, std::string fallback = {}) {
-  const char* v = std::getenv(name);
-  return v && *v ? std::string(v) : fallback;
-}
-
 int main() {
   auto table = std::make_shared<Table>();
   DbPool pool(8, [&] { return Conn{table}; }, {.max_wait = 2s});
@@ -176,25 +171,9 @@ int main() {
     return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
   }};
 
-  Config cfg = Config::from_env();  // CROCKET_PROFILE=dev|release
-  if (cfg.profile == Profile::Release) {
-    cfg.request_timeout = 10s;
-    cfg.drain_timeout = 5s;
-  }
-  if (auto t = env("CROCKET_REQUEST_TIMEOUT"); !t.empty()) cfg.request_timeout = std::chrono::seconds(std::stoi(t));
-  if (!env("CROCKET_DEBUG_ROUTES").empty()) cfg.debug_routes = true;
-  if (auto v = env("CROCKET_MAX_BODY_MEMORY"); !v.empty()) cfg.max_body_memory = std::stoull(v);
-
-  LaunchOptions launch;
-  launch.host = env("CROCKET_HOST");  // empty: 0.0.0.0, or 127.0.0.1 in dev
-  launch.port = static_cast<std::uint16_t>(std::stoi(env("CROCKET_PORT", "8000")));
-  launch.tls_cert = env("CROCKET_TLS_CERT");
-  launch.tls_key = env("CROCKET_TLS_KEY");
-  if (auto w = env("CROCKET_WORKERS"); !w.empty()) launch.workers = unsigned(std::stoi(w));
-  if (auto l = env("CROCKET_EVENT_LOOPS"); !l.empty()) launch.event_loops = unsigned(std::stoi(l));
-  if (auto v = env("CROCKET_MAX_CONNECTIONS"); !v.empty()) launch.max_connections = unsigned(std::stoul(v));
-  if (auto v = env("CROCKET_MAX_CONNECTIONS_PER_IP"); !v.empty()) launch.max_connections_per_ip = unsigned(std::stoul(v));
-  if (auto v = env("CROCKET_HTTP2_MAX_STREAMS"); !v.empty()) launch.http2_max_streams = unsigned(std::stoul(v));
+  // Every CROCKET_* variable (port, TLS, limits, timeouts, proxies...) on top
+  // of this service's own defaults; CROCKET_PROFILE=dev for a laptop.
+  Config cfg = Config::from_env({.timeouts = {.request = 10s, .drain = 5s}});
 
   return build(cfg)
       .manage(std::move(pool))  // Pool::ready() also drives GET /readyz
@@ -206,5 +185,5 @@ int main() {
       .attach(OpenApi{{.title = "crocket-serve", .version = "0.1.0", .docs = "/docs"}})  // GET /openapi.json, /docs
       .mount("/api", reflect_routes<^^api>())
       .mount("/", reflect_routes<^^Info>())
-      .launch(launch);
+      .launch();
 }

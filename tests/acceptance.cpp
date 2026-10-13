@@ -781,7 +781,7 @@ int main() {
     CHECK_EQ(plain.body, std::string("10.0.0.5 http"));
 
     LogCapture plog;
-    Crocket proxied = make_app(plog, nullptr, Config{.trusted_proxies = {"10.0.0.0/8", "fd00::/8"}});
+    Crocket proxied = make_app(plog, nullptr, Config{.proxy = {.trusted = {"10.0.0.0/8", "fd00::/8"}}});
     LocalClient pc(proxied);
     auto who = [&](std::string_view peer, std::vector<std::pair<std::string, std::string>> headers) {
       auto call = pc.get("/whoami").remote(peer);
@@ -811,7 +811,7 @@ int main() {
     CHECK_EQ(who("10.0.0.5", {{"forwarded", "for=1.2.3.4"}}), std::string("10.0.0.5 http"));  // not the configured header
 
     Crocket rfc = make_app(plog, nullptr,
-                           Config{.trusted_proxies = {"10.0.0.5"}, .proxy_header = ProxyHeader::Forwarded});
+                           Config{.proxy = {.trusted = {"10.0.0.5"}, .header = ProxyHeader::Forwarded}});
     LocalClient rc(rfc);
     auto fwd = [&](std::string_view value) {
       return rc.get("/whoami").remote("10.0.0.5").header("forwarded", value).dispatch().body;
@@ -825,7 +825,7 @@ int main() {
     CHECK_EQ(rc.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "1.2.3.4").dispatch().body,
              std::string("10.0.0.5 http"));
 
-    Crocket bad{Config{.trusted_proxies = {"10.0.0.0/33", "lb.internal"}}};
+    Crocket bad{Config{.proxy = {.trusted = {"10.0.0.0/33", "lb.internal"}}}};
     auto ig = bad.ignite();
     CHECK(!ig && contains(ig.error().message(), R"(trusted_proxies entry "10.0.0.0/33" is not)"));
     CHECK(!ig && contains(ig.error().message(), R"(trusted_proxies entry "lb.internal" is not)"));
@@ -834,7 +834,7 @@ int main() {
   section("allowed hosts");
   {
     LogCapture hlog;
-    Crocket hosted = make_app(hlog, nullptr, Config{.allowed_hosts = {"api.example.com", "*.example.org", "[::1]"}});
+    Crocket hosted = make_app(hlog, nullptr, Config{.proxy = {.allowed_hosts = {"api.example.com", "*.example.org", "[::1]"}}});
     LocalClient hc(hosted);
     auto status = [&](std::optional<std::string_view> host) {
       auto call = hc.get("/healthz");
@@ -855,13 +855,13 @@ int main() {
     CHECK_EQ(client.get("/healthz").header("host", "anything.test").dispatch().status, 200);
     // The dev profile also answers on localhost.
     Config dev = Config::dev();
-    dev.allowed_hosts = {"api.example.com"};
+    dev.proxy.allowed_hosts = {"api.example.com"};
     Crocket dev_hosted = make_app(hlog, nullptr, dev);
     LocalClient dc(dev_hosted);
     CHECK_EQ(dc.get("/healthz").header("host", "localhost:8000").dispatch().status, 200);
     CHECK_EQ(dc.get("/healthz").header("host", "evil.com").dispatch().status, 400);
 
-    Crocket bad{Config{.allowed_hosts = {"https://api.example.com", "api.example.com:443", "*"}}};
+    Crocket bad{Config{.proxy = {.allowed_hosts = {"https://api.example.com", "api.example.com:443", "*"}}}};
     auto ig = bad.ignite();
     CHECK(!ig && contains(ig.error().message(), R"(allowed_hosts entry "https://api.example.com" is not a host name)"));
     CHECK(!ig && contains(ig.error().message(), R"(allowed_hosts entry "api.example.com:443" has a port)"));
@@ -881,7 +881,7 @@ int main() {
     CHECK_EQ(*framed.headers.get("x-frame-options"), std::string_view("SAMEORIGIN"));
 
     LogCapture slog;
-    Crocket tls_app = make_app(slog, nullptr, Config{.trusted_proxies = {"10.0.0.5"}});
+    Crocket tls_app = make_app(slog, nullptr, Config{.proxy = {.trusted = {"10.0.0.5"}}});
     LocalClient tc(tls_app);
     auto https = [&](std::string_view host) {
       return tc.get("/healthz").remote("10.0.0.5").header("x-forwarded-proto", "https").header("host", host).dispatch();
@@ -962,7 +962,7 @@ int main() {
   {
     LogCapture quiet;
     Config small{.debug_routes = true};
-    small.etag_max_bytes = 16;
+    small.limits.etag_max_bytes = 16;
     Crocket capped = make_app(quiet, nullptr, small);
     LocalClient cc(capped);
     auto big = cc.get("/hello/Ada/36").dispatch();  // 29 bytes
@@ -971,7 +971,7 @@ int main() {
     auto small_body = cc.get("/scale/1").dispatch();  // "2"
     CHECK(small_body.headers.contains("etag"));
     Config off{.debug_routes = true};
-    off.etag_max_bytes = 0;
+    off.limits.etag_max_bytes = 0;
     Crocket none = make_app(quiet, nullptr, off);
     LocalClient nc(none);
     CHECK(!nc.get("/scale/1").dispatch().headers.contains("etag"));
@@ -1232,8 +1232,8 @@ int main() {
 
     auto d = Config::dev();
     CHECK(d.debug_routes);
-    CHECK_EQ(d.request_timeout, std::chrono::milliseconds(std::chrono::hours(1)));
-    CHECK_EQ(d.drain_timeout, std::chrono::milliseconds(1000));
+    CHECK_EQ(d.timeouts.request, std::chrono::milliseconds(std::chrono::hours(1)));
+    CHECK_EQ(d.timeouts.drain, std::chrono::milliseconds(1000));
   }
 
   section("dev profile: CROCKET_PROFILE");
@@ -1253,6 +1253,165 @@ int main() {
     }
     CHECK_EQ(err, std::string("CROCKET_PROFILE=prod: unknown profile (use dev or release)"));
     ::unsetenv("CROCKET_PROFILE");
+  }
+
+  section("Config::from_env: every CROCKET_* variable, strictly parsed");
+  {
+    auto env_error = [](const char* name, const char* value) {
+      ::setenv(name, value, 1);
+      std::string err;
+      try {
+        (void)Config::from_env();
+      } catch (const std::invalid_argument& e) {
+        err = e.what();
+      }
+      ::unsetenv(name);
+      return err;
+    };
+    const char* vars[] = {"CROCKET_PROFILE", "CROCKET_HOST", "CROCKET_PORT", "CROCKET_LISTEN", "CROCKET_TLS_CERT",
+                          "CROCKET_TLS_KEY", "CROCKET_HTTP2", "CROCKET_H2_PRIOR_KNOWLEDGE", "CROCKET_WORKERS",
+                          "CROCKET_EVENT_LOOPS", "CROCKET_MAX_BODY_BYTES", "CROCKET_MAX_BODY_MEMORY",
+                          "CROCKET_MAX_IN_FLIGHT", "CROCKET_MAX_HEADER_BYTES", "CROCKET_MAX_HEADER_COUNT",
+                          "CROCKET_MAX_CONNECTIONS", "CROCKET_MAX_CONNECTIONS_PER_IP", "CROCKET_HTTP2_MAX_STREAMS",
+                          "CROCKET_ETAG_MAX_BYTES", "CROCKET_REQUEST_TIMEOUT", "CROCKET_DRAIN_TIMEOUT",
+                          "CROCKET_TRUSTED_PROXIES", "CROCKET_PROXY_HEADER", "CROCKET_ALLOWED_HOSTS",
+                          "CROCKET_DEBUG_ROUTES", "CROCKET_ADAPTIVE_PLACEMENT", "CROCKET_LOG_LEVEL"};
+    for (auto* v : vars) ::unsetenv(v);
+
+    ::setenv("CROCKET_HOST", "10.1.2.3", 1);
+    ::setenv("CROCKET_PORT", "9090", 1);
+    ::setenv("CROCKET_TLS_CERT", "/certs/tls.crt", 1);
+    ::setenv("CROCKET_TLS_KEY", "/certs/tls.key", 1);
+    ::setenv("CROCKET_HTTP2", "off", 1);
+    ::setenv("CROCKET_H2_PRIOR_KNOWLEDGE", "true", 1);
+    ::setenv("CROCKET_WORKERS", "16", 1);
+    ::setenv("CROCKET_EVENT_LOOPS", "4", 1);
+    ::setenv("CROCKET_MAX_BODY_BYTES", "2M", 1);
+    ::setenv("CROCKET_MAX_BODY_MEMORY", "512MiB", 1);
+    ::setenv("CROCKET_MAX_IN_FLIGHT", "4096", 1);
+    ::setenv("CROCKET_MAX_HEADER_BYTES", "16K", 1);
+    ::setenv("CROCKET_MAX_HEADER_COUNT", "64", 1);
+    ::setenv("CROCKET_MAX_CONNECTIONS", "20000", 1);
+    ::setenv("CROCKET_MAX_CONNECTIONS_PER_IP", "50", 1);
+    ::setenv("CROCKET_HTTP2_MAX_STREAMS", "256", 1);
+    ::setenv("CROCKET_ETAG_MAX_BYTES", "0", 1);
+    ::setenv("CROCKET_REQUEST_TIMEOUT", "15", 1);
+    ::setenv("CROCKET_DRAIN_TIMEOUT", "2500ms", 1);
+    ::setenv("CROCKET_TRUSTED_PROXIES", "10.0.0.0/8, fd00::/8,", 1);
+    ::setenv("CROCKET_PROXY_HEADER", "Forwarded", 1);
+    ::setenv("CROCKET_ALLOWED_HOSTS", "api.example.com,*.example.org", 1);
+    ::setenv("CROCKET_DEBUG_ROUTES", "1", 1);
+    ::setenv("CROCKET_ADAPTIVE_PLACEMENT", "no", 1);
+    ::setenv("CROCKET_LOG_LEVEL", "WARN", 1);
+    Config c = Config::from_env();
+    CHECK_EQ(c.server.host, std::string("10.1.2.3"));
+    CHECK_EQ(c.server.port, 9090);
+    CHECK_EQ(c.server.tls_cert, std::string("/certs/tls.crt"));
+    CHECK_EQ(c.server.tls_key, std::string("/certs/tls.key"));
+    CHECK(!c.server.http2);
+    CHECK(c.server.h2_prior_knowledge);
+    CHECK_EQ(c.server.workers, 16u);
+    CHECK_EQ(c.server.event_loops, 4u);
+    CHECK_EQ(c.limits.max_body_bytes, std::size_t(2) << 20);
+    CHECK_EQ(c.limits.max_body_memory, std::size_t(512) << 20);
+    CHECK_EQ(c.limits.max_in_flight, std::size_t(4096));
+    CHECK_EQ(c.limits.max_header_bytes, std::size_t(16) << 10);
+    CHECK_EQ(c.limits.max_header_count, std::size_t(64));
+    CHECK_EQ(c.limits.max_connections, 20000u);
+    CHECK_EQ(c.limits.max_connections_per_ip, 50u);
+    CHECK_EQ(c.limits.http2_max_streams, 256u);
+    CHECK_EQ(c.limits.etag_max_bytes, std::size_t(0));
+    CHECK_EQ(c.timeouts.request, std::chrono::milliseconds(15'000));
+    CHECK_EQ(c.timeouts.drain, std::chrono::milliseconds(2'500));
+    CHECK_EQ(c.proxy.trusted.size(), std::size_t(2));
+    CHECK_EQ(c.proxy.trusted.at(1), std::string("fd00::/8"));
+    CHECK(c.proxy.header == ProxyHeader::Forwarded);
+    CHECK_EQ(c.proxy.allowed_hosts.size(), std::size_t(2));
+    CHECK(c.debug_routes);
+    CHECK(!c.adaptive_placement);
+    CHECK(c.log.level == log::Level::warn);
+    for (auto* v : vars) ::unsetenv(v);
+
+    // Precedence: defaults < base < profile < env < code.
+    CHECK_EQ(Config::from_env().timeouts.request, std::chrono::milliseconds(30'000));
+    CHECK_EQ(Config::from_env({.timeouts = {.request = std::chrono::seconds(10)}}).timeouts.request,
+             std::chrono::milliseconds(10'000));
+    ::setenv("CROCKET_PROFILE", "dev", 1);
+    CHECK_EQ(Config::from_env({.timeouts = {.request = std::chrono::seconds(10)}}).timeouts.request,
+             std::chrono::milliseconds(std::chrono::hours(1)));
+    ::setenv("CROCKET_REQUEST_TIMEOUT", "2m", 1);
+    Config layered = Config::from_env();
+    CHECK(layered.profile == Profile::Dev);
+    CHECK(layered.debug_routes);  // from the profile
+    CHECK_EQ(layered.timeouts.request, std::chrono::milliseconds(120'000));  // env beats profile
+    layered.timeouts.request = std::chrono::seconds(5);  // code beats env
+    CHECK_EQ(Crocket{layered}.config().timeouts.request, std::chrono::milliseconds(5'000));
+    ::setenv("CROCKET_PORT", "7000", 1);
+    CHECK_EQ(Config::from_env({.server = {.port = 50051}}).server.port, 7000);
+    ::unsetenv("CROCKET_PORT");
+    CHECK_EQ(Config::from_env({.server = {.port = 50051}}).server.port, 50051);
+    ::unsetenv("CROCKET_PROFILE");
+    ::unsetenv("CROCKET_REQUEST_TIMEOUT");
+    ::setenv("CROCKET_DEBUG_ROUTES", "0", 1);
+    CHECK(!Config::from_env().debug_routes);
+    ::unsetenv("CROCKET_DEBUG_ROUTES");
+    ::setenv("CROCKET_PORT", "", 1);  // empty is unset
+    CHECK_EQ(Config::from_env().server.port, 8000);
+    ::unsetenv("CROCKET_PORT");
+
+    CHECK_EQ(env_error("CROCKET_PORT", "tcp://10.43.0.12:8000"),
+             std::string("CROCKET_PORT=tcp://10.43.0.12:8000: expected a whole number from 0 to 65535"));
+    CHECK_EQ(env_error("CROCKET_PORT", "70000"), std::string("CROCKET_PORT=70000: expected a whole number from 0 to 65535"));
+    CHECK_EQ(env_error("CROCKET_PORT", "80x"), std::string("CROCKET_PORT=80x: expected a whole number from 0 to 65535"));
+    CHECK_EQ(env_error("CROCKET_PORT", "-1"), std::string("CROCKET_PORT=-1: expected a whole number from 0 to 65535"));
+    CHECK(contains(env_error("CROCKET_WORKERS", "four"), "CROCKET_WORKERS=four: expected a whole number"));
+    CHECK(contains(env_error("CROCKET_MAX_CONNECTIONS", "0"), "CROCKET_MAX_CONNECTIONS=0: expected a whole number from 1"));
+    CHECK(contains(env_error("CROCKET_MAX_BODY_BYTES", "1T"), "CROCKET_MAX_BODY_BYTES=1T: expected a size in bytes"));
+    CHECK(contains(env_error("CROCKET_REQUEST_TIMEOUT", "soon"), "CROCKET_REQUEST_TIMEOUT=soon: expected a duration"));
+    CHECK(contains(env_error("CROCKET_REQUEST_TIMEOUT", "1.5s"), "CROCKET_REQUEST_TIMEOUT=1.5s: expected a duration"));
+    CHECK(contains(env_error("CROCKET_DEBUG_ROUTES", "maybe"), "CROCKET_DEBUG_ROUTES=maybe: expected true or false"));
+    CHECK(contains(env_error("CROCKET_PROXY_HEADER", "x-real-ip"), "expected x-forwarded-for or forwarded"));
+    CHECK(contains(env_error("CROCKET_LOG_LEVEL", "trace"), "expected debug, info, warn or error"));
+    CHECK(contains(env_error("CROCKET_LISTEN", "http://0.0.0.0:80"), "CROCKET_LISTEN=http://0.0.0.0:80: expected host:port"));
+    CHECK(contains(env_error("CROCKET_LISTEN", "::1:80"), "CROCKET_LISTEN=::1:80: expected host:port"));
+  }
+
+  section("launch({...}): listen and server overrides");
+  {
+    using detail::resolve_server;
+    Config base;
+    CHECK_EQ(resolve_server(base, {}).port, 8000);
+    CHECK(resolve_server(base, {}).host.empty());
+    CHECK_EQ(resolve_server(base, {.listen = "8080"}).port, 8080);
+    CHECK_EQ(resolve_server(base, {.listen = ":8081"}).port, 8081);
+    auto s = resolve_server(base, {.listen = "127.0.0.1:9000"});
+    CHECK_EQ(s.host, std::string("127.0.0.1"));
+    CHECK_EQ(s.port, 9000);
+    s = resolve_server(base, {.listen = "[::1]:9001"});
+    CHECK_EQ(s.host, std::string("::1"));
+    CHECK_EQ(s.port, 9001);
+    base.server.listen = "0.0.0.0:7000";
+    base.server.workers = 3;
+    s = resolve_server(base, {});
+    CHECK_EQ(s.host, std::string("0.0.0.0"));
+    CHECK_EQ(s.port, 7000);
+    s = resolve_server(base, {.port = 7001, .workers = 8, .h2_prior_knowledge = true});
+    CHECK_EQ(s.host, std::string("0.0.0.0"));  // kept from the Config
+    CHECK_EQ(s.port, 7001);
+    CHECK_EQ(s.workers, 8u);
+    CHECK(s.h2_prior_knowledge);
+    CHECK(s.http2);  // not overridden
+    CHECK_EQ(resolve_server(base, {}).workers, 3u);
+    std::string err;
+    try {
+      (void)resolve_server(Config{}, {.listen = "tcp://0.0.0.0:80"});
+    } catch (const std::invalid_argument& e) {
+      err = e.what();
+    }
+    CHECK_EQ(err, std::string("listen \"tcp://0.0.0.0:80\": expected host:port or a port, not a URL"));
+    // A bad listen fails launch with a message instead of serving.
+    Crocket bad{Config{}};
+    CHECK_EQ(bad.launch({.listen = "eighty"}), 1);
   }
 
   std::fprintf(stderr, "\n%d checks, %d failures\n", g_checks, g_failures);

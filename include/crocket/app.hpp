@@ -34,59 +34,32 @@ enum class ProxyHeader : std::uint8_t {
   Forwarded,      // RFC 7239 Forwarded
 };
 
-/// Framework behaviour that is not about the socket.
-struct Config {
-  std::size_t max_body_bytes = 1 << 20;               // 413 body.too_large
-  std::size_t max_in_flight = 1024;                   // 503 server.busy
+/// Where and how the server listens. TLS is enabled when both cert and key are set.
+struct ServerConfig {
+  /// "host:port", ":port", "port" or "[v6]:port". When set it replaces host and port.
+  std::string listen = {};
+  std::string host = {};  // empty: 0.0.0.0, or 127.0.0.1 in the dev profile
+  std::uint16_t port = 8000;
+  unsigned workers = 0;      // handler threads; 0 = hardware concurrency
+  unsigned event_loops = 0;  // network I/O threads; 0 = one per physical core
+  std::string tls_cert = {};
+  std::string tls_key = {};
+  bool http2 = true;  // offer h2 via ALPN when TLS is on
+  /// Without TLS, also accept HTTP/2 with prior knowledge (and Upgrade: h2c), as
+  /// gRPC clients use on an insecure channel. HTTP/1.1 keeps working on the port.
+  bool h2_prior_knowledge = false;
+};
+
+/// Size and concurrency limits.
+struct LimitsConfig {
+  std::size_t max_body_bytes = 1 << 20;  // 413 body.too_large
   /// Request bodies held in memory at once, every request together: past it,
   /// 503 server.busy. With max_body_bytes, it bounds what bodies can take
   /// however many clients send them.
   std::size_t max_body_memory = std::size_t(256) << 20;
-  /// A 200 to GET or HEAD without an ETag gets one, a hash of the body, when
-  /// the body is at most this long (hashing costs about a microsecond per 10
-  /// KiB). 0: never. Set an ETag yourself for larger bodies.
-  std::size_t etag_max_bytes = std::size_t(1) << 20;
-  std::chrono::milliseconds request_timeout{30'000};  // 504 deadline.exceeded
-  std::chrono::milliseconds drain_timeout{10'000};    // graceful shutdown budget
-  bool debug_routes = false;                          // expose GET /__routes
-  Profile profile = Profile::Release;
-
-  /// Proxies in front of the server, as addresses or CIDR ranges ("10.0.0.0/8",
-  /// "fd00::/8"). Requests from them have Request::remote_addr and scheme taken
-  /// from `proxy_header`; that header is ignored from everyone else.
-  std::vector<std::string> trusted_proxies = {};
-  ProxyHeader proxy_header = ProxyHeader::XForwardedFor;
-  /// Host names this server answers to ("api.example.com", "*.example.com").
-  /// Any other Host is 400 host.invalid. Empty allows every host; the dev
-  /// profile also allows localhost.
-  std::vector<std::string> allowed_hosts = {};
-  json::ReadOptions json = {};                        // limits for Json<T> bodies
-  /// Run a plain-function route on the event loops once it has proved fast
-  /// (1,000 runs in a row under 100 us), and back on workers when it turns out
-  /// to block there (one run over 50 ms, or 8 over 1 ms within a second). Off:
-  /// plain functions always run on workers.
-  bool adaptive_placement = true;
-  log::Options log = {};                              // level, sampling, redaction, sink
-
-  /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
-  /// breakpoint), a one-second drain, and listening on 127.0.0.1.
-  static Config dev();
-  /// dev() when CROCKET_PROFILE=dev; the defaults when it is unset or "release".
-  /// Throws std::invalid_argument for any other value.
-  static Config from_env();
-};
-
-/// Socket, TLS and threading. TLS is enabled when both cert and key are set.
-struct LaunchOptions {
-  std::string host = {};  // empty: 0.0.0.0, or 127.0.0.1 in the dev profile
-  std::uint16_t port = 8000;
-  std::string tls_cert = {};
-  std::string tls_key = {};
-  unsigned workers = 0;                  // handler threads; 0 = hardware concurrency
-  unsigned event_loops = 0;              // network I/O threads; 0 = one per physical core
-  std::size_t max_header_bytes = 8192;   // names + values; 431 headers.too_large
-  std::size_t max_header_count = 100;    // 431 headers.too_large
-  bool http2 = true;                     // offer h2 via ALPN when TLS is on
+  std::size_t max_in_flight = 1024;     // 503 server.busy
+  std::size_t max_header_bytes = 8192;  // names + values; 431 headers.too_large
+  std::size_t max_header_count = 100;   // 431 headers.too_large
   /// Open connections, all event loops together. Past it, new connections wait
   /// in the kernel's accept queue until one closes, as in h2o (whose default
   /// this is); they are not refused.
@@ -97,10 +70,81 @@ struct LaunchOptions {
   unsigned max_connections_per_ip = 0;
   /// Concurrent requests (streams) on one HTTP/2 connection (h2o's default).
   unsigned http2_max_streams = 100;
-  /// Without TLS, also accept HTTP/2 with prior knowledge (and Upgrade: h2c), as
-  /// gRPC clients use on an insecure channel. HTTP/1.1 keeps working on the port.
-  bool h2_prior_knowledge = false;
+  /// A 200 to GET or HEAD without an ETag gets one, a hash of the body, when
+  /// the body is at most this long (hashing costs about a microsecond per 10
+  /// KiB). 0: never. Set an ETag yourself for larger bodies.
+  std::size_t etag_max_bytes = std::size_t(1) << 20;
 };
+
+struct TimeoutsConfig {
+  std::chrono::milliseconds request{30'000};  // 504 deadline.exceeded
+  std::chrono::milliseconds drain{10'000};    // graceful shutdown budget
+};
+
+/// Who is in front of the server, and which host names it answers to.
+struct ProxyConfig {
+  /// Proxies in front of the server, as addresses or CIDR ranges ("10.0.0.0/8",
+  /// "fd00::/8"). Requests from them have Request::remote_addr and scheme taken
+  /// from `header`; that header is ignored from everyone else.
+  std::vector<std::string> trusted = {};
+  ProxyHeader header = ProxyHeader::XForwardedFor;
+  /// Host names this server answers to ("api.example.com", "*.example.com").
+  /// Any other Host is 400 host.invalid. Empty allows every host; the dev
+  /// profile also allows localhost.
+  std::vector<std::string> allowed_hosts = {};
+};
+
+/// Everything crocket can be told, in one place. Precedence, lowest first:
+/// these defaults (or from_env's base), the profile (dev()), the environment (from_env()), then
+/// whatever the program sets on the result, then launch({...}).
+struct Config {
+  Profile profile = Profile::Release;
+  ServerConfig server = {};
+  LimitsConfig limits = {};
+  TimeoutsConfig timeouts = {};
+  ProxyConfig proxy = {};
+  bool debug_routes = false;  // expose GET /__routes
+  json::ReadOptions json = {};  // limits for Json<T> bodies
+  /// Run a plain-function route on the event loops once it has proved fast
+  /// (1,000 runs in a row under 100 us), and back on workers when it turns out
+  /// to block there (one run over 50 ms, or 8 over 1 ms within a second). Off:
+  /// plain functions always run on workers.
+  bool adaptive_placement = true;
+  log::Options log = {};  // level, sampling, redaction, sink
+
+  /// Dev defaults: GET /__routes, a one-hour deadline (room for a debugger
+  /// breakpoint), a one-second drain, debug logs and listening on 127.0.0.1.
+  static Config dev();
+  /// The profile from CROCKET_PROFILE (dev or release), then every other
+  /// CROCKET_* variable on top (see the README's table). Throws
+  /// std::invalid_argument naming the variable when a value does not parse.
+  /// `base` replaces the built-in defaults, for a program whose own defaults
+  /// differ (a gRPC server on 50051) but should still yield to the environment.
+  static Config from_env();
+  static Config from_env(Config base);
+};
+
+/// Server settings for launch({...}), on top of Config::server. Unset fields
+/// keep the Config's value: `.launch({.listen = "8080"})`.
+struct ServerOverrides {
+  std::string listen = {};  // "host:port", ":port" or "port"
+  std::optional<std::string> host = {};
+  std::optional<std::uint16_t> port = {};
+  std::optional<unsigned> workers = {};
+  std::optional<unsigned> event_loops = {};
+  std::optional<std::string> tls_cert = {};
+  std::optional<std::string> tls_key = {};
+  std::optional<bool> http2 = {};
+  std::optional<bool> h2_prior_knowledge = {};
+};
+
+namespace detail {
+/// "8080", ":8080", "0.0.0.0:8080", "[::1]:8080" into host and port. Throws
+/// std::invalid_argument for anything else.
+void parse_listen(std::string_view listen, std::string& host, std::uint16_t& port);
+/// cfg.server with the overrides applied and `listen` resolved.
+ServerConfig resolve_server(const Config& cfg, const ServerOverrides& o);
+}
 
 /// What a mount serves. Http mounts take a path prefix ("/api"); Grpc mounts
 /// take a protobuf package ("helloworld", or "" for none).
@@ -288,7 +332,7 @@ struct Stats {
   std::atomic<std::int64_t> body_bytes{0};              // request bodies held now (max_body_memory)
 };
 
-/// An address range from Config::trusted_proxies (IPv4 as IPv4-mapped IPv6).
+/// An address range from ProxyConfig::trusted (IPv4 as IPv4-mapped IPv6).
 struct IpRange {
   std::array<std::uint8_t, 16> addr{};
   int prefix = 0;
@@ -384,7 +428,7 @@ class Crocket {
 
   /// Ignite, serve until SIGINT/SIGTERM, drain, shut down. Returns an exit
   /// status (non-zero when ignite or launch fails).
-  int launch(LaunchOptions opts);
+  int launch(ServerOverrides overrides = {});
 
   /// The full request pipeline: request id, fairings, routing, extractors,
   /// handler, responder, error mapping. `done` gets the response exactly once:

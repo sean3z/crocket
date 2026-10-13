@@ -47,7 +47,7 @@ To build offline, set `FETCHCONTENT_SOURCE_DIR_H2O` to an h2o checkout.
 
 ## Threading model
 
-Network I/O runs on `LaunchOptions::event_loops` event-loop threads. The default, 0,
+Network I/O runs on `Config::server.event_loops` event-loop threads. The default, 0,
 means one per physical core this process may use: distinct (package, core) pairs from
 `/sys/devices/system/cpu/cpuN/topology` over the CPUs in its affinity mask, or every
 logical CPU when the topology can't be read (`src/cpus.cpp`). Hyperthread siblings would
@@ -61,7 +61,7 @@ connections, the engine first binds an ordinary socket there. If anyone holds th
 that bind fails with "address already in use", as it does with a single loop. Only the `h2o_globalconf_t` (read-only
 once serving) and the TLS context are shared.
 
-Handlers run on one worker pool of `LaunchOptions::workers` threads (0 means
+Handlers run on one worker pool of `Config::server.workers` threads (0 means
 `max(4, hardware_concurrency)`), shared by every loop. Handlers may block, for example on
 `Pool::checkout`, without stalling I/O for other connections. Loops and workers
 communicate through two queues:
@@ -80,7 +80,7 @@ disconnected or the deadline already produced a 504.
 only it takes. Shutdown is in three phases:
 
 1. Every loop stops accepting, sends GOAWAY, and drains its requests until
-   `drain_timeout`. Then it tells what is left to stop.
+   `timeouts.drain`. Then it tells what is left to stop.
 2. `launch()`'s thread waits for the workers and for suspended handlers, then stops the
    workers. Meanwhile the loops keep delivering completions.
 3. Each loop closes its connections and tears itself down.
@@ -145,7 +145,7 @@ Request construction:
 - **`protocol`:** `"h2"` for HTTP/2 requests, otherwise `"http/1.1"`.
 - **`tls`, `peer_addr`:** whether the listener has TLS, and the peer's numeric address.
   `Crocket::prepare` derives `remote_addr` and `scheme` from them, through
-  `Config::trusted_proxies` when the peer is one.
+  `Config::proxy.trusted` when the peer is one.
 
 ### Request bodies
 
@@ -198,7 +198,7 @@ HTTP/1.1 uploads are decoded by h2o and accepted.
 | `Content-Length` over `max_body_bytes`, or a body that grows past it | 413 `body.too_large` |
 | `max_in_flight` requests already dispatched | 503 `server.busy` |
 | A piece of a body that would take the bodies held by every request past `max_body_memory` | 503 `server.busy` |
-| Deadline (`request_timeout`) reached | 504 `deadline.exceeded` |
+| Deadline (`timeouts.request`) reached | 504 `deadline.exceeded` |
 
 All of these go through `Crocket::reject`, so they get a request id, a JSON error body, a
 completion log line and metrics like any other response. The handler never runs.
@@ -269,7 +269,7 @@ On SIGINT or SIGTERM:
 2. Close the listen socket. New connections are refused; existing ones continue. Ask h2o
    to shut down its connections (`h2o_context_request_shutdown`): h2 connections get
    GOAWAY and idle h1 connections close.
-3. Run the loop until no transaction is open or `drain_timeout` passes.
+3. Run the loop until no transaction is open or `timeouts.drain` passes.
 4. Request stop on anything still open, discard queued jobs that never started, and give
    running handlers 1 s to finish. If a handler is still running, log it and
    `std::quick_exit(1)`. Destroying managed state under a running handler would be

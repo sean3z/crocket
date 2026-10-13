@@ -154,7 +154,7 @@ class Loop;
 /// its queues, and the counts the drain waits on.
 class Engine final : public Executor {
  public:
-  Engine(Crocket& app, const LaunchOptions& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
+  Engine(Crocket& app, const ServerConfig& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
 
   int run();
 
@@ -206,7 +206,7 @@ class Engine final : public Executor {
   }
 
   Crocket& app_;
-  const LaunchOptions& opts_;
+  const ServerConfig& opts_;
   const Config& cfg_;
 
   h2o_globalconf_t config_{};
@@ -329,7 +329,7 @@ class Loop final : public Executor {
 
   Engine& e_;
   Crocket& app_;
-  const LaunchOptions& opts_;
+  const ServerConfig& opts_;
   const Config& cfg_;
 
   h2o_context_t ctx_{};
@@ -416,7 +416,7 @@ int Loop::on_req(h2o_req_t* req) {
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(s->meta.deadline.remaining()).count();
   h2o_timer_link(ctx_.loop, std::uint64_t(std::max<std::int64_t>(1, ms)), &s->deadline.timer);
 
-  if (header_bytes > opts_.max_header_bytes || header_count > opts_.max_header_count) {
+  if (header_bytes > cfg_.limits.max_header_bytes || header_count > cfg_.limits.max_header_count) {
     reject(s, {431, "headers.too_large", "request headers too large", {}});
     return 0;
   }
@@ -424,7 +424,7 @@ int Loop::on_req(h2o_req_t* req) {
     reject(s, {400, "http.invalid", "invalid request path", {}});
     return 0;
   }
-  if (req->content_length != SIZE_MAX && req->content_length > cfg_.max_body_bytes) {
+  if (req->content_length != SIZE_MAX && req->content_length > cfg_.limits.max_body_bytes) {
     reject(s, {413, "body.too_large", "request body too large", {}});
     return 0;
   }
@@ -442,13 +442,13 @@ int Loop::on_req(h2o_req_t* req) {
 
 /// Appends a piece of the body, or answers 413 when it goes past the limit.
 bool Loop::take_body(Session* s, h2o_iovec_t chunk) {
-  if (s->body.size() + chunk.len > cfg_.max_body_bytes) {
+  if (s->body.size() + chunk.len > cfg_.limits.max_body_bytes) {
     reject(s, {413, "body.too_large", "request body too large", {}});
     return false;
   }
   if (chunk.len) {
     auto& held = app_.core().stats.body_bytes;
-    if (held.fetch_add(std::int64_t(chunk.len)) + std::int64_t(chunk.len) > std::int64_t(cfg_.max_body_memory)) {
+    if (held.fetch_add(std::int64_t(chunk.len)) + std::int64_t(chunk.len) > std::int64_t(cfg_.limits.max_body_memory)) {
       held.fetch_sub(std::int64_t(chunk.len));
       reject(s, {503, "server.busy", "too many request bodies in memory; try again shortly", {}});
       return false;
@@ -492,7 +492,7 @@ void Loop::on_kick(Session* s) {
 }
 
 void Loop::dispatch(Session* s) {
-  if (e_.outstanding_.load() >= cfg_.max_in_flight) {
+  if (e_.outstanding_.load() >= cfg_.limits.max_in_flight) {
     reject(s, {503, "server.busy", "server is at capacity", {}});
     return;
   }
@@ -674,7 +674,7 @@ void Loop::on_accept(h2o_socket_t* listener, const char* err) {
       e_.connection_closed();
       return;
     }
-    if (opts_.max_connections_per_ip) {
+    if (cfg_.limits.max_connections_per_ip) {
       auto ip = peer_key(sock);
       if (!e_.admit_ip(ip)) {
         app_.core().stats.connections_per_ip_closed.fetch_add(1, std::memory_order_relaxed);
@@ -697,7 +697,7 @@ void Loop::pause_accepting() {
   h2o_socket_read_stop(listener_);
   e_.paused_loops_.fetch_add(1);
   // A connection may have closed between the count and the pause: look again.
-  if (app_.core().stats.connections.load() < std::int64_t(opts_.max_connections)) resume_accepting();
+  if (app_.core().stats.connections.load() < std::int64_t(cfg_.limits.max_connections)) resume_accepting();
 }
 
 void Loop::resume_accepting() {
@@ -708,7 +708,7 @@ void Loop::resume_accepting() {
 
 bool Engine::admit_connection() {
   auto& n = app_.core().stats.connections;
-  if (n.fetch_add(1) >= std::int64_t(opts_.max_connections)) {
+  if (n.fetch_add(1) >= std::int64_t(cfg_.limits.max_connections)) {
     n.fetch_sub(1);
     return false;
   }
@@ -725,7 +725,7 @@ void Engine::connection_closed() {
 bool Engine::admit_ip(const std::string& ip) {
   std::lock_guard lk(ip_m_);
   auto& n = per_ip_[ip];
-  if (n >= opts_.max_connections_per_ip) {
+  if (n >= cfg_.limits.max_connections_per_ip) {
     if (n == 0) per_ip_.erase(ip);
     return false;
   }
@@ -939,7 +939,7 @@ void Loop::serve() {
   h2o_socket_close(listener_);  // new connections are refused from here on
   listener_ = nullptr;
   h2o_context_request_shutdown(&ctx_);  // GOAWAY on h2; idle h1 connections close
-  auto drain_until = Clock::now() + cfg_.drain_timeout;
+  auto drain_until = Clock::now() + cfg_.timeouts.drain;
   while ((!live_.empty() || e_.outstanding_.load() > 0) && Clock::now() < drain_until) h2o_evloop_run(ctx_.loop, 50);
   drained_ = live_.empty() && e_.outstanding_.load() == 0;
   for (auto& [txn, s] : live_) s->stop.request_stop();  // what is left is told to stop
@@ -974,10 +974,10 @@ int Engine::run() {
   config_.max_request_entity_size = SIZE_MAX;
   // Plain-text HTTP/2 (prior knowledge or Upgrade: h2c) only when asked for.
   config_.http1.upgrade_to_http2 = opts_.h2_prior_knowledge ? 1 : 0;
-  config_.http2.max_streams = std::max(1u, opts_.http2_max_streams);  // advertised in SETTINGS
+  config_.http2.max_streams = std::max(1u, cfg_.limits.http2_max_streams);  // advertised in SETTINGS
   config_.http2.max_concurrent_requests_per_connection = config_.http2.max_streams;
   // After GOAWAY, connections still open when the drain ends are closed.
-  config_.http2.graceful_shutdown_timeout = std::uint64_t(std::max<std::int64_t>(1, cfg_.drain_timeout.count()));
+  config_.http2.graceful_shutdown_timeout = std::uint64_t(std::max<std::int64_t>(1, cfg_.timeouts.drain.count()));
   h2o_hostconf_t* host = h2o_config_register_host(&config_, h2o_iovec_init(H2O_STRLIT("default")), 65535);
   h2o_pathconf_t* path = h2o_config_register_path(host, "/", 0);
   auto* handler = h2o_create_handler(path, sizeof(h2o_handler_t));
@@ -1131,7 +1131,7 @@ void note_worker_deadline(Clock::time_point at) {
                              std::memory_order_relaxed);
 }
 
-int run_engine(Crocket& app, const LaunchOptions& opts) {
+int run_engine(Crocket& app, const ServerConfig& opts) {
   Engine engine(app, opts);
   return engine.run();
 }

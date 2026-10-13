@@ -66,12 +66,10 @@ int main(int argc, char** argv) {
     std::fputs(grpc::proto_file<^^greeter>("helloworld").c_str(), stdout);
     return 0;
   }
-  auto env = [](const char* name) { return std::string(std::getenv(name) ? std::getenv(name) : ""); };
-  LaunchOptions opts{.port = 50051, .tls_cert = env("CROCKET_TLS_CERT"), .tls_key = env("CROCKET_TLS_KEY")};
-  if (auto port = env("CROCKET_PORT"); !port.empty()) opts.port = static_cast<std::uint16_t>(std::stoi(port));
-  if (auto loops = env("CROCKET_EVENT_LOOPS"); !loops.empty()) opts.event_loops = unsigned(std::stoi(loops));
-  opts.h2_prior_knowledge = opts.tls_cert.empty();  // gRPC's insecure channels speak h2 without TLS
-  return build(Config::from_env())
+  // CROCKET_PORT, CROCKET_TLS_CERT/KEY and the rest still apply; 50051 is only the default.
+  Config cfg = Config::from_env({.server = {.port = 50051}});
+  cfg.server.h2_prior_knowledge = cfg.server.tls_cert.empty();  // gRPC's insecure channels speak h2 without TLS
+  return build(std::move(cfg))
       .attach(Logger{})
       .manage(Counter{})
       .manage(Authenticator{[](std::string_view token) -> std::expected<Auth, ApiError> {
@@ -79,5 +77,5 @@ int main(int argc, char** argv) {
         return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
       }})
       .mount("helloworld", reflect_routes<^^greeter>(), Mode::Grpc)
-      .launch(opts);
+      .launch();
 }

@@ -115,7 +115,7 @@ static unsigned env_uint(const char* name, unsigned fallback) {
 
 int main() {
   Config cfg;
-  cfg.max_in_flight = 1'000'000;  // measure the server, not the admission limit
+  cfg.limits.max_in_flight = 1'000'000;  // measure the server, not the admission limit
   if (env_uint("CROCKET_BENCH_LOGS", 0)) {
     cfg.log.level = log::Level::warn;
     cfg.debug_routes = true;

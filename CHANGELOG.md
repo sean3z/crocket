@@ -9,6 +9,43 @@ section below into the GitHub Release.
 
 ## [Unreleased]
 
+## [0.2.0] - unreleased
+
+One `Config` for everything, configurable from the environment. Breaking: settings
+moved, so code that sets them needs the new names.
+
+### Changed
+- **`LaunchOptions` is gone; `Config` holds every setting**, in groups: `server`
+  (`listen`, `host`, `port`, `workers`, `event_loops`, `tls_cert`, `tls_key`, `http2`,
+  `h2_prior_knowledge`), `limits` (`max_body_bytes`, `max_body_memory`, `max_in_flight`,
+  `max_header_bytes`, `max_header_count`, `max_connections`, `max_connections_per_ip`,
+  `http2_max_streams`, `etag_max_bytes`), `timeouts` (`request`, `drain`) and `proxy`
+  (`trusted`, `header`, `allowed_hosts`), plus `profile`, `debug_routes`, `json`, `log`
+  and `adaptive_placement`. Having two structs made it unclear where a setting lived
+  and which of them the environment reached.
+- **`launch()` serves on `cfg.server`**; `launch({...})` takes `ServerOverrides`, which
+  overrides only the server fields you name: `.launch({.listen = "8080"})`.
+  `listen` accepts `"8080"`, `":8080"`, `"host:8080"` and `"[::1]:8080"`.
+- **`Config::from_env()` reads every `CROCKET_*` setting**, not just `CROCKET_PROFILE`,
+  with strict parsing: a bad value throws `std::invalid_argument` naming the variable
+  (`CROCKET_PORT=tcp://10.43.0.12:8000` is rejected instead of misread).
+  `Config::from_env(base)` layers the profile and environment over your own defaults.
+  Precedence: defaults < base < profile < environment < code < `launch({...})`.
+- `CROCKET_REQUEST_TIMEOUT` accepts units (`500ms`, `30s`, `2m`); a bare number is still
+  seconds. `CROCKET_DEBUG_ROUTES` is a boolean now: `0`/`false` turns it off.
+- `examples/serve.cpp`, `grpc.cpp` and `hello.cpp` use `Config::from_env()` and
+  `launch()` instead of mapping variables by hand.
+
+### Migrating from 0.1
+| 0.1 | 0.2 |
+|---|---|
+| `cfg.request_timeout`, `cfg.drain_timeout` | `cfg.timeouts.request`, `cfg.timeouts.drain` |
+| `cfg.max_body_bytes`, `max_in_flight`, `max_body_memory`, `etag_max_bytes` | `cfg.limits.*` |
+| `cfg.trusted_proxies`, `proxy_header`, `allowed_hosts` | `cfg.proxy.trusted`, `.header`, `.allowed_hosts` |
+| `LaunchOptions{.max_connections = ...}` and the other limits | `cfg.limits.*` |
+| `.launch({.host = ..., .port = ..., .tls_cert = ...})` | unchanged, or `cfg.server.*` and `.launch()` |
+| Hand-written `getenv("CROCKET_...")` | `Config::from_env()` |
+
 ## [0.1.1] - 2026-10-13
 
 The first tagged release: the stable channel starts here.

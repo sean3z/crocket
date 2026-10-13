@@ -17,7 +17,7 @@ auto hello(std::string_view name, std::uint8_t age) -> std::string;
 crocket::build()
   .attach(Logger{})
   .mount("/", reflect_routes<^^api>())
-  .launch({.host = "0.0.0.0", .port = 8000});
+  .launch({.listen = "0.0.0.0:8000"});
 ```
 
 Routes, typed path parameters, JSON and query binding, OpenAPI and gRPC all come from the same function signatures, checked at compile time. Its parsers are fuzzed ([Fuzzing](#fuzzing)), and conditional and range requests follow RFC 9110 ([Caching and ranges](#caching-and-ranges)).
@@ -986,7 +986,7 @@ Timing a run costs two clock reads, about 40 ns.
 
 ### Deadlines and cancellation
 
-Every request has a deadline (`Config::request_timeout`, default 30 s) and a stop
+Every request has a deadline (`timeouts.request`, default 30 s) and a stop
 token. The token fires when the deadline passes or the client disconnects.
 
 - **Extractors and pools** such as `Pool::checkout` honour the token automatically.
@@ -1069,7 +1069,7 @@ auto say_hello(HelloRequest req, Auth auth) -> Result<HelloReply> {
 crocket::build()
     .mount("helloworld", reflect_routes<^^greeter>(), Mode::Grpc)  // POST /helloworld.Greeter/SayHello
     .mount("/api", reflect_routes<^^api>())                         // HTTP routes on the same port
-    .launch({.port = 50051, .h2_prior_knowledge = true});
+    .launch({.port = 50051, .h2_prior_knowledge = true});  // or CROCKET_* via Config::from_env()
 ```
 
 - **Mounting:** `Mode::Grpc` makes the first argument of `mount` a protobuf package
@@ -1095,11 +1095,11 @@ crocket::build()
   `grpc::error(grpc::Code::AlreadyExists, "user.exists", "...")` picks the code exactly.
   Extractor failures, limits and deadlines map the same way, and an unknown method is
   `UNIMPLEMENTED`.
-- **Deadlines:** a `grpc-timeout` header can shorten `request_timeout` but not extend it.
+- **Deadlines:** a `grpc-timeout` header can shorten `timeouts.request` but not extend it.
 - **Metadata:** custom metadata arrives as request headers, so `Header<"x-...">` reads it.
 
 gRPC needs HTTP/2. Over TLS it is negotiated with ALPN. A gRPC client on an insecure
-channel speaks h2 without TLS, which `LaunchOptions::h2_prior_knowledge` serves. The
+channel speaks h2 without TLS, which `server.h2_prior_knowledge` serves. The
 same port keeps serving HTTP/1.1.
 
 The `.proto` for clients in other languages comes from the same declarations:
@@ -1147,20 +1147,31 @@ expected diagnostic.
 ### Launching
 
 ```cpp
-Config cfg;
-cfg.request_timeout = 10s;        // 504 deadline.exceeded
-cfg.max_body_bytes  = 1 << 20;    // 413 body.too_large
-cfg.max_in_flight   = 1024;       // 503 server.busy
-cfg.drain_timeout   = 5s;         // graceful shutdown budget
-cfg.debug_routes    = true;       // GET /__routes lists every route
+Config cfg = Config::from_env();      // CROCKET_PROFILE, CROCKET_PORT, ... (see below)
+cfg.timeouts.request     = 10s;       // 504 deadline.exceeded
+cfg.timeouts.drain       = 5s;        // graceful shutdown budget
+cfg.limits.max_body_bytes = 1 << 20;  // 413 body.too_large
+cfg.limits.max_in_flight = 1024;      // 503 server.busy
+cfg.debug_routes         = true;      // GET /__routes lists every route
 
 return crocket::build(cfg)
     .manage(std::move(pool))
     .attach(Logger{})
     .attach(Metrics{})
     .mount("/api", reflect_routes<^^api>())
-    .launch({.port = 8443, .tls_cert = "cert.pem", .tls_key = "key.pem"});   // h2 via ALPN
+    .launch({.listen = "8443", .tls_cert = "cert.pem", .tls_key = "key.pem"});   // h2 via ALPN
 ```
+
+One `Config` holds everything, in groups: `server` (listen or host and port, TLS,
+HTTP/2, threads), `limits`, `timeouts` and `proxy`, plus `profile`, `debug_routes`,
+`json`, `log` and `adaptive_placement`. It is applied in layers, each beating the one
+before: the defaults, the [dev profile](#dev-profile), the
+[environment](#environment-variables), your code, and last whatever you pass to
+`launch({...})`. `launch()` with no argument serves on `cfg.server`; `launch({...})`
+overrides just the server fields you name, and `.listen` takes `"8080"`, `":8080"`,
+`"0.0.0.0:8080"` or `"[::1]:8080"`. To give your program its own defaults that the
+environment can still override, pass them to `from_env`:
+`Config::from_env({.server = {.port = 50051}})`.
 
 What you get:
 
@@ -1178,12 +1189,12 @@ What you get:
   connections get the new certificate; open ones keep theirs. A certificate that does not
   load, or does not match its key, is logged and the previous one stays in use.
 
-Network I/O runs on one event loop per physical core (`LaunchOptions::event_loops`), each
+Network I/O runs on one event loop per physical core (`server.event_loops`), each
 with its own listening socket on the port. Hyperthreads of a core don't get a loop each:
 two loops sharing a core compete for it, and a loop that waits for a CPU stalls every
 connection it owns. CPUs outside the process's affinity mask (a container's cpuset,
 `taskset`) are not counted. `Task<T>` handlers run on the loops, and plain functions
-on a pool of `LaunchOptions::workers` threads, or on the loops once they have proved fast
+on a pool of `server.workers` threads, or on the loops once they have proved fast
 (see [adaptive placement](#adaptive-placement)).
 
 #### Limits
@@ -1193,15 +1204,15 @@ Every resource a client can make the server hold has a bound. The defaults follo
 
 | Limit | Default | Past it |
 |---|---|---|
-| `LaunchOptions::max_connections` | 1024 | New connections wait in the kernel's accept queue until one closes; they are not refused |
-| `LaunchOptions::max_connections_per_ip` | 0 (none) | A new connection from that address is closed at once. Off by default: behind a load balancer every connection comes from the balancer's address. Set it when clients connect directly |
-| `LaunchOptions::http2_max_streams` | 100 | Concurrent requests on one HTTP/2 connection, as advertised in its SETTINGS |
-| `LaunchOptions::max_header_bytes`, `max_header_count` | 8 KiB, 100 | 431 `headers.too_large` |
-| `Config::max_body_bytes` | 1 MiB | 413 `body.too_large` |
-| `Config::max_body_memory` | 256 MiB | 503 `server.busy`: request bodies held in memory, every request together |
-| `Config::etag_max_bytes` | 1 MiB | Bodies longer than this get no automatic ETag (hashing is about a microsecond per 10 KiB); set one yourself, or 0 for none |
-| `Config::max_in_flight` | 1024 | 503 `server.busy` |
-| `Config::request_timeout` | 30 s | 504 `deadline.exceeded` |
+| `limits.max_connections` | 1024 | New connections wait in the kernel's accept queue until one closes; they are not refused |
+| `limits.max_connections_per_ip` | 0 (none) | A new connection from that address is closed at once. Off by default: behind a load balancer every connection comes from the balancer's address. Set it when clients connect directly |
+| `limits.http2_max_streams` | 100 | Concurrent requests on one HTTP/2 connection, as advertised in its SETTINGS |
+| `limits.max_header_bytes`, `max_header_count` | 8 KiB, 100 | 431 `headers.too_large` |
+| `limits.max_body_bytes` | 1 MiB | 413 `body.too_large` |
+| `limits.max_body_memory` | 256 MiB | 503 `server.busy`: request bodies held in memory, every request together |
+| `limits.etag_max_bytes` | 1 MiB | Bodies longer than this get no automatic ETag (hashing is about a microsecond per 10 KiB); set one yourself, or 0 for none |
+| `limits.max_in_flight` | 1024 | 503 `server.busy` |
+| `timeouts.request` | 30 s | 504 `deadline.exceeded` |
 | Request headers, from h2o | 10 s to arrive, 5 s between reads | The connection is closed |
 | An idle HTTP/2 connection, from h2o | 10 s | Closed with GOAWAY |
 
@@ -1217,9 +1228,9 @@ from the headers they add:
 
 ```cpp
 Config cfg;
-cfg.trusted_proxies = {"10.0.0.0/8"};             // addresses or CIDR ranges
-cfg.proxy_header = ProxyHeader::XForwardedFor;    // the default; or ProxyHeader::Forwarded (RFC 7239)
-cfg.allowed_hosts = {"api.example.com", "*.example.com"};
+cfg.proxy.trusted = {"10.0.0.0/8"};               // addresses or CIDR ranges
+cfg.proxy.header = ProxyHeader::XForwardedFor;    // the default; or ProxyHeader::Forwarded (RFC 7239)
+cfg.proxy.allowed_hosts = {"api.example.com", "*.example.com"};
 
 [[= http::get("/whoami")]]
 auto whoami(Client client) -> std::string { return client.addr + " " + std::string(client.scheme); }
@@ -1229,7 +1240,7 @@ auto whoami(Client client) -> std::string { return client.addr + " " + std::stri
   own address and scheme, whatever headers it sends. Behind a chain of trusted proxies,
   the client is the first address that no trusted proxy is behind, so a value the
   client wrote into `X-Forwarded-For` itself is never picked.
-- **Only the configured header is read.** Set `proxy_header` to the one your proxies
+- **Only the configured header is read.** Set `proxy.header` to the one your proxies
   write. The other is ignored, so a client cannot supply it.
 - **`allowed_hosts`** lists the host names the server answers to. Any other `Host`
   (`:authority` in HTTP/2) is 400 `host.invalid` before routing, which stops
@@ -1248,13 +1259,14 @@ auto r = client.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "203
 
 `Config::dev()` is for running on your own machine. Choose it in code, or read
 `CROCKET_PROFILE` with `Config::from_env()`, which gives `dev()` for `dev`, the release
-defaults when unset or `release`, and throws `std::invalid_argument` for anything else:
+defaults when unset or `release`, and throws `std::invalid_argument` for anything else
+(it reads the [other variables](#environment-variables) too):
 
 ```cpp
 return crocket::build(Config::from_env()) // CROCKET_PROFILE=dev ./my_app
     .attach(Logger{})
     .mount("/", reflect_routes<^^api>())
-    .launch({.port = 8000});
+    .launch();
 ```
 
 Compared with the release defaults, the dev profile:
@@ -1266,7 +1278,7 @@ Compared with the release defaults, the dev profile:
 - **`launch()` prints every route** before it starts.
 - **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
   breakpoint), and the drain on shutdown is one second.
-- **An empty `LaunchOptions::host` binds `127.0.0.1`** instead of `0.0.0.0`.
+- **An empty `server.host` binds `127.0.0.1`** instead of `0.0.0.0`.
 - **`allowed_hosts` also accepts `localhost`, `127.0.0.1` and `::1`**, so a server
   configured for its public name still answers locally.
 
@@ -1284,7 +1296,7 @@ Rocket features without an equivalent today:
 | WebSockets, SSE and streaming responses | Not implemented; responses are fully buffered |
 | Error catchers (`#[catch]`) | `ApiError` plus an `on_response` fairing, as in `NotFoundPage` above |
 | `on_liftoff` | Not implemented |
-| Config profiles (`Rocket.toml` / Figment) | A release and a [dev profile](#dev-profile) chosen with `CROCKET_PROFILE`; other settings are plain structs, read from env or files yourself (see `examples/serve.cpp`) |
+| Config profiles (`Rocket.toml` / Figment) | A release and a [dev profile](#dev-profile) chosen with `CROCKET_PROFILE`; every other setting from `CROCKET_*` variables with `Config::from_env()` ([Environment variables](#environment-variables)); one `Config` struct in code |
 | Mutual TLS | Not implemented |
 
 ## Building
@@ -1432,24 +1444,47 @@ corpus and two seconds of mutations, without coverage.
 | `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
-## `crocket_serve` configuration
+## Environment variables
 
-`crocket_serve` reads its settings from environment variables:
+`Config::from_env()` reads these, on top of the profile. Unset or empty leaves the
+setting alone; a value that does not parse throws `std::invalid_argument` naming the
+variable (`CROCKET_PORT=tcp://10.43.0.12:8000: expected a whole number from 0 to 65535`),
+so a typo stops the program at startup instead of being ignored. Sizes take `K`, `M` or
+`G` (powers of 1024); durations take `ms`, `s`, `m` or `h`, and a bare number is seconds;
+booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-separated.
 
-| Variable | Default | Meaning |
+| Variable | Sets | Default |
 |---|---|---|
-| `CROCKET_PROFILE` | `release` | `dev` for the [dev profile](#dev-profile) |
-| `CROCKET_HOST` | `0.0.0.0` (`127.0.0.1` in dev) | Address to listen on |
-| `CROCKET_PORT` | `8000` | Port to listen on |
-| `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | unset | Enable TLS; both must be set |
-| `CROCKET_REQUEST_TIMEOUT` | `10` (an hour in dev) | Request deadline in seconds |
-| `CROCKET_DEBUG_ROUTES` | unset | Set to any value to expose `GET /__routes` |
-| `CROCKET_WORKERS` | one per core | Handler threads |
-| `CROCKET_EVENT_LOOPS` | one per physical core | Network I/O threads |
-| `CROCKET_MAX_CONNECTIONS` | `1024` | Open connections, all loops together |
-| `CROCKET_MAX_CONNECTIONS_PER_IP` | `0` (none) | Open connections from one address |
-| `CROCKET_HTTP2_MAX_STREAMS` | `100` | Concurrent requests on one HTTP/2 connection |
-| `CROCKET_MAX_BODY_MEMORY` | `268435456` (256 MiB) | Request bodies held in memory at once, in bytes |
+| `CROCKET_PROFILE` | `dev` or `release` | `release` |
+| `CROCKET_LISTEN` | `server.listen`: `host:port`, `:port` or `port` (replaces host and port) | unset |
+| `CROCKET_HOST` | `server.host` | `0.0.0.0` (`127.0.0.1` in dev) |
+| `CROCKET_PORT` | `server.port` | `8000` |
+| `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | `server.tls_cert`, `server.tls_key`; TLS needs both | unset |
+| `CROCKET_HTTP2` | `server.http2` | `true` |
+| `CROCKET_H2_PRIOR_KNOWLEDGE` | `server.h2_prior_knowledge` | `false` |
+| `CROCKET_WORKERS` | `server.workers` | one per core |
+| `CROCKET_EVENT_LOOPS` | `server.event_loops` | one per physical core |
+| `CROCKET_MAX_BODY_BYTES` | `limits.max_body_bytes` | `1M` |
+| `CROCKET_MAX_BODY_MEMORY` | `limits.max_body_memory` | `256M` |
+| `CROCKET_MAX_IN_FLIGHT` | `limits.max_in_flight` | `1024` |
+| `CROCKET_MAX_HEADER_BYTES` | `limits.max_header_bytes` | `8K` |
+| `CROCKET_MAX_HEADER_COUNT` | `limits.max_header_count` | `100` |
+| `CROCKET_MAX_CONNECTIONS` | `limits.max_connections` | `1024` |
+| `CROCKET_MAX_CONNECTIONS_PER_IP` | `limits.max_connections_per_ip` | `0` (none) |
+| `CROCKET_HTTP2_MAX_STREAMS` | `limits.http2_max_streams` | `100` |
+| `CROCKET_ETAG_MAX_BYTES` | `limits.etag_max_bytes` | `1M` |
+| `CROCKET_REQUEST_TIMEOUT` | `timeouts.request` | `30s` (an hour in dev) |
+| `CROCKET_DRAIN_TIMEOUT` | `timeouts.drain` | `10s` (`1s` in dev) |
+| `CROCKET_TRUSTED_PROXIES` | `proxy.trusted` | none |
+| `CROCKET_PROXY_HEADER` | `proxy.header`: `x-forwarded-for` or `forwarded` | `x-forwarded-for` |
+| `CROCKET_ALLOWED_HOSTS` | `proxy.allowed_hosts` | any host |
+| `CROCKET_DEBUG_ROUTES` | `debug_routes` (`GET /__routes`) | `false` (`true` in dev) |
+| `CROCKET_ADAPTIVE_PLACEMENT` | `adaptive_placement` | `true` |
+| `CROCKET_LOG_LEVEL` | `log.level`: `debug`, `info`, `warn` or `error` | `info` (`debug` in dev) |
+
+`CROCKET_METRICS_LABELS` is read by `Metrics`. `crocket_serve`
+uses `Config::from_env()` as is, with a 10 s request deadline and 5 s drain as its own
+defaults.
 
 ## License
 

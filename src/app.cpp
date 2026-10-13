@@ -16,7 +16,9 @@
 #include <condition_variable>
 #include <charconv>
 #include <cstdio>
+#include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -25,22 +27,241 @@
 
 namespace crocket {
 
-Config Config::dev() {
-  Config c;
+namespace {
+void apply_dev(Config& c) {
   c.profile = Profile::Dev;
   c.debug_routes = true;
-  c.request_timeout = std::chrono::hours(1);
+  c.timeouts.request = std::chrono::hours(1);
   c.log.level = log::Level::debug;
-  c.drain_timeout = std::chrono::seconds(1);
+  c.timeouts.drain = std::chrono::seconds(1);
+}
+}  // namespace
+
+Config Config::dev() {
+  Config c;
+  apply_dev(c);
   return c;
 }
 
-Config Config::from_env() {
-  const char* v = std::getenv("CROCKET_PROFILE");
-  std::string_view p = v ? v : "";
-  if (p.empty() || p == "release") return {};
-  if (p == "dev") return dev();
-  throw std::invalid_argument("CROCKET_PROFILE=" + std::string(p) + ": unknown profile (use dev or release)");
+namespace {
+
+[[noreturn]] void bad_env(std::string_view name, std::string_view value, std::string_view expected) {
+  throw std::invalid_argument(std::string(name) + "=" + std::string(value) + ": " + std::string(expected));
+}
+
+std::string trim(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+  return std::string(s);
+}
+
+/// A whole unsigned decimal number, nothing before or after it.
+std::optional<std::uint64_t> parse_uint(std::string_view s) {
+  if (s.empty() || s.size() > 19) return std::nullopt;
+  std::uint64_t v = 0;
+  for (char ch : s) {
+    if (ch < '0' || ch > '9') return std::nullopt;
+    v = v * 10 + std::uint64_t(ch - '0');
+  }
+  return v;
+}
+
+/// An env lookup; unset and empty are the same: not set.
+std::optional<std::string> env_of(const char* name) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return std::nullopt;
+  return std::string(v);
+}
+
+template <class T>
+void env_uint(const char* name, T& out, std::uint64_t min = 0) {
+  auto v = env_of(name);
+  if (!v) return;
+  auto n = parse_uint(trim(*v));
+  if (!n || *n < min || *n > std::uint64_t(std::numeric_limits<T>::max()))
+    bad_env(name, *v,
+            "expected a whole number from " + std::to_string(min) + " to " +
+                std::to_string(std::uint64_t(std::numeric_limits<T>::max())));
+  out = T(*n);
+}
+
+/// Bytes: a number with an optional K, M or G (powers of 1024, KiB/MiB/GiB too).
+void env_bytes(const char* name, std::size_t& out) {
+  auto v = env_of(name);
+  if (!v) return;
+  std::string s = trim(*v);
+  std::size_t i = 0;
+  while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+  auto n = parse_uint(std::string_view(s).substr(0, i));
+  std::string unit = s.substr(i);
+  for (auto& ch : unit) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+  int shift = unit.empty() || unit == "B" ? 0
+              : unit == "K" || unit == "KB" || unit == "KIB" ? 10
+              : unit == "M" || unit == "MB" || unit == "MIB" ? 20
+              : unit == "G" || unit == "GB" || unit == "GIB" ? 30
+                                                              : -1;
+  if (!n || shift < 0 || *n > (std::numeric_limits<std::size_t>::max() >> shift))
+    bad_env(name, *v, "expected a size in bytes, such as 1048576, 512K, 256M or 1G");
+  out = std::size_t(*n) << shift;
+}
+
+/// A duration: "30s", "500ms", "2m", "1h"; a bare number is seconds.
+void env_duration(const char* name, std::chrono::milliseconds& out) {
+  auto v = env_of(name);
+  if (!v) return;
+  std::string s = trim(*v);
+  std::size_t i = 0;
+  while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+  auto n = parse_uint(std::string_view(s).substr(0, i));
+  std::string unit = s.substr(i);
+  std::uint64_t ms_per = unit.empty() || unit == "s" ? 1000
+                         : unit == "ms"              ? 1
+                         : unit == "m"               ? 60'000
+                         : unit == "h"               ? 3'600'000
+                                                     : 0;
+  if (!n || ms_per == 0 || *n > std::uint64_t(1) << 40)
+    bad_env(name, *v, "expected a duration such as 30s, 500ms, 2m or 1h (a bare number is seconds)");
+  out = std::chrono::milliseconds(std::int64_t(*n * ms_per));
+}
+
+void env_bool(const char* name, bool& out) {
+  auto v = env_of(name);
+  if (!v) return;
+  std::string s = trim(*v);
+  for (auto& ch : s) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+  if (s == "1" || s == "true" || s == "yes" || s == "on") out = true;
+  else if (s == "0" || s == "false" || s == "no" || s == "off") out = false;
+  else bad_env(name, *v, "expected true or false (1/0, yes/no, on/off)");
+}
+
+void env_string(const char* name, std::string& out) {
+  if (auto v = env_of(name)) out = trim(*v);
+}
+
+/// A comma-separated list; empty items are dropped.
+void env_list(const char* name, std::vector<std::string>& out) {
+  auto v = env_of(name);
+  if (!v) return;
+  out.clear();
+  std::string_view s = *v;
+  while (!s.empty()) {
+    auto comma = s.find(',');
+    auto item = trim(s.substr(0, comma));
+    if (!item.empty()) out.push_back(std::move(item));
+    if (comma == std::string_view::npos) break;
+    s.remove_prefix(comma + 1);
+  }
+}
+
+}  // namespace
+
+namespace detail {
+
+void parse_listen(std::string_view listen, std::string& host, std::uint16_t& port) {
+  auto fail = [&](std::string_view why) -> void {
+    throw std::invalid_argument("listen \"" + std::string(listen) + "\": " + std::string(why));
+  };
+  std::string_view h, p = listen;
+  if (listen.find("://") != std::string_view::npos) fail("expected host:port or a port, not a URL");
+  if (!listen.empty() && listen.front() == '[') {
+    auto close = listen.find(']');
+    if (close == std::string_view::npos || close + 1 >= listen.size() || listen[close + 1] != ':')
+      fail("expected [v6-address]:port");
+    h = listen.substr(1, close - 1);
+    p = listen.substr(close + 2);
+  } else if (auto colon = listen.rfind(':'); colon != std::string_view::npos) {
+    if (listen.find(':') != colon) fail("an IPv6 address needs brackets: [::1]:8080");
+    h = listen.substr(0, colon);
+    p = listen.substr(colon + 1);
+  }
+  auto n = parse_uint(p);
+  if (!n || *n > 65535) fail("expected a port from 0 to 65535");
+  host = std::string(h);
+  port = std::uint16_t(*n);
+}
+
+ServerConfig resolve_server(const Config& cfg, const ServerOverrides& o) {
+  ServerConfig s = cfg.server;
+  if (!s.listen.empty()) parse_listen(s.listen, s.host, s.port);
+  if (o.host) s.host = *o.host;
+  if (o.port) s.port = *o.port;
+  if (!o.listen.empty()) parse_listen(o.listen, s.host, s.port);
+  if (o.tls_cert) s.tls_cert = *o.tls_cert;
+  if (o.tls_key) s.tls_key = *o.tls_key;
+  if (o.http2) s.http2 = *o.http2;
+  if (o.h2_prior_knowledge) s.h2_prior_knowledge = *o.h2_prior_knowledge;
+  if (o.workers) s.workers = *o.workers;
+  if (o.event_loops) s.event_loops = *o.event_loops;
+  s.listen.clear();
+  return s;
+}
+
+}  // namespace detail
+
+Config Config::from_env() { return from_env(Config{}); }
+
+Config Config::from_env(Config base) {
+  Config c = std::move(base);
+  if (auto p = env_of("CROCKET_PROFILE")) {
+    if (*p == "dev") apply_dev(c);
+    else if (*p != "release") bad_env("CROCKET_PROFILE", *p, "unknown profile (use dev or release)");
+  }
+  auto& s = c.server;
+  env_string("CROCKET_HOST", s.host);
+  env_uint("CROCKET_PORT", s.port);
+  env_string("CROCKET_LISTEN", s.listen);
+  if (!s.listen.empty()) {
+    try {
+      std::string h;
+      std::uint16_t port = 0;
+      detail::parse_listen(s.listen, h, port);
+    } catch (const std::invalid_argument&) {
+      bad_env("CROCKET_LISTEN", s.listen, "expected host:port, :port or a port, such as 0.0.0.0:8080 or 8080");
+    }
+  }
+  env_string("CROCKET_TLS_CERT", s.tls_cert);
+  env_string("CROCKET_TLS_KEY", s.tls_key);
+  env_bool("CROCKET_HTTP2", s.http2);
+  env_bool("CROCKET_H2_PRIOR_KNOWLEDGE", s.h2_prior_knowledge);
+  env_uint("CROCKET_WORKERS", s.workers);
+  env_uint("CROCKET_EVENT_LOOPS", s.event_loops);
+
+  auto& l = c.limits;
+  env_bytes("CROCKET_MAX_BODY_BYTES", l.max_body_bytes);
+  env_bytes("CROCKET_MAX_BODY_MEMORY", l.max_body_memory);
+  env_uint("CROCKET_MAX_IN_FLIGHT", l.max_in_flight, 1);
+  env_bytes("CROCKET_MAX_HEADER_BYTES", l.max_header_bytes);
+  env_uint("CROCKET_MAX_HEADER_COUNT", l.max_header_count, 1);
+  env_uint("CROCKET_MAX_CONNECTIONS", l.max_connections, 1);
+  env_uint("CROCKET_MAX_CONNECTIONS_PER_IP", l.max_connections_per_ip);
+  env_uint("CROCKET_HTTP2_MAX_STREAMS", l.http2_max_streams, 1);
+  env_bytes("CROCKET_ETAG_MAX_BYTES", l.etag_max_bytes);
+
+  env_duration("CROCKET_REQUEST_TIMEOUT", c.timeouts.request);
+  env_duration("CROCKET_DRAIN_TIMEOUT", c.timeouts.drain);
+
+  env_list("CROCKET_TRUSTED_PROXIES", c.proxy.trusted);
+  if (auto v = env_of("CROCKET_PROXY_HEADER")) {
+    std::string h = trim(*v);
+    for (auto& ch : h) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    if (h == "x-forwarded-for") c.proxy.header = ProxyHeader::XForwardedFor;
+    else if (h == "forwarded") c.proxy.header = ProxyHeader::Forwarded;
+    else bad_env("CROCKET_PROXY_HEADER", *v, "expected x-forwarded-for or forwarded");
+  }
+  env_list("CROCKET_ALLOWED_HOSTS", c.proxy.allowed_hosts);
+
+  env_bool("CROCKET_DEBUG_ROUTES", c.debug_routes);
+  env_bool("CROCKET_ADAPTIVE_PLACEMENT", c.adaptive_placement);
+  if (auto v = env_of("CROCKET_LOG_LEVEL")) {
+    std::string lv = trim(*v);
+    for (auto& ch : lv) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    if (lv == "debug") c.log.level = log::Level::debug;
+    else if (lv == "info") c.log.level = log::Level::info;
+    else if (lv == "warn") c.log.level = log::Level::warn;
+    else if (lv == "error") c.log.level = log::Level::error;
+    else bad_env("CROCKET_LOG_LEVEL", *v, "expected debug, info, warn or error");
+  }
+  return c;
 }
 
 Crocket::Crocket(Config cfg) : core_(std::make_unique<detail::Core>()) {
@@ -223,11 +444,11 @@ std::expected<void, IgniteError> Crocket::ignite() {
 
   // 2. Proxies and hosts must be well-formed.
   c.trusted_proxies.clear();
-  for (auto& p : c.config.trusted_proxies) {
+  for (auto& p : c.config.proxy.trusted) {
     if (auto r = detail::parse_ip_range(p)) c.trusted_proxies.push_back(*r);
     else errors.push_back("trusted_proxies entry \"" + p + "\" is not an IP address or CIDR range (\"10.0.0.0/8\")");
   }
-  for (auto& h : c.config.allowed_hosts)
+  for (auto& h : c.config.proxy.allowed_hosts)
     if (auto why = detail::host_pattern_problem(h); !why.empty())
       errors.push_back("allowed_hosts entry \"" + h + "\" " + why);
 
@@ -286,7 +507,7 @@ void Crocket::prepare(Request& req) const {
   if (req.trace_id.empty())
     if (auto tp = req.header("traceparent")) req.trace_id = trace_id_of(*tp);
   if (req.deadline.at == Clock::time_point::max()) {
-    req.deadline.at = req.received + core_->config.request_timeout;
+    req.deadline.at = req.received + core_->config.timeouts.request;
     // A gRPC client's deadline can only shorten the configured one.
     if (auto t = req.header("grpc-timeout"))
       if (auto d = parse_grpc_timeout(*t)) req.deadline.at = std::min(req.deadline.at, req.received + *d);
@@ -295,7 +516,7 @@ void Crocket::prepare(Request& req) const {
     req.remote_addr = req.peer_addr;
     req.scheme = req.tls ? "https" : "http";
     if (!core_->trusted_proxies.empty())
-      detail::resolve_client(req, core_->trusted_proxies, core_->config.proxy_header);
+      detail::resolve_client(req, core_->trusted_proxies, core_->config.proxy.header);
   }
   req.state_registry = &core_->state;
   req.dev_profile = core_->config.profile == Profile::Dev;
@@ -519,7 +740,7 @@ void Crocket::run(detail::Exchange* ex) {
 
   bool finished = false;
   if (auto host = req.header("host").value_or("");
-      !detail::host_allowed(host, core_->config.allowed_hosts, req.dev_profile)) {
+      !detail::host_allowed(host, core_->config.proxy.allowed_hosts, req.dev_profile)) {
     write_error({400, "host.invalid", "host not allowed", "Host: '" + std::string(host) + "'"}, req, res);
     finished = true;
   }
@@ -625,7 +846,7 @@ void Crocket::finish(const Request& req, Response& res) {
                 req, res);
   }
   res.headers.set("x-request-id", req.request_id);
-  detail::conditional(req, res, core_->config.etag_max_bytes);
+  detail::conditional(req, res, core_->config.limits.etag_max_bytes);
   auto& fs = core_->fairings;
   for (auto it = fs.rbegin(); it != fs.rend(); ++it) {
     try {
@@ -804,9 +1025,15 @@ Response Crocket::builtin(detail::Builtin b, Request& /*req*/) {
   return res;
 }
 
-int Crocket::launch(LaunchOptions opts) {
+int Crocket::launch(ServerOverrides overrides) {
   auto ig = ignite();
   std::vector<std::string> problems = ig ? std::vector<std::string>{} : ig.error().problems;
+  ServerConfig opts;
+  try {
+    opts = detail::resolve_server(core_->config, overrides);
+  } catch (const std::invalid_argument& e) {
+    problems.push_back(e.what());
+  }
   bool tls = !opts.tls_cert.empty() || !opts.tls_key.empty();
   if (tls) {
     if (opts.tls_cert.empty() || opts.tls_key.empty())

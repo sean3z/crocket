@@ -65,16 +65,11 @@ static_assert(!db::Model<NoKey>);
 
 namespace api {
 [[= http::get("/heroes/{id}")]]
-auto get(Db& db, std::int64_t id) -> std::optional<Json<Hero>> {
-  if (auto h = db.find<Hero>(id)) return Json<Hero>{*h};
-  return std::nullopt;
-}
+auto get(Db& db, std::int64_t id) -> std::optional<Hero> { return db.find<Hero>(id); }
 [[= http::post("/heroes")]]
-auto create(Db& db, Json<Hero> body) -> Created<Json<Hero>> { return {Json<Hero>{db.insert(*body)}}; }
+auto create(Db& db, Json<Hero> body) -> Created<Hero> { return {db.insert(*body)}; }
 [[= http::get("/robins")]]
-auto robins(Db& db) -> Json<std::vector<Hero>> {
-  return {db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id).all()};
-}
+auto robins(Db& db) -> std::vector<Hero> { return db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id); }
 }  // namespace api
 
 int main() {

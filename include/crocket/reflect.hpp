@@ -48,8 +48,9 @@ inline constexpr bool valid_result_v = [] {
   if constexpr (std::is_void_v<U>) return true;
   else if constexpr (Awaitable<U>) {
     using V = await_result_t<U>;
-    return std::is_void_v<V> || IsResponder<std::remove_cvref_t<V>>;
-  } else return IsResponder<U>;
+    if constexpr (std::is_void_v<V>) return true;
+    else return detail::Payload<std::remove_cvref_t<V>>;
+  } else return detail::Payload<U>;
 }();
 
 consteval bool holds(std::meta::info trait, std::meta::info type) {
@@ -211,7 +212,7 @@ consteval std::string analyze(std::meta::info fn, std::vector<Binding>& out) {
   auto ret = std::meta::return_type_of(fn);
   if (!holds(^^valid_result_v, ret))
     return where + ": return type '" + type_name(ret) +
-           "' is not a Responder (use std::string, Json<T>, Created<T>, std::optional<T>, "
+           "' is not a Responder (use a JSON-encodable struct T, std::vector<T>, std::string, Json<T>, Created<T>, std::optional<T>, "
            "std::expected<T, ApiError>, ... or specialize crocket::Responder)";
   return {};
 }

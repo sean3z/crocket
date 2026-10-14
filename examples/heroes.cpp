@@ -31,25 +31,27 @@ struct HeroQuery {
 namespace api {
 
 [[= http::get("/heroes")]]
-auto list(Db& db, Query<HeroQuery> q) -> Json<std::vector<Hero>> {
-  if (q->mentor) return {db.where(&Hero::mentor, *q->mentor).order_by(&Hero::id).all()};
-  return {db.all<Hero>().order_by(&Hero::id).limit(100).all()};
+auto list(Db& db, Query<HeroQuery> q) -> std::vector<Hero> {
+  if (q->mentor) return db.where(&Hero::mentor, *q->mentor).order_by(&Hero::id);
+  return db.all<Hero>().order_by(&Hero::id).limit(100);
 }
 
 [[= http::get("/heroes/{id}")]]
-auto get(Db& db, std::int64_t id) -> std::optional<Json<Hero>> {
-  if (auto h = db.find<Hero>(id)) return Json<Hero>{*h};
-  return std::nullopt;
+auto get(Db& db, std::int64_t id) -> std::optional<Hero> {
+  return db.find<Hero>(id);  // nullopt: 404
 }
 
 [[= http::post("/heroes")]]
-auto create(Db& db, Json<Hero> body) -> Created<Json<Hero>> { return {Json<Hero>{db.insert(*body)}}; }
+auto create(Db& db, Json<Hero> body) -> Created<Hero> {
+  auto hero = db.insert(*body);
+  return {hero, "/heroes/" + std::to_string(hero.id)};
+}
 
 [[= http::put("/heroes/{id}")]]
-auto replace(Db& db, std::int64_t id, Json<Hero> body) -> std::optional<Json<Hero>> {
+auto replace(Db& db, std::int64_t id, Json<Hero> body) -> std::optional<Hero> {
   body->id = id;
   if (!db.update(*body)) return std::nullopt;
-  return body;
+  return *body;
 }
 
 [[= http::del("/heroes/{id}")]]

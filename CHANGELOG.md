@@ -23,6 +23,12 @@ section below into the GitHub Release.
   when a request used the database.
 - **`Config::database`** (`url`, `pool_size`, `pool_wait`) and `CROCKET_DATABASE_URL`,
   `CROCKET_DATABASE_POOL_SIZE` and `CROCKET_DATABASE_POOL_WAIT` in `Config::from_env()`.
+- **Handlers can return a plain struct**: `Hero`, `std::vector<Hero>`, `std::optional<Hero>`
+  (empty: 404) and `Created<Hero>` are JSON on HTTP routes, as if wrapped in `Json<T>`,
+  and protobuf on gRPC routes. `Json<T>` still works and always wins.
+- **`Proto<T>`**: an explicit protobuf body, `application/x-protobuf` on HTTP routes and
+  the normal reply on gRPC routes. A gRPC method returning `Json<T>` replies with JSON
+  (`application/grpc+json`). OpenAPI lists `application/x-protobuf` for `Proto<T>`.
 - `examples/heroes.cpp`: a CRUD API on `crocket::db`, and `bench/db.cpp`, `crocket::db`
   against the same queries written with libpqxx.
 

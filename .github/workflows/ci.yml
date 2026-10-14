@@ -20,8 +20,22 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 60
+    # The db test (crocket::db) runs against this Postgres.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: crocket
+          POSTGRES_PASSWORD: crocket
+          POSTGRES_DB: crocket_test
+        options: >-
+          --health-cmd "pg_isready -U crocket"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       CCACHE_DIR: /github/home/.cache/ccache
+      CROCKET_TEST_DATABASE_URL: postgresql://crocket:crocket@postgres:5432/crocket_test
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +45,12 @@ jobs:
           path: /github/home/.cache/ccache
           key: ccache-${{ github.sha }}
           restore-keys: ccache-
+
+      - name: Install libpqxx (crocket::db)
+        run: |
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -q --no-install-recommends libpqxx-dev
 
       - name: Release build and all tests
         run: ./dev check

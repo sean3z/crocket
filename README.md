@@ -568,7 +568,9 @@ The return type is the response. Built-in responders:
 | Return type | Response |
 |---|---|
 | `std::string`, `std::string_view`, `const char*` | 200 `text/plain` |
-| `Json<T>` | 200 `application/json` |
+| A struct `T`, `std::vector<T>`, any JSON-encodable value | 200 `application/json`, as if wrapped in `Json<T>` |
+| `Json<T>` | 200 `application/json`, explicitly |
+| `Proto<T>` | 200 `application/x-protobuf` (the [protobuf](#grpc-and-protobuf) encoding of `T`) |
 | `std::optional<T>` | `T`, or 404 `not_found` when empty |
 | `std::expected<T, ApiError>` (alias `Result<T>`) | `T`, or the error as a problem+json body |
 | `Result<void>` / `void` | 204 |
@@ -579,8 +581,11 @@ The return type is the response. Built-in responders:
 | `Response` | Exactly what you built |
 | `Task<T>` | Any of the above, produced asynchronously |
 
-`T` can be any responder or any JSON-encodable type. A return type that is neither is a
-compile error.
+`T` can be any responder or any JSON-encodable type, so `std::optional<Hero>`,
+`std::vector<Hero>` and `Created<Hero>` need no `Json<...>` around the struct. A return
+type that is neither is a compile error. On a [gRPC](#grpc-and-protobuf) route the same
+plain `T` is sent as protobuf instead; there `Proto<T>` says so explicitly and `Json<T>`
+replies with JSON (`application/grpc+json`). OpenAPI describes each one as it is sent.
 
 ```cpp
 [[= http::post("/items")]]
@@ -719,14 +724,18 @@ struct Hero {
 };
 
 [[= http::get("/heroes/{id}")]]
-auto get(Db& db, std::int64_t id) -> std::optional<Json<Hero>> {
-  if (auto h = db.find<Hero>(id)) return Json<Hero>{*h};
-  return std::nullopt;                // 404
+auto get(Db& db, std::int64_t id) -> std::optional<Hero> {
+  return db.find<Hero>(id);           // nullopt: 404
 }
 
 [[= http::post("/heroes")]]
-auto create(Db& db, Json<Hero> body) -> Created<Json<Hero>> {
-  return {Json<Hero>{db.insert(*body)}};  // fills in id; a unique violation is 409 db.conflict
+auto create(Db& db, Json<Hero> body) -> Created<Hero> {
+  return {db.insert(*body)};          // fills in id; a unique violation is 409 db.conflict
+}
+
+[[= http::get("/robins")]]
+auto robins(Db& db) -> std::vector<Hero> {
+  return db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id);
 }
 
 int main() {

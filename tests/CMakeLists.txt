@@ -29,6 +29,11 @@ add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)
 
+# Plain struct returns: JSON on HTTP routes, protobuf on gRPC routes; Json<T>/Proto<T> win.
+add_executable(crocket_returns_test returns.cpp)
+target_link_libraries(crocket_returns_test PRIVATE crocket)
+add_test(NAME returns COMMAND crocket_returns_test)
+
 # OpenAPI generated from the handlers, checked piece by piece, and served.
 add_executable(crocket_openapi_test openapi.cpp)
 target_link_libraries(crocket_openapi_test PRIVATE crocket)

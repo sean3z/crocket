@@ -22,6 +22,23 @@ crocket::build()
 
 Routes, typed path parameters, JSON and query binding, OpenAPI and gRPC all come from the same function signatures, checked at compile time. Its parsers are fuzzed ([Fuzzing](#fuzzing)), and conditional and range requests follow RFC 9110 ([Caching and ranges](#caching-and-ranges)).
 
+## Why reflection?
+
+Most C++ web frameworks bind routes with runtime registration (`app.get("/x", lambda)`), macros or a code generator. crocket uses C++26 static reflection instead. Routes are ordinary functions: the annotation is a normal C++ value, and `reflect_routes<^^api>()` reads the functions, their annotations and their parameters at compile time. That buys a few things:
+
+- **Nothing to register or keep in sync.** Mounting a namespace or class picks up every annotated function in it; you can't forget to add a route to a list. Unannotated helpers are ignored.
+- **Mistakes are compile errors, in your words.** Reflection can see parameter *names*, which templates alone cannot. A path capture is matched to its parameter by name, so a mismatch fails the build with a message naming both identifiers ("did you mean parameter 'years'?"). The same applies to a type that can't be parsed from a path, an unknown extractor, or a return type that isn't a responder.
+- **No runtime cost.** Reflection runs only in the compiler. Each route becomes a plain function pointer to a generated invoker, with no string lookups, RTTI or type erasure per argument on the request path.
+- **The signature is the configuration.** Which state a route needs, whether it reads the body, and how its errors are counted are all derived from the parameter types. That is how a missing `.manage(...)` is caught at ignite rather than on the first request.
+- **One mechanism, no boilerplate.** The same reflection maps JSON bodies and query strings onto your structs, with no derive macros or field lists.
+- **The API describes itself.** The same signatures and structs produce an [OpenAPI document](#openapi) and a `.proto`, which can't drift from the code because they are read from it.
+- **Handlers stay testable.** Because they are plain functions, you can call them directly in unit tests, step into them in a debugger, and navigate to them in an IDE.
+
+The trade-off is toolchain reach and build time. You need a compiler with C++26 reflection (developed on GCC 16), and heavily annotated translation units compile more slowly than hand-registered routes.
+
+See [docs/DESIGN.md](docs/DESIGN.md) for crocket's goals, non-goals and principles, and
+[docs/ENGINE.md](docs/ENGINE.md) for how the wire engine works.
+
 ### Compared with Crow and Drogon
 
 The same route, `GET /hello/{name}/{age}`, in each framework:
@@ -82,18 +99,23 @@ drogon::app().addListener("0.0.0.0", 8000).run();
 
 In crocket the route is a plain, named function: no macro, no registration call, and no callback. Captures bind to parameters by name, so a typo in `{age}` is a compile error, and `age` out of `std::uint8_t` range is a 404 before the handler runs. Crow matches captures by position through `<int>`/`<string>` in the macro; Drogon by position in the lambda's parameter list.
 
-### Quick start
+## Using crocket
 
-```bash
-git clone https://github.com/sean3z/crocket && cd crocket
-./dev setup     # apt packages for Ubuntu 26.04 (asks for sudo once)
-./dev gcc       # builds GCC 16.2 into ~/.local/gcc-16.2 (the slow part)
-./dev check     # release build plus the full test suite
-./build/crocket_hello
-curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
+Add crocket to a CMake project with FetchContent:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(crocket
+  GIT_REPOSITORY https://github.com/sean3z/crocket.git
+  GIT_TAG 0.3.0)  # the current stable release
+FetchContent_MakeAvailable(crocket)
+
+target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
 
-To use crocket in your own project, see [Using crocket](#using-crocket).
+`0.3.0` is the current stable release. To update, change `GIT_TAG` to a newer release
+from [CHANGELOG.md](CHANGELOG.md). For the bleeding edge, opt in to `GIT_TAG main`
+(the latest channel); for reproducible builds off `main`, pin a full commit SHA.
 
 ## Try it
 
@@ -119,76 +141,18 @@ docker run --rm -it -v "$PWD:/src" -p 8000:8000 ghcr.io/sean3z/crocket-toolchain
 (`./dev run` uses the dev profile, which listens on 127.0.0.1; inside a container use
 `./dev check` and run `build/crocket_hello` to listen on 0.0.0.0.)
 
-## Why reflection?
+### Quick start
 
-Most C++ web frameworks bind routes with runtime registration (`app.get("/x", lambda)`), macros or a code generator. crocket uses C++26 static reflection instead. Routes are ordinary functions: the annotation is a normal C++ value, and `reflect_routes<^^api>()` reads the functions, their annotations and their parameters at compile time. That buys a few things:
-
-- **Nothing to register or keep in sync.** Mounting a namespace or class picks up every annotated function in it; you can't forget to add a route to a list. Unannotated helpers are ignored.
-- **Mistakes are compile errors, in your words.** Reflection can see parameter *names*, which templates alone cannot. A path capture is matched to its parameter by name, so a mismatch fails the build with a message naming both identifiers ("did you mean parameter 'years'?"). The same applies to a type that can't be parsed from a path, an unknown extractor, or a return type that isn't a responder.
-- **No runtime cost.** Reflection runs only in the compiler. Each route becomes a plain function pointer to a generated invoker, with no string lookups, RTTI or type erasure per argument on the request path.
-- **The signature is the configuration.** Which state a route needs, whether it reads the body, and how its errors are counted are all derived from the parameter types. That is how a missing `.manage(...)` is caught at ignite rather than on the first request.
-- **One mechanism, no boilerplate.** The same reflection maps JSON bodies and query strings onto your structs, with no derive macros or field lists.
-- **The API describes itself.** The same signatures and structs produce an [OpenAPI document](#openapi) and a `.proto`, which can't drift from the code because they are read from it.
-- **Handlers stay testable.** Because they are plain functions, you can call them directly in unit tests, step into them in a debugger, and navigate to them in an IDE.
-
-The trade-off is toolchain reach and build time. You need a compiler with C++26 reflection (developed on GCC 16), and heavily annotated translation units compile more slowly than hand-registered routes.
-
-See [docs/DESIGN.md](docs/DESIGN.md) for crocket's goals, non-goals and principles, and
-[docs/ENGINE.md](docs/ENGINE.md) for how the wire engine works.
-
-## Using crocket
-
-Add crocket to a CMake project with FetchContent:
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(crocket
-  GIT_REPOSITORY https://github.com/sean3z/crocket.git
-  GIT_TAG 0.3.0)  # the current stable release
-FetchContent_MakeAvailable(crocket)
-
-target_link_libraries(my_app PRIVATE crocket::crocket)
+```bash
+git clone https://github.com/sean3z/crocket && cd crocket
+./dev setup     # apt packages for Ubuntu 26.04 (asks for sudo once)
+./dev gcc       # builds GCC 16.2 into ~/.local/gcc-16.2 (the slow part)
+./dev check     # release build plus the full test suite
+./build/crocket_hello
+curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
 ```
 
-`0.3.0` is the current stable release. To update, change `GIT_TAG` to a newer release
-from [CHANGELOG.md](CHANGELOG.md). For the bleeding edge, opt in to `GIT_TAG main`
-(the latest channel); for reproducible builds off `main`, pin a full commit SHA.
-
-### Versions and channels
-
-crocket uses [Semantic Versioning](https://semver.org/). While on 0.x, a minor bump
-(0.1 → 0.2) may break the API, and patch releases are fixes and additions only. Each
-release is in [CHANGELOG.md](CHANGELOG.md) and on
-[GitHub Releases](https://github.com/sean3z/crocket/releases).
-
-| Channel | Git ref | Docker tags (`ghcr.io/sean3z/crocket-hello`) | For |
-|---|---|---|---|
-| **stable** (default) | the latest `X.Y.Z` tag, now `0.3.0` | `:0.3.0`, `:0.3`, `:stable` | Everyone |
-| latest (opt-in) | `main`, every merge | `:latest`, `:sha-<short>` | Trying what's next |
-| experimental (opt-in) | `X.Y.Z-rc.N` pre-release tags | `:X.Y.Z-rc.N`, `:experimental` | Testing risky changes |
-
-The version is in `<crocket/version.hpp>` (included by `<crocket/crocket.hpp>`):
-`crocket::version::string` (`"0.3.0"`), `major`/`minor`/`patch`, `commit` (the short git
-commit at configure time, or `-DCROCKET_GIT_COMMIT=...`) and `compiler`.
-
-For a vendored copy or a git submodule, use
-`FetchContent_Declare(crocket SOURCE_DIR path/to/crocket)` instead.
-
-Linking `crocket::crocket` adds `-std=c++26 -freflection` to your target. crocket's
-own examples and tests are not built, and h2o stays private: it is not in your
-headers or your CMake cache.
-
-You need:
-
-- **GCC 16.2 or later.** Ubuntu 26.04's `g++-16` package is too old (see
-  [Building](#building)). Clang is not tested yet.
-- **CMake 3.28 or later**, and Ninja or Make.
-- **OpenSSL and zlib development headers** (`libssl-dev`, `zlib1g-dev`), and `perl`,
-  which h2o's build runs to generate a header.
-- **Network access on the first configure**, to fetch h2o (a 7 MB tarball) from GitHub.
-  Set `FETCHCONTENT_SOURCE_DIR_H2O` to a local checkout to build offline.
-
-There are no `install()` rules yet, so `find_package(crocket)` does not work.
+To use crocket in your own project, see [Using crocket](#using-crocket).
 
 ## Rocket, in C++
 
@@ -645,32 +609,6 @@ auto report(std::uint64_t id, State<Store> store) -> Cacheable<std::string> {
   and a request for several ranges gets the whole body. `If-Range` makes the range
   conditional on the client still having the current version.
 
-### Errors
-
-Every error, whether from an extractor, a responder, the router or an exception, is an
-[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem (`application/problem+json`)
-and carries the request id:
-
-```json
-{"title":"Unprocessable Content","status":422,"detail":"email must contain '@'",
- "code":"user.email","request_id":"5f0c…"}
-```
-
-`ApiError{status, code, message, detail}` is the type behind it:
-
-- `message` is the problem's `detail`, written for the client.
-- `code` is a stable, dotted identifier that clients can switch on.
-- `errors` lists failing fields as `{"pointer", "detail"}` pairs. `Json<T>` fills it
-  from validation and decoding errors.
-- `type` is an optional problem-type URI. It is left out when empty, which RFC 9457
-  reads as `about:blank`, and `title` is the status's reason phrase.
-- `detail` goes to the logs only, never to the client. The one exception is the
-  [dev profile](#dev-profile), which adds it to error bodies as `debug`.
-- An uncaught exception becomes 500 `internal`. Its `what()` is logged, never sent.
-- A response header with CR, LF or NUL in its value, or an invalid name, also becomes
-  500 `internal`, so a `Location` built from user input cannot inject headers. If an
-  `on_response` fairing adds such a header, the engine drops it and reports it on stderr.
-
 ### Managed state and sentinels
 
 `manage` a value once and ask for it with `State<T>` anywhere. As with Rocket's
@@ -704,104 +642,6 @@ auto get_user(std::uint64_t id, State<Pool<Conn>> db, Deadline d) -> Result<std:
 }
 ```
 
-### Databases: `crocket::db`
-
-The `crocket::db` API (`Db&`, `db::Pool`, `find`, `insert`, `where`, ...) is generic;
-each database is a backend you link. Today there is one, **`crocket::pg`**, for Postgres
-on [libpqxx](https://github.com/jtv/libpqxx). It is built when libpqxx is found
-(`apt install libpqxx-dev`): `target_link_libraries(app PRIVATE crocket::pg)`.
-`-DCROCKET_PG=OFF` skips it and `-DCROCKET_PG=ON` makes a missing libpqxx an error.
-Programs that link only `crocket::crocket` are unaffected. Handlers name `Db&`, never
-the backend, so a later backend (`crocket::sqlite`, say) needs no handler changes.
-
-Your structs stay plain: no annotations and no base class.
-
-```cpp
-#include <crocket/db.hpp>
-
-struct Hero {
-  std::int64_t id;                    // the key: the member named id
-  std::string name;                   // "Barry Allen"
-  std::string alias;                  // "The Flash"
-  std::optional<std::string> mentor;  // NULL when empty
-};
-
-[[= http::get("/heroes/{id}")]]
-auto get(Db& db, std::int64_t id) -> std::optional<Hero> {
-  return db.find<Hero>(id);           // nullopt: 404
-}
-
-[[= http::post("/heroes")]]
-auto create(Db& db, Json<Hero> body) -> Created<Hero> {
-  return {db.insert(*body)};          // fills in id; a unique violation is 409 db.conflict
-}
-
-[[= http::get("/robins")]]
-auto robins(Db& db) -> std::vector<Hero> {
-  return db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id);
-}
-
-int main() {
-  auto cfg = Config::from_env();      // CROCKET_DATABASE_URL, CROCKET_DATABASE_POOL_SIZE, ...
-  return build(cfg)
-      .manage(db::Pool(cfg.database))
-      .attach(Logger{}).attach(Metrics{})
-      .mount("/", reflect_routes<^^api>())
-      .launch();
-}
-```
-
-Reflection reads the struct while compiling:
-
-- **The table** is the type's name in plural snake_case: `Hero` is `heroes`, `HeroTeam`
-  is `hero_teams`, `Category` is `categories`. To use another name, specialize
-  `table_name` next to the struct:
-  `template <> constexpr auto crocket::db::table_name<Hero> = "justice_league";`
-- **The columns** are the data members, by name and in declaration order. The member
-  named `id` is the key; the database fills it in on insert.
-- **`std::optional<T>`** members read and write `NULL`.
-- **`id` may be left out of a JSON body** (`{"name":"Barry Allen","alias":"The Flash"}`):
-  it reads as 0, `insert()` never sends it, and the stored row comes back with the id
-  the database assigned. An `id` a client does send is ignored on insert. OpenAPI does
-  not list `id` as required. (The core hook is `json::omittable<T>`.)
-
-| Call | Does |
-|---|---|
-| `db.find<Hero>(id)` | `std::optional<Hero>` |
-| `db.insert(hero)` | inserts every member but `id`, sets `hero.id`, returns the stored `Hero` |
-| `db.update(hero)` | writes every member to the row with `hero.id`; `false` if there is none |
-| `db.erase<Hero>(id)` | deletes it; `false` if there was none |
-| `db.where(&Hero::mentor, "Bruce Wayne")` | equality; `std::nullopt` is `IS NULL` |
-| `db.where(&Hero::alias, db::like("Robin%"))` | also `db::ilike`, `ne`, `lt`, `le`, `gt`, `ge`, `db::in({...})` |
-| `.where(...)`, `.order_by(&Hero::id, db::desc)`, `.limit(1)`, `.offset(n)` | chain them (conditions are ANDed) |
-| `.all()`, `.first()`, `.count()` | run it; a range-for or converting to `std::vector<Hero>` runs it too |
-| `db.all<Hero>()` | every row, to chain from |
-| `db.sql<Hero>("select ... where ...", args...)` | the escape hatch: any SQL, columns decoded into `Hero` by position |
-| `db.exec("update ...", args...)`, `db.connection()` | raw `pqxx::result`, and the libpqxx connection itself (transactions, `COPY`) |
-
-Filters name columns with member pointers, so a typo does not compile. The SQL for
-`find`, `insert`, `update` and `erase` is built while compiling; every statement is
-prepared once per connection and rows are decoded straight into the members.
-
-`Db& db` is managed state like any other: a route that takes it fails at ignite
-without a `db::Pool`, and stays on workers, since it may wait for a connection. The
-connection is checked out at the request's first query (waiting at most
-`database.pool_wait` and the request's deadline, then 503 `db.busy`) and returned
-when the handler ends. Outside a request, `pool.handle()` gives you a `Db` for
-seeding, migrations and jobs. The pool is part of `/readyz` (`select 1`).
-
-What it tells you, with no code of your own:
-
-- `crocket_db_seconds{table,op}`, a histogram of query time (decoding included) per
-  table and operation (`find`, `insert`, `update`, `erase`, `where`, `count`, `sql`),
-  and `crocket_db_pool_connections{state="idle"|"in_use"}`, in `Metrics`;
-- `db_ms`, `db_wait_ms` (waiting for a pool connection) and `db_queries` on the
-  request's `Logger` line, so `duration_ms - db_ms` is time spent outside the database.
-
-Each query is timed with two `steady_clock` reads and three relaxed atomic adds,
-about 70 ns, against a database round trip of tens of microseconds. Routes that never
-take `Db&` pay nothing. See `examples/heroes.cpp` for a full CRUD API.
-
 ### Controllers
 
 A class can be a route scope. Static members are ordinary handlers. Non-static members
@@ -821,199 +661,6 @@ class Info {
 
 app.manage(Info{"1.4.2"}).mount("/", reflect_routes<^^Info>());
 ```
-
-### Fairings
-
-Fairings are crocket's structured middleware, with Rocket's hook names. A fairing is
-any movable type that has one or more of these members; there is no trait to implement
-and no `info()`:
-
-| Hook | When | Can |
-|---|---|---|
-| `void on_ignite(Ignite&)` | During `ignite()`, in attach order | Inspect state, config and routes; `ig.fail("...")` aborts launch |
-| `void on_request(Request&)` | Before routing, in attach order | Rewrite the request |
-| `std::optional<Response> on_request(Request&)` | Same | Also answer immediately and stop the chain |
-| `void on_response(const Request&, Response&)` | After the response exists, in **reverse** attach order | Rewrite the response |
-| `void on_shutdown()` | After the drain, in reverse attach order, before state is destroyed | Flush, close, say goodbye |
-
-Differences from Rocket:
-
-- **`on_request` can answer the request.** Returning a `Response` stops the chain, which
-  is useful for maintenance mode and CORS preflights. Rocket's request fairings can only
-  modify the request.
-- **`on_response` runs in reverse attach order.** Fairings nest like layers: the first
-  attached sees the request first and the response last.
-- **`on_response` runs on every response, early rejections included.** That covers the
-  engine's 413, 503 and 504, so logs and metrics never miss a request.
-
-A response timer (compare Rocket's `RequestTimer`):
-
-```cpp
-struct Timer {
-  void on_response(const Request& rq, Response& rs) {
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - rq.received).count();
-    rs.headers.set("x-response-time", std::format("{} us", us));
-  }
-};
-```
-
-Maintenance mode, answering early:
-
-```cpp
-struct Maintenance {
-  std::shared_ptr<std::atomic<bool>> on = std::make_shared<std::atomic<bool>>(false);
-
-  std::optional<Response> on_request(Request& rq) {
-    if (!*on || rq.path == "/healthz") return std::nullopt;   // carry on
-    Response rs;
-    rs.status = 503;
-    rs.headers.set("retry-after", "120");
-    rs.body = "down for maintenance\n";
-    return rs;                                               // handler never runs
-  }
-};
-```
-
-Launch checks and cleanup:
-
-```cpp
-struct RequireKeyInProd {
-  bool prod;
-  void on_ignite(Ignite& ig) {
-    if (prod && !ig.state<ApiKey>()) ig.fail("RequireKeyInProd: production needs a managed ApiKey");
-  }
-  void on_shutdown() { std::puts("bye"); }
-};
-```
-
-A custom 404 page, standing in for a Rocket `#[catch(404)]`:
-
-```cpp
-struct NotFoundPage {
-  void on_response(const Request& rq, Response& rs) {
-    if (rs.status == 404 && !rq.header("accept").value_or("").contains("json")) {
-      rs.body = "<h1>404</h1><p>Nothing here.</p>";
-      rs.set_content_type("text/html; charset=utf-8");
-    }
-  }
-};
-
-crocket::build().attach(Timer{}).attach(Maintenance{}).attach(RequireKeyInProd{false}).attach(NotFoundPage{});
-```
-
-Fairings run concurrently on worker threads, so keep any shared state thread-safe.
-`Maintenance` above uses an atomic behind a `shared_ptr` so you can keep a handle to
-flip it.
-
-Built-in fairings:
-
-- **`Logger`:** one line per request with the request and trace ids, method, route
-  template (never the raw path), handler, status, error code, duration, bytes in and
-  out, protocol, client address, user agent, authenticated subject and log-only detail.
-  Also lines at ignite and shutdown. See [Logging](#logging) for where lines go.
-- **`Cors`:** deny-by-default CORS.
-  - `Cors::allow_origins({...})` with `allow_methods`, `allow_headers`,
-    `expose_headers`, `allow_credentials` and `max_age`.
-  - Answers preflights itself, or 403 `cors.denied` for origins not on the list.
-  - Refuses at ignite to combine credentials with `*`.
-- **`Shield`:** security headers on every response, attached by default:
-  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
-  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and
-  `Referrer-Policy: no-referrer`, plus `Strict-Transport-Security: max-age=31536000` on
-  https (never for localhost). A header the handler set itself is left alone. Attach
-  your own to change it, or `Shield::none()` to send nothing:
-  ```cpp
-  app.attach(Shield{}.set("content-security-policy", "default-src 'self'").remove("x-frame-options"));
-  ```
-- **`Metrics`:** Prometheus text at `GET /metrics`, labeled by route template.
-  - `crocket_http_requests_total` and a duration histogram.
-  - `crocket_http_requests_in_flight`.
-  - `crocket_extractor_failures_total`.
-  - `crocket_connections`, `crocket_connections_per_ip_closed_total` and
-    `crocket_request_body_bytes` (see [Limits](#limits)).
-  - `crocket_workers`, `crocket_workers_busy` and `crocket_workers_stuck` (still running
-    after their request's deadline), and `crocket_requests_abandoned_total`. See
-    [Deadlines and cancellation](#deadlines-and-cancellation).
-  - `crocket_build_info{version,commit,compiler,hostname} 1`, which says what is running where.
-  - **Constant labels** on every series from `CROCKET_METRICS_LABELS`, a comma-separated
-    `name=value` list (or pass them: `Metrics{"/metrics", {{"pod", "web-1"}}}`). In
-    Kubernetes, fill it from the Downward API:
-    ```yaml
-    env:
-      - name: POD_NAME
-        valueFrom: {fieldRef: {fieldPath: metadata.name}}
-      - name: CROCKET_METRICS_LABELS
-        value: pod=$(POD_NAME)
-    ```
-  - **Scrape each pod directly**, never through a load balancer or Service: each scrape
-    would land on a different instance, so counters jump between them and `rate()` sees
-    fake resets. Prometheus' Kubernetes service discovery (or a ServiceMonitor) scrapes pod
-    IPs and adds `instance`/`pod` itself. Keep `/metrics` off the public listener, or
-    behind auth.
-- **`OpenApi`:** the OpenAPI document at `GET /openapi.json`, and with `.docs`, a page to
-  try the API. See [OpenAPI](#openapi).
-
-### Logging
-
-`log::debug`, `log::info`, `log::warn` and `log::error` work anywhere: in a handler, in
-code it calls, in a fairing, or outside any request.
-
-```cpp
-[[= http::post("/users")]]
-auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>> {
-  auto user = db->insert(*body);
-  log::info("created user {user_id} on plan {plan}", user.id, body->plan);
-  return Created<User>{user, std::format("/users/{}", user.id)};
-}
-```
-
-```json
-{"ts":"2026-10-05T14:03:07.250Z","level":"info","msg":"created user 42 on plan pro",
- "request_id":"5f0c…","trace_id":"4bf92f35…","route":"/users","handler":"api::create",
- "subject":"alice","user_id":42,"plan":"pro"}
-```
-
-- **Each `{name}` is a field as well as part of the text.** Arguments may be anything
-  JSON can encode, structs included. A count that does not match the placeholders, a
-  repeated name, or a name crocket writes itself (`request_id`, `msg`, ...) is a compile
-  error. Write `{{` and `}}` for literal braces.
-- **The request comes along by itself.** While crocket runs a handler and its fairings,
-  every line carries that request's id, trace id (from a W3C `traceparent` header),
-  route, handler and authenticated subject, at any depth of the call stack. Outside a
-  request, lines carry none of these. A thread the handler starts takes the context
-  with it explicitly:
-  ```cpp
-  auto ctx = log::context();
-  std::thread([ctx] { log::Scope scope{ctx}; log::info("indexing {count} rows", n); }).detach();
-  ```
-- **Lines are written by a background thread**, so a slow terminal or log shipper never
-  holds up a request. Under load it collects lines in batches, about a millisecond
-  apart, and writes them in the order they were logged across all threads.
-  `LocalClient` waits for a request's lines before `dispatch()` returns, and
-  `app.flush_logs()` waits for everything so far.
-
-`Config::log` controls everything:
-
-```cpp
-cfg.log.level = log::Level::debug;           // default info; Config::dev() uses debug
-cfg.log.sample = 0.1;                        // keep 10% of successful request lines
-cfg.log.redact = {"password", "card"};       // fields shown as "[redacted]"
-cfg.log.buffer = 10'000;                     // lines waiting for the writer
-cfg.log.when_full = log::WhenFull::drop;     // or block
-cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
-```
-
-| Option | Default | Meaning |
-|---|---|---|
-| `level` | `info` | Lines below it are skipped, request lines included (successes are `info`, 4xx `warn`, 5xx `error`). |
-| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept. |
-| `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these, ignoring case, is written as `"[redacted]"`, in the message too and inside structs. |
-| `buffer` | `10'000` | Lines waiting for the writer. |
-| `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
-| `sink` | stderr | Called on the writer thread with each line. |
-
-In the dev profile, lines are readable text instead of JSON:
-`14:03:07.250 INFO  created user 42 on plan pro [5f0c…]`.
 
 ### Async handlers
 
@@ -1086,22 +733,6 @@ WARN  api::get_user blocked its event loop (48 ms, after 8 slow runs within 1 s)
 - **`Config::adaptive_placement = false`** keeps every plain function on workers.
 
 Timing a run costs two clock reads, about 40 ns.
-
-### Deadlines and cancellation
-
-Every request has a deadline (`timeouts.request`, default 30 s) and a stop
-token. The token fires when the deadline passes or the client disconnects.
-
-- **Extractors and pools** such as `Pool::checkout` honor the token automatically.
-- **Handlers doing long work** can take a `Deadline` parameter and poll `expired()`.
-- **At the deadline** the client gets 504 `deadline.exceeded` regardless of what the
-  handler is doing.
-- **A request still waiting for a worker** when its deadline passes, or when its client
-  goes away (an HTTP/2 stream reset included), is dropped there: its handler never runs.
-  `crocket_requests_abandoned_total` counts these.
-- **A handler that ignores its deadline** keeps its worker until it returns. While it
-  runs late, `crocket_workers_stuck` counts it. When it returns, crocket logs a warning
-  naming the route and how late it was.
 
 ### OpenAPI
 
@@ -1247,6 +878,10 @@ assert(bad.status == 404 && bad.error_code == "path.invalid");
 `tests/compile_fail/` contains programs that must not compile, each checked for the
 expected diagnostic.
 
+## Configuration
+
+Everything about configuring a server: `Config`, the dev profile, proxies and the `CROCKET_*` environment variables.
+
 ### Launching
 
 ```cpp
@@ -1323,6 +958,33 @@ Every resource a client can make the server hold has a bound. The defaults follo
 `crocket_request_body_bytes` (bodies held now). The threading model is in
 [docs/ENGINE.md](docs/ENGINE.md).
 
+### Dev profile
+
+`Config::dev()` is for running on your own machine. Choose it in code, or read
+`CROCKET_PROFILE` with `Config::from_env()`, which gives `dev()` for `dev`, the release
+defaults when unset or `release`, and throws `std::invalid_argument` for anything else
+(it reads the [other variables](#environment-variables) too):
+
+```cpp
+return crocket::build(Config::from_env()) // CROCKET_PROFILE=dev ./my_app
+    .attach(Logger{})
+    .mount("/", reflect_routes<^^api>())
+    .launch();
+```
+
+Compared with the release defaults, the dev profile:
+
+- **Error bodies carry `debug`** (`ApiError::detail`), including an uncaught exception's `what()`, so you
+  see the cause in the client without reading logs. Release never sends it.
+- **Logs are readable lines**, colored on a terminal unless `NO_COLOR` is set, and
+  `debug` lines are on: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
+- **`launch()` prints every route** before it starts.
+- **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
+  breakpoint), and the drain on shutdown is one second.
+- **An empty `server.host` binds `127.0.0.1`** instead of `0.0.0.0`.
+- **`allowed_hosts` also accepts `localhost`, `127.0.0.1` and `::1`**, so a server
+  configured for its public name still answers locally.
+
 ### Behind a proxy
 
 The `Client` extractor describes the client: its address, and whether it connected with
@@ -1358,34 +1020,389 @@ In tests, `LocalClient` sets the peer with `.remote()`:
 auto r = client.get("/whoami").remote("10.0.0.5").header("x-forwarded-for", "203.0.113.9").dispatch();
 ```
 
-### Dev profile
+### Environment variables
 
-`Config::dev()` is for running on your own machine. Choose it in code, or read
-`CROCKET_PROFILE` with `Config::from_env()`, which gives `dev()` for `dev`, the release
-defaults when unset or `release`, and throws `std::invalid_argument` for anything else
-(it reads the [other variables](#environment-variables) too):
+`Config::from_env()` reads these, on top of the profile. Unset or empty leaves the
+setting alone; a value that does not parse throws `std::invalid_argument` naming the
+variable (`CROCKET_PORT=tcp://10.43.0.12:8000: expected a whole number from 0 to 65535`),
+so a typo stops the program at startup instead of being ignored. Sizes take `K`, `M` or
+`G` (powers of 1024); durations take `ms`, `s`, `m` or `h`, and a bare number is seconds;
+booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-separated.
+
+| Variable | Sets | Default |
+|---|---|---|
+| `CROCKET_PROFILE` | `dev` or `release` | `release` |
+| `CROCKET_LISTEN` | `server.listen`: `host:port`, `:port` or `port` (replaces host and port) | unset |
+| `CROCKET_HOST` | `server.host` | `0.0.0.0` (`127.0.0.1` in dev) |
+| `CROCKET_PORT` | `server.port` | `8000` |
+| `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | `server.tls_cert`, `server.tls_key`; TLS needs both | unset |
+| `CROCKET_HTTP2` | `server.http2` | `true` |
+| `CROCKET_H2_PRIOR_KNOWLEDGE` | `server.h2_prior_knowledge` | `false` |
+| `CROCKET_WORKERS` | `server.workers` | one per core |
+| `CROCKET_EVENT_LOOPS` | `server.event_loops` | one per physical core |
+| `CROCKET_MAX_BODY_BYTES` | `limits.max_body_bytes` | `1M` |
+| `CROCKET_MAX_BODY_MEMORY` | `limits.max_body_memory` | `256M` |
+| `CROCKET_MAX_IN_FLIGHT` | `limits.max_in_flight` | `1024` |
+| `CROCKET_MAX_HEADER_BYTES` | `limits.max_header_bytes` | `8K` |
+| `CROCKET_MAX_HEADER_COUNT` | `limits.max_header_count` | `100` |
+| `CROCKET_MAX_CONNECTIONS` | `limits.max_connections` | `1024` |
+| `CROCKET_MAX_CONNECTIONS_PER_IP` | `limits.max_connections_per_ip` | `0` (none) |
+| `CROCKET_HTTP2_MAX_STREAMS` | `limits.http2_max_streams` | `100` |
+| `CROCKET_ETAG_MAX_BYTES` | `limits.etag_max_bytes` | `1M` |
+| `CROCKET_REQUEST_TIMEOUT` | `timeouts.request` | `30s` (an hour in dev) |
+| `CROCKET_DRAIN_TIMEOUT` | `timeouts.drain` | `10s` (`1s` in dev) |
+| `CROCKET_TRUSTED_PROXIES` | `proxy.trusted` | none |
+| `CROCKET_PROXY_HEADER` | `proxy.header`: `x-forwarded-for` or `forwarded` | `x-forwarded-for` |
+| `CROCKET_ALLOWED_HOSTS` | `proxy.allowed_hosts` | any host |
+| `CROCKET_DEBUG_ROUTES` | `debug_routes` (`GET /__routes`) | `false` (`true` in dev) |
+| `CROCKET_ADAPTIVE_PLACEMENT` | `adaptive_placement` | `true` |
+| `CROCKET_LOG_LEVEL` | `log.level`: `debug`, `info`, `warn` or `error` | `info` (`debug` in dev) |
+| `CROCKET_DATABASE_URL` | `database.url`, for [`crocket::db`](#databases-crocketdb) | unset (libpq's `PG*` variables) |
+| `CROCKET_DATABASE_POOL_SIZE` | `database.pool_size` | `8` |
+| `CROCKET_DATABASE_POOL_WAIT` | `database.pool_wait` | `5s` |
+
+`CROCKET_METRICS_LABELS` is read by `Metrics`. `crocket_serve`
+uses `Config::from_env()` as is, with a 10 s request deadline and 5 s drain as its own
+defaults.
+
+## Databases: `crocket::db`
+
+The `crocket::db` API (`Db&`, `db::Pool`, `find`, `insert`, `where`, ...) is generic;
+each database is a backend you link. Today there is one, **`crocket::pg`**, for Postgres
+on [libpqxx](https://github.com/jtv/libpqxx). It is built when libpqxx is found
+(`apt install libpqxx-dev`): `target_link_libraries(app PRIVATE crocket::pg)`.
+`-DCROCKET_PG=OFF` skips it and `-DCROCKET_PG=ON` makes a missing libpqxx an error.
+Programs that link only `crocket::crocket` are unaffected. Handlers name `Db&`, never
+the backend, so a later backend (`crocket::sqlite`, say) needs no handler changes.
+
+Your structs stay plain: no annotations and no base class.
 
 ```cpp
-return crocket::build(Config::from_env()) // CROCKET_PROFILE=dev ./my_app
-    .attach(Logger{})
-    .mount("/", reflect_routes<^^api>())
-    .launch();
+#include <crocket/db.hpp>
+
+struct Hero {
+  std::int64_t id;                    // the key: the member named id
+  std::string name;                   // "Barry Allen"
+  std::string alias;                  // "The Flash"
+  std::optional<std::string> mentor;  // NULL when empty
+};
+
+[[= http::get("/heroes/{id}")]]
+auto get(Db& db, std::int64_t id) -> std::optional<Hero> {
+  return db.find<Hero>(id);           // nullopt: 404
+}
+
+[[= http::post("/heroes")]]
+auto create(Db& db, Json<Hero> body) -> Created<Hero> {
+  return {db.insert(*body)};          // fills in id; a unique violation is 409 db.conflict
+}
+
+[[= http::get("/robins")]]
+auto robins(Db& db) -> std::vector<Hero> {
+  return db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id);
+}
+
+int main() {
+  auto cfg = Config::from_env();      // CROCKET_DATABASE_URL, CROCKET_DATABASE_POOL_SIZE, ...
+  return build(cfg)
+      .manage(db::Pool(cfg.database))
+      .attach(Logger{}).attach(Metrics{})
+      .mount("/", reflect_routes<^^api>())
+      .launch();
+}
 ```
 
-Compared with the release defaults, the dev profile:
+Reflection reads the struct while compiling:
 
-- **Error bodies carry `debug`** (`ApiError::detail`), including an uncaught exception's `what()`, so you
-  see the cause in the client without reading logs. Release never sends it.
-- **Logs are readable lines**, colored on a terminal unless `NO_COLOR` is set, and
-  `debug` lines are on: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
-- **`launch()` prints every route** before it starts.
-- **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
-  breakpoint), and the drain on shutdown is one second.
-- **An empty `server.host` binds `127.0.0.1`** instead of `0.0.0.0`.
-- **`allowed_hosts` also accepts `localhost`, `127.0.0.1` and `::1`**, so a server
-  configured for its public name still answers locally.
+- **The table** is the type's name in plural snake_case: `Hero` is `heroes`, `HeroTeam`
+  is `hero_teams`, `Category` is `categories`. To use another name, specialize
+  `table_name` next to the struct:
+  `template <> constexpr auto crocket::db::table_name<Hero> = "justice_league";`
+- **The columns** are the data members, by name and in declaration order. The member
+  named `id` is the key; the database fills it in on insert.
+- **`std::optional<T>`** members read and write `NULL`.
+- **`id` may be left out of a JSON body** (`{"name":"Barry Allen","alias":"The Flash"}`):
+  it reads as 0, `insert()` never sends it, and the stored row comes back with the id
+  the database assigned. An `id` a client does send is ignored on insert. OpenAPI does
+  not list `id` as required. (The core hook is `json::omittable<T>`.)
 
-### Not (yet) in crocket
+| Call | Does |
+|---|---|
+| `db.find<Hero>(id)` | `std::optional<Hero>` |
+| `db.insert(hero)` | inserts every member but `id`, sets `hero.id`, returns the stored `Hero` |
+| `db.update(hero)` | writes every member to the row with `hero.id`; `false` if there is none |
+| `db.erase<Hero>(id)` | deletes it; `false` if there was none |
+| `db.where(&Hero::mentor, "Bruce Wayne")` | equality; `std::nullopt` is `IS NULL` |
+| `db.where(&Hero::alias, db::like("Robin%"))` | also `db::ilike`, `ne`, `lt`, `le`, `gt`, `ge`, `db::in({...})` |
+| `.where(...)`, `.order_by(&Hero::id, db::desc)`, `.limit(1)`, `.offset(n)` | chain them (conditions are ANDed) |
+| `.all()`, `.first()`, `.count()` | run it; a range-for or converting to `std::vector<Hero>` runs it too |
+| `db.all<Hero>()` | every row, to chain from |
+| `db.sql<Hero>("select ... where ...", args...)` | the escape hatch: any SQL, columns decoded into `Hero` by position |
+| `db.exec("update ...", args...)`, `db.connection()` | raw `pqxx::result`, and the libpqxx connection itself (transactions, `COPY`) |
+
+Filters name columns with member pointers, so a typo does not compile. The SQL for
+`find`, `insert`, `update` and `erase` is built while compiling; every statement is
+prepared once per connection and rows are decoded straight into the members.
+
+`Db& db` is managed state like any other: a route that takes it fails at ignite
+without a `db::Pool`, and stays on workers, since it may wait for a connection. The
+connection is checked out at the request's first query (waiting at most
+`database.pool_wait` and the request's deadline, then 503 `db.busy`) and returned
+when the handler ends. Outside a request, `pool.handle()` gives you a `Db` for
+seeding, migrations and jobs. The pool is part of `/readyz` (`select 1`).
+
+What it tells you, with no code of your own:
+
+- `crocket_db_seconds{table,op}`, a histogram of query time (decoding included) per
+  table and operation (`find`, `insert`, `update`, `erase`, `where`, `count`, `sql`),
+  and `crocket_db_pool_connections{state="idle"|"in_use"}`, in `Metrics`;
+- `db_ms`, `db_wait_ms` (waiting for a pool connection) and `db_queries` on the
+  request's `Logger` line, so `duration_ms - db_ms` is time spent outside the database.
+
+Each query is timed with two `steady_clock` reads and three relaxed atomic adds,
+about 70 ns, against a database round trip of tens of microseconds. Routes that never
+take `Db&` pay nothing. See `examples/heroes.cpp` for a full CRUD API.
+
+## Production features
+
+The pieces you turn on to run crocket in production: fairings (logging, metrics, shields and health), deadlines, and how errors are reported and logged.
+
+### Fairings
+
+Fairings are crocket's structured middleware, with Rocket's hook names. A fairing is
+any movable type that has one or more of these members; there is no trait to implement
+and no `info()`:
+
+| Hook | When | Can |
+|---|---|---|
+| `void on_ignite(Ignite&)` | During `ignite()`, in attach order | Inspect state, config and routes; `ig.fail("...")` aborts launch |
+| `void on_request(Request&)` | Before routing, in attach order | Rewrite the request |
+| `std::optional<Response> on_request(Request&)` | Same | Also answer immediately and stop the chain |
+| `void on_response(const Request&, Response&)` | After the response exists, in **reverse** attach order | Rewrite the response |
+| `void on_shutdown()` | After the drain, in reverse attach order, before state is destroyed | Flush, close, say goodbye |
+
+Differences from Rocket:
+
+- **`on_request` can answer the request.** Returning a `Response` stops the chain, which
+  is useful for maintenance mode and CORS preflights. Rocket's request fairings can only
+  modify the request.
+- **`on_response` runs in reverse attach order.** Fairings nest like layers: the first
+  attached sees the request first and the response last.
+- **`on_response` runs on every response, early rejections included.** That covers the
+  engine's 413, 503 and 504, so logs and metrics never miss a request.
+
+A response timer (compare Rocket's `RequestTimer`):
+
+```cpp
+struct Timer {
+  void on_response(const Request& rq, Response& rs) {
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - rq.received).count();
+    rs.headers.set("x-response-time", std::format("{} us", us));
+  }
+};
+```
+
+Maintenance mode, answering early:
+
+```cpp
+struct Maintenance {
+  std::shared_ptr<std::atomic<bool>> on = std::make_shared<std::atomic<bool>>(false);
+
+  std::optional<Response> on_request(Request& rq) {
+    if (!*on || rq.path == "/healthz") return std::nullopt;   // carry on
+    Response rs;
+    rs.status = 503;
+    rs.headers.set("retry-after", "120");
+    rs.body = "down for maintenance\n";
+    return rs;                                               // handler never runs
+  }
+};
+```
+
+Launch checks and cleanup:
+
+```cpp
+struct RequireKeyInProd {
+  bool prod;
+  void on_ignite(Ignite& ig) {
+    if (prod && !ig.state<ApiKey>()) ig.fail("RequireKeyInProd: production needs a managed ApiKey");
+  }
+  void on_shutdown() { std::puts("bye"); }
+};
+```
+
+A custom 404 page, standing in for a Rocket `#[catch(404)]`:
+
+```cpp
+struct NotFoundPage {
+  void on_response(const Request& rq, Response& rs) {
+    if (rs.status == 404 && !rq.header("accept").value_or("").contains("json")) {
+      rs.body = "<h1>404</h1><p>Nothing here.</p>";
+      rs.set_content_type("text/html; charset=utf-8");
+    }
+  }
+};
+
+crocket::build().attach(Timer{}).attach(Maintenance{}).attach(RequireKeyInProd{false}).attach(NotFoundPage{});
+```
+
+Fairings run concurrently on worker threads, so keep any shared state thread-safe.
+`Maintenance` above uses an atomic behind a `shared_ptr` so you can keep a handle to
+flip it.
+
+Built-in fairings:
+
+- **`Logger`:** one line per request with the request and trace ids, method, route
+  template (never the raw path), handler, status, error code, duration, bytes in and
+  out, protocol, client address, user agent, authenticated subject and log-only detail.
+  Also lines at ignite and shutdown. See [Logging](#logging) for where lines go.
+- **`Cors`:** deny-by-default CORS.
+  - `Cors::allow_origins({...})` with `allow_methods`, `allow_headers`,
+    `expose_headers`, `allow_credentials` and `max_age`.
+  - Answers preflights itself, or 403 `cors.denied` for origins not on the list.
+  - Refuses at ignite to combine credentials with `*`.
+- **`Shield`:** security headers on every response, attached by default:
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and
+  `Referrer-Policy: no-referrer`, plus `Strict-Transport-Security: max-age=31536000` on
+  https (never for localhost). A header the handler set itself is left alone. Attach
+  your own to change it, or `Shield::none()` to send nothing:
+  ```cpp
+  app.attach(Shield{}.set("content-security-policy", "default-src 'self'").remove("x-frame-options"));
+  ```
+- **`Metrics`:** Prometheus text at `GET /metrics`, labeled by route template.
+  - `crocket_http_requests_total` and a duration histogram.
+  - `crocket_http_requests_in_flight`.
+  - `crocket_extractor_failures_total`.
+  - `crocket_connections`, `crocket_connections_per_ip_closed_total` and
+    `crocket_request_body_bytes` (see [Limits](#limits)).
+  - `crocket_workers`, `crocket_workers_busy` and `crocket_workers_stuck` (still running
+    after their request's deadline), and `crocket_requests_abandoned_total`. See
+    [Deadlines and cancellation](#deadlines-and-cancellation).
+  - `crocket_build_info{version,commit,compiler,hostname} 1`, which says what is running where.
+  - **Constant labels** on every series from `CROCKET_METRICS_LABELS`, a comma-separated
+    `name=value` list (or pass them: `Metrics{"/metrics", {{"pod", "web-1"}}}`). In
+    Kubernetes, fill it from the Downward API:
+    ```yaml
+    env:
+      - name: POD_NAME
+        valueFrom: {fieldRef: {fieldPath: metadata.name}}
+      - name: CROCKET_METRICS_LABELS
+        value: pod=$(POD_NAME)
+    ```
+  - **Scrape each pod directly**, never through a load balancer or Service: each scrape
+    would land on a different instance, so counters jump between them and `rate()` sees
+    fake resets. Prometheus' Kubernetes service discovery (or a ServiceMonitor) scrapes pod
+    IPs and adds `instance`/`pod` itself. Keep `/metrics` off the public listener, or
+    behind auth.
+- **`OpenApi`:** the OpenAPI document at `GET /openapi.json`, and with `.docs`, a page to
+  try the API. See [OpenAPI](#openapi).
+
+### Deadlines and cancellation
+
+Every request has a deadline (`timeouts.request`, default 30 s) and a stop
+token. The token fires when the deadline passes or the client disconnects.
+
+- **Extractors and pools** such as `Pool::checkout` honor the token automatically.
+- **Handlers doing long work** can take a `Deadline` parameter and poll `expired()`.
+- **At the deadline** the client gets 504 `deadline.exceeded` regardless of what the
+  handler is doing.
+- **A request still waiting for a worker** when its deadline passes, or when its client
+  goes away (an HTTP/2 stream reset included), is dropped there: its handler never runs.
+  `crocket_requests_abandoned_total` counts these.
+- **A handler that ignores its deadline** keeps its worker until it returns. While it
+  runs late, `crocket_workers_stuck` counts it. When it returns, crocket logs a warning
+  naming the route and how late it was.
+
+### Logging
+
+`log::debug`, `log::info`, `log::warn` and `log::error` work anywhere: in a handler, in
+code it calls, in a fairing, or outside any request.
+
+```cpp
+[[= http::post("/users")]]
+auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>> {
+  auto user = db->insert(*body);
+  log::info("created user {user_id} on plan {plan}", user.id, body->plan);
+  return Created<User>{user, std::format("/users/{}", user.id)};
+}
+```
+
+```json
+{"ts":"2026-10-05T14:03:07.250Z","level":"info","msg":"created user 42 on plan pro",
+ "request_id":"5f0c…","trace_id":"4bf92f35…","route":"/users","handler":"api::create",
+ "subject":"alice","user_id":42,"plan":"pro"}
+```
+
+- **Each `{name}` is a field as well as part of the text.** Arguments may be anything
+  JSON can encode, structs included. A count that does not match the placeholders, a
+  repeated name, or a name crocket writes itself (`request_id`, `msg`, ...) is a compile
+  error. Write `{{` and `}}` for literal braces.
+- **The request comes along by itself.** While crocket runs a handler and its fairings,
+  every line carries that request's id, trace id (from a W3C `traceparent` header),
+  route, handler and authenticated subject, at any depth of the call stack. Outside a
+  request, lines carry none of these. A thread the handler starts takes the context
+  with it explicitly:
+  ```cpp
+  auto ctx = log::context();
+  std::thread([ctx] { log::Scope scope{ctx}; log::info("indexing {count} rows", n); }).detach();
+  ```
+- **Lines are written by a background thread**, so a slow terminal or log shipper never
+  holds up a request. Under load it collects lines in batches, about a millisecond
+  apart, and writes them in the order they were logged across all threads.
+  `LocalClient` waits for a request's lines before `dispatch()` returns, and
+  `app.flush_logs()` waits for everything so far.
+
+`Config::log` controls everything:
+
+```cpp
+cfg.log.level = log::Level::debug;           // default info; Config::dev() uses debug
+cfg.log.sample = 0.1;                        // keep 10% of successful request lines
+cfg.log.redact = {"password", "card"};       // fields shown as "[redacted]"
+cfg.log.buffer = 10'000;                     // lines waiting for the writer
+cfg.log.when_full = log::WhenFull::drop;     // or block
+cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `level` | `info` | Lines below it are skipped, request lines included (successes are `info`, 4xx `warn`, 5xx `error`). |
+| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept. |
+| `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these, ignoring case, is written as `"[redacted]"`, in the message too and inside structs. |
+| `buffer` | `10'000` | Lines waiting for the writer. |
+| `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
+| `sink` | stderr | Called on the writer thread with each line. |
+
+In the dev profile, lines are readable text instead of JSON:
+`14:03:07.250 INFO  created user 42 on plan pro [5f0c…]`.
+
+### Errors
+
+Every error, whether from an extractor, a responder, the router or an exception, is an
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem (`application/problem+json`)
+and carries the request id:
+
+```json
+{"title":"Unprocessable Content","status":422,"detail":"email must contain '@'",
+ "code":"user.email","request_id":"5f0c…"}
+```
+
+`ApiError{status, code, message, detail}` is the type behind it:
+
+- `message` is the problem's `detail`, written for the client.
+- `code` is a stable, dotted identifier that clients can switch on.
+- `errors` lists failing fields as `{"pointer", "detail"}` pairs. `Json<T>` fills it
+  from validation and decoding errors.
+- `type` is an optional problem-type URI. It is left out when empty, which RFC 9457
+  reads as `about:blank`, and `title` is the status's reason phrase.
+- `detail` goes to the logs only, never to the client. The one exception is the
+  [dev profile](#dev-profile), which adds it to error bodies as `debug`.
+- An uncaught exception becomes 500 `internal`. Its `what()` is logged, never sent.
+- A response header with CR, LF or NUL in its value, or an invalid name, also becomes
+  500 `internal`, so a `Location` built from user input cannot inject headers. If an
+  `on_response` fairing adds such a header, the engine drops it and reports it on stderr.
+
+## Not (yet) in crocket
 
 Rocket features without an equivalent today:
 
@@ -1401,6 +1418,42 @@ Rocket features without an equivalent today:
 | `on_liftoff` | Not implemented |
 | Config profiles (`Rocket.toml` / Figment) | A release and a [dev profile](#dev-profile) chosen with `CROCKET_PROFILE`; every other setting from `CROCKET_*` variables with `Config::from_env()` ([Environment variables](#environment-variables)); one `Config` struct in code |
 | Mutual TLS | Not implemented |
+
+## Versions and channels
+
+crocket uses [Semantic Versioning](https://semver.org/). While on 0.x, a minor bump
+(0.1 → 0.2) may break the API, and patch releases are fixes and additions only. Each
+release is in [CHANGELOG.md](CHANGELOG.md) and on
+[GitHub Releases](https://github.com/sean3z/crocket/releases).
+
+| Channel | Git ref | Docker tags (`ghcr.io/sean3z/crocket-hello`) | For |
+|---|---|---|---|
+| **stable** (default) | the latest `X.Y.Z` tag, now `0.3.0` | `:0.3.0`, `:0.3`, `:stable` | Everyone |
+| latest (opt-in) | `main`, every merge | `:latest`, `:sha-<short>` | Trying what's next |
+| experimental (opt-in) | `X.Y.Z-rc.N` pre-release tags | `:X.Y.Z-rc.N`, `:experimental` | Testing risky changes |
+
+The version is in `<crocket/version.hpp>` (included by `<crocket/crocket.hpp>`):
+`crocket::version::string` (`"0.3.0"`), `major`/`minor`/`patch`, `commit` (the short git
+commit at configure time, or `-DCROCKET_GIT_COMMIT=...`) and `compiler`.
+
+For a vendored copy or a git submodule, use
+`FetchContent_Declare(crocket SOURCE_DIR path/to/crocket)` instead.
+
+Linking `crocket::crocket` adds `-std=c++26 -freflection` to your target. crocket's
+own examples and tests are not built, and h2o stays private: it is not in your
+headers or your CMake cache.
+
+You need:
+
+- **GCC 16.2 or later.** Ubuntu 26.04's `g++-16` package is too old (see
+  [Building](#building)). Clang is not tested yet.
+- **CMake 3.28 or later**, and Ninja or Make.
+- **OpenSSL and zlib development headers** (`libssl-dev`, `zlib1g-dev`), and `perl`,
+  which h2o's build runs to generate a header.
+- **Network access on the first configure**, to fetch h2o (a 7 MB tarball) from GitHub.
+  Set `FETCHCONTENT_SOURCE_DIR_H2O` to a local checkout to build offline.
+
+There are no `install()` rules yet, so `find_package(crocket)` does not work.
 
 ## Building
 
@@ -1530,7 +1583,7 @@ does the same job.) A problem leaves the input in `build-fuzz/crashes/`; fix it,
 the input to the target's corpus so it stays fixed. In `ctest`, each target runs its
 corpus and two seconds of mutations, without coverage.
 
-## Tests
+### Tests
 
 | Test | What it checks |
 |---|---|
@@ -1547,51 +1600,6 @@ corpus and two seconds of mutations, without coverage.
 | `db` | `crocket::db` against a real Postgres: table names, the generated SQL, insert, find, update, erase, every filter, the escape hatch, 409 on a unique violation, a `table_name` override, and `Db&` in handlers with its log fields, metrics and `/readyz`. Needs `CROCKET_TEST_DATABASE_URL`; skipped without it. |
 | `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
-
-## Environment variables
-
-`Config::from_env()` reads these, on top of the profile. Unset or empty leaves the
-setting alone; a value that does not parse throws `std::invalid_argument` naming the
-variable (`CROCKET_PORT=tcp://10.43.0.12:8000: expected a whole number from 0 to 65535`),
-so a typo stops the program at startup instead of being ignored. Sizes take `K`, `M` or
-`G` (powers of 1024); durations take `ms`, `s`, `m` or `h`, and a bare number is seconds;
-booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-separated.
-
-| Variable | Sets | Default |
-|---|---|---|
-| `CROCKET_PROFILE` | `dev` or `release` | `release` |
-| `CROCKET_LISTEN` | `server.listen`: `host:port`, `:port` or `port` (replaces host and port) | unset |
-| `CROCKET_HOST` | `server.host` | `0.0.0.0` (`127.0.0.1` in dev) |
-| `CROCKET_PORT` | `server.port` | `8000` |
-| `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | `server.tls_cert`, `server.tls_key`; TLS needs both | unset |
-| `CROCKET_HTTP2` | `server.http2` | `true` |
-| `CROCKET_H2_PRIOR_KNOWLEDGE` | `server.h2_prior_knowledge` | `false` |
-| `CROCKET_WORKERS` | `server.workers` | one per core |
-| `CROCKET_EVENT_LOOPS` | `server.event_loops` | one per physical core |
-| `CROCKET_MAX_BODY_BYTES` | `limits.max_body_bytes` | `1M` |
-| `CROCKET_MAX_BODY_MEMORY` | `limits.max_body_memory` | `256M` |
-| `CROCKET_MAX_IN_FLIGHT` | `limits.max_in_flight` | `1024` |
-| `CROCKET_MAX_HEADER_BYTES` | `limits.max_header_bytes` | `8K` |
-| `CROCKET_MAX_HEADER_COUNT` | `limits.max_header_count` | `100` |
-| `CROCKET_MAX_CONNECTIONS` | `limits.max_connections` | `1024` |
-| `CROCKET_MAX_CONNECTIONS_PER_IP` | `limits.max_connections_per_ip` | `0` (none) |
-| `CROCKET_HTTP2_MAX_STREAMS` | `limits.http2_max_streams` | `100` |
-| `CROCKET_ETAG_MAX_BYTES` | `limits.etag_max_bytes` | `1M` |
-| `CROCKET_REQUEST_TIMEOUT` | `timeouts.request` | `30s` (an hour in dev) |
-| `CROCKET_DRAIN_TIMEOUT` | `timeouts.drain` | `10s` (`1s` in dev) |
-| `CROCKET_TRUSTED_PROXIES` | `proxy.trusted` | none |
-| `CROCKET_PROXY_HEADER` | `proxy.header`: `x-forwarded-for` or `forwarded` | `x-forwarded-for` |
-| `CROCKET_ALLOWED_HOSTS` | `proxy.allowed_hosts` | any host |
-| `CROCKET_DEBUG_ROUTES` | `debug_routes` (`GET /__routes`) | `false` (`true` in dev) |
-| `CROCKET_ADAPTIVE_PLACEMENT` | `adaptive_placement` | `true` |
-| `CROCKET_LOG_LEVEL` | `log.level`: `debug`, `info`, `warn` or `error` | `info` (`debug` in dev) |
-| `CROCKET_DATABASE_URL` | `database.url`, for [`crocket::db`](#databases-crocketdb) | unset (libpq's `PG*` variables) |
-| `CROCKET_DATABASE_POOL_SIZE` | `database.pool_size` | `8` |
-| `CROCKET_DATABASE_POOL_WAIT` | `database.pool_wait` | `5s` |
-
-`CROCKET_METRICS_LABELS` is read by `Metrics`. `crocket_serve`
-uses `Config::from_env()` as is, with a 10 s request deadline and 5 s drain as its own
-defaults.
 
 ## License
 

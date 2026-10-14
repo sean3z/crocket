@@ -44,7 +44,7 @@ std::stop_token current_stop_token();
 }  // namespace detail
 
 /// `co_await sleep_for(100ms)`: waits without holding a worker. Ends early when
-/// the request is cancelled (deadline, client gone, shutdown); check
+/// the request is canceled (deadline, client gone, shutdown); check
 /// Deadline::expired() afterwards if that matters.
 class [[nodiscard]] SleepFor {
  public:
@@ -57,7 +57,7 @@ class [[nodiscard]] SleepFor {
     s_.exchange = detail::current_exchange();
     detail::timer_add(&s_);
     if (auto token = detail::current_stop_token(); token.stop_possible())
-      cancel_.emplace(token, Wake{&s_});  // runs Wake now if the request is already cancelled
+      cancel_.emplace(token, Wake{&s_});  // runs Wake now if the request is already canceled
     int expected = detail::Sleeper::Registering;
     if (s_.state.compare_exchange_strong(expected, detail::Sleeper::Armed)) return true;
     detail::timer_wake(&s_);  // woken while registering: off the timer, and carry on without suspending

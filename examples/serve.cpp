@@ -107,12 +107,12 @@ auto create(Json<NewUser> body, Auth auth, State<DbPool> db, Deadline d) -> Resu
 [[= http::get("/me")]]
 auto me(Auth auth) -> Json<Auth> { return Json<Auth>{auth}; }
 
-/// Sleeps in small steps, honouring the request deadline and client cancellation.
+/// Sleeps in small steps, honoring the request deadline and client cancellation.
 [[= http::get("/slow/{ms}")]]
 auto slow(std::uint32_t ms, Deadline d) -> Result<std::string, ApiError> {
   auto until = Clock::now() + std::chrono::milliseconds(ms);
   while (Clock::now() < until) {
-    if (d.expired()) return std::unexpected(ApiError{504, "deadline.exceeded", "gave up", "slow handler cancelled"});
+    if (d.expired()) return std::unexpected(ApiError{504, "deadline.exceeded", "gave up", "slow handler canceled"});
     std::this_thread::sleep_for(10ms);
   }
   return std::format("slept {} ms", ms);

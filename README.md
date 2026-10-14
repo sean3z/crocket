@@ -925,7 +925,7 @@ Built-in fairings:
   ```cpp
   app.attach(Shield{}.set("content-security-policy", "default-src 'self'").remove("x-frame-options"));
   ```
-- **`Metrics`:** Prometheus text at `GET /metrics`, labelled by route template.
+- **`Metrics`:** Prometheus text at `GET /metrics`, labeled by route template.
   - `crocket_http_requests_total` and a duration histogram.
   - `crocket_http_requests_in_flight`.
   - `crocket_extractor_failures_total`.
@@ -1039,7 +1039,7 @@ auto quote(std::string sym, State<PriceClient> prices) -> Task<Json<Quote>> {
 ```
 
 - **`co_await sleep_for(d)`** waits without holding a thread. It ends early when the
-  request is cancelled (deadline, client gone, shutdown), so check `Deadline::expired()`
+  request is canceled (deadline, client gone, shutdown), so check `Deadline::expired()`
   afterwards when that matters.
 - **`callback<T>()`** adapts a library that reports results through a callback: call
   `resolve(value)` once, from any thread. If every `resolve` is destroyed unused, the
@@ -1092,7 +1092,7 @@ Timing a run costs two clock reads, about 40 ns.
 Every request has a deadline (`timeouts.request`, default 30 s) and a stop
 token. The token fires when the deadline passes or the client disconnects.
 
-- **Extractors and pools** such as `Pool::checkout` honour the token automatically.
+- **Extractors and pools** such as `Pool::checkout` honor the token automatically.
 - **Handlers doing long work** can take a `Deadline` parameter and poll `expired()`.
 - **At the deadline** the client gets 504 `deadline.exceeded` regardless of what the
   handler is doing.
@@ -1282,7 +1282,7 @@ What you get:
   Unary gRPC over HTTP/2, either with TLS or on a plain-text port with
   `h2_prior_knowledge = true`.
 - **Built-in routes:** `GET /healthz` and `GET /readyz`.
-- **Request ids:** an `x-request-id` on every response, honouring the client's value
+- **Request ids:** an `x-request-id` on every response, honoring the client's value
   when valid.
 - **Graceful shutdown on SIGINT/SIGTERM:** stop accepting, drain in-flight requests,
   run `on_shutdown`, then destroy managed state.
@@ -1376,7 +1376,7 @@ Compared with the release defaults, the dev profile:
 
 - **Error bodies carry `debug`** (`ApiError::detail`), including an uncaught exception's `what()`, so you
   see the cause in the client without reading logs. Release never sends it.
-- **Logs are readable lines**, coloured on a terminal unless `NO_COLOR` is set, and
+- **Logs are readable lines**, colored on a terminal unless `NO_COLOR` is set, and
   `debug` lines are on: `14:02:11.504 GET /hello/Ada/400 404 0.21ms api::hello path.invalid: …`.
 - **`launch()` prints every route** before it starts.
 - **`GET /__routes` is on**, the request deadline is an hour (room for a debugger
@@ -1536,7 +1536,7 @@ corpus and two seconds of mutations, without coverage.
 |---|---|
 | `acceptance` | The request pipeline in-process via `LocalClient`, with no sockets. Covers [acceptance criteria](docs/DESIGN.md#acceptance-criteria) 1–4 and 6, plus routing, responders, request ids, log lines, application logging (templates, context, redaction, sampling, levels, a full buffer), metrics, health checks, CORS, pools, the dev profile, header validation, trusted proxies, allowed hosts, `Shield`, ETags, 304s and ranges. |
 | `json` | JSON in-process: round trips, field paths, the 64-bit range and `as_string`, UTF-8 checking and repair, duplicate keys, limits, every annotation, chrono, variants, validation, the regex engine (including inputs that make backtracking engines hang) and problem+json bodies from `Json<T>`. |
-| `cpus` | The default number of event loops: physical cores from CPU topology, counting hyperthread siblings once, honouring the affinity mask, and falling back when topology is missing. |
+| `cpus` | The default number of event loops: physical cores from CPU topology, counting hyperthread siblings once, honoring the affinity mask, and falling back when topology is missing. |
 | `router` | The route tree against a linear scan of every route, over 2,000 random route tables: the same candidates in the same order, the same captures, HEAD falling back to GET, and the same methods for 405. |
 | `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |

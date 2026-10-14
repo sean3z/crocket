@@ -1,4 +1,4 @@
-# Acceptance criteria 1-4 and 6 (docs/DESIGN.md) and the production behaviour: in-process, no sockets.
+# Acceptance criteria 1-4 and 6 (docs/DESIGN.md) and the production behavior: in-process, no sockets.
 add_executable(crocket_acceptance acceptance.cpp)
 target_link_libraries(crocket_acceptance PRIVATE crocket)
 add_test(NAME acceptance COMMAND crocket_acceptance)
@@ -72,7 +72,7 @@ crocket_compile_fail(bad_return_type "NotAResponse")
 crocket_compile_fail(from_path_not_optional
   "json::from_path\\]\\] member 'id' of Widget must be std::optional<P>")
 crocket_compile_fail(bad_header_name "not a valid HTTP header name")
-crocket_compile_fail(proto_duplicate_field "members 'size' and 'colour' both have field number 2")
+crocket_compile_fail(proto_duplicate_field "members 'size' and 'color' both have field number 2")
 crocket_compile_fail(proto_unmapped_type "member 'grade' of proto message Widget has type char, which has no protobuf mapping")
 crocket_compile_fail(rpc_two_messages "rpc bad::both: parameters 'a' and 'b' are both request messages")
 crocket_compile_fail(bad_template "capture .\\{id. must be a whole segment of the form \\{name\\}")

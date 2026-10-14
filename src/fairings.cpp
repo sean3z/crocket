@@ -64,9 +64,9 @@ void Logger::on_response(const Request& rq, Response& rs) {
   if (!hub_->enabled(level) || (rs.status < 400 && !hub_->sampled(rq.request_id))) return;
   auto dur = std::chrono::duration<double, std::milli>(Clock::now() - rq.received).count();
   if (hub_->text()) {
-    bool colour = hub_->colour();
+    bool color = hub_->color();
     auto paint = [&](std::string_view code, std::string_view s) {
-      return colour ? std::format("\x1b[{}m{}\x1b[0m", code, s) : std::string(s);
+      return color ? std::format("\x1b[{}m{}\x1b[0m", code, s) : std::string(s);
     };
     std::string_view hue = rs.status >= 500 ? "31" : rs.status >= 400 ? "33" : rs.status >= 300 ? "36" : "32";
     auto o = std::format("{} {} {} {} {:.2f}ms", paint("2", log::detail::local_clock()), rq.method_text, rq.path,

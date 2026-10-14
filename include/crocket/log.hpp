@@ -1,5 +1,5 @@
 #pragma once
-// Application logging: levelled, structured, and tagged with the request it
+// Application logging: leveled, structured, and tagged with the request it
 // belongs to without passing anything around.
 //
 //   log::info("created user {user_id} on plan {plan}", user.id, plan);

@@ -90,7 +90,7 @@ class Shield {
   std::vector<std::pair<std::string, std::string>> headers_;
 };
 
-/// Prometheus metrics labelled by route template (never by raw path):
+/// Prometheus metrics labeled by route template (never by raw path):
 ///   crocket_http_requests_total{method,route,status}
 ///   crocket_http_request_duration_seconds{method,route} (histogram)
 ///   crocket_http_requests_in_flight

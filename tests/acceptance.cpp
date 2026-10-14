@@ -565,7 +565,7 @@ int main() {
     CHECK_EQ(d.status, 403);
   }
 
-  section("metrics labelled by route template");
+  section("metrics labeled by route template");
   {
     auto m = client.get("/metrics").dispatch();
     CHECK_EQ(m.status, 200);
@@ -646,15 +646,15 @@ int main() {
     CHECK(contains(body, R"(crocket_http_requests_total{pod="web-1",note="a\"b",method="GET",route=")"));
     CHECK(contains(body, R"(_bucket{pod="web-1",note="a\"b",method=")"));
     // Every sample line carries them; comments do not.
-    std::size_t samples = 0, labelled = 0;
+    std::size_t samples = 0, labeled = 0;
     for (auto line : std::views::split(body, '\n')) {
       std::string_view l(line.begin(), line.end());
       if (l.empty() || l[0] == '#') continue;
       ++samples;
-      if (contains(std::string(l), R"({pod="web-1",note="a\"b")")) ++labelled;
+      if (contains(std::string(l), R"({pod="web-1",note="a\"b")")) ++labeled;
     }
     CHECK(samples > 10);
-    CHECK_EQ(labelled, samples);
+    CHECK_EQ(labeled, samples);
 
     ::setenv("CROCKET_METRICS_LABELS", "pod=from-env", 1);
     Metrics em;
@@ -681,13 +681,13 @@ int main() {
     CHECK(pool.ready());
     std::stop_source cancel;
     auto hold = pool.checkout(Deadline{Clock::now() + std::chrono::seconds(1), {}});
-    std::jthread canceller([&] {
+    std::jthread canceler([&] {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
       cancel.request_stop();
     });
     auto t0 = Clock::now();
-    auto cancelled = pool.checkout(Deadline{Clock::now() + std::chrono::seconds(10), cancel.get_token()});
-    CHECK(!cancelled.has_value());
+    auto canceled = pool.checkout(Deadline{Clock::now() + std::chrono::seconds(10), cancel.get_token()});
+    CHECK(!canceled.has_value());
     CHECK(Clock::now() - t0 < std::chrono::seconds(1));
   }
 
@@ -1221,7 +1221,7 @@ int main() {
     auto fwd = dev.get("/hello/Ada/400").dispatch();
     CHECK(contains(fwd.body, R"("debug":"api::hello: capture '{age}' did not parse")"));
 
-    // Readable log lines, no JSON, no colour for a custom sink.
+    // Readable log lines, no JSON, no color for a custom sink.
     auto line = dev_log.last();
     CHECK(contains(line, " GET /hello/Ada/400 404 "));
     CHECK(contains(line, "api::hello path.invalid: api::hello: capture '{age}' did not parse ["));

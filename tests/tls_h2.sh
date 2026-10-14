@@ -78,7 +78,7 @@ for proto in --http2 --http1.1; do
   expect "custom request header" "acme" "$(curl -sk $proto -H 'x-tenant: acme' "$BASE/api/tenant")"
   rid=$(curl -sk $proto -D - -o /dev/null -H 'x-request-id: trace-456' "$BASE/healthz" | tr -d '\r' |
         sed -n 's/^x-request-id: //Ip')
-  expect "X-Request-Id honoured" "trace-456" "$rid"
+  expect "X-Request-Id honored" "trace-456" "$rid"
   h=$(curl -sk $proto -D - -o /dev/null -X OPTIONS "$BASE/api/users" -H 'origin: https://app.example.com' \
       -H 'access-control-request-method: POST' -H 'access-control-request-headers: content-type' |
       tr -d '\r' | tr 'A-Z' 'a-z')
@@ -240,7 +240,7 @@ expect "http/1.1 keep-alive reuses the connection" "1 0" \
 echo "[request id propagation]"
 rid=$(curl -sk --http1.1 -D - -o /dev/null -H 'x-request-id: trace-123' "$BASE/healthz" | tr -d '\r' |
       sed -n 's/^x-request-id: //p')
-expect "X-Request-Id honoured over http/1.1" "trace-123" "$rid"
+expect "X-Request-Id honored over http/1.1" "trace-123" "$rid"
 grep -q '"request_id":"trace-123"' "$WORK/serve.log" && pass "request id in log line" || fail "request id in log line"
 grep -q '"msg":"created user [0-9]*","request_id":"[0-9a-f]*",.*"subject":"alice","user_id":' "$WORK/serve.log" \
   && pass "handler log line carries the request" || fail "handler log line carries the request"

@@ -1,6 +1,6 @@
 #pragma once
 // Pool<T>: a bounded set of reusable resources (DB connections, clients).
-// checkout() waits until the request's deadline, honours cancellation, and
+// checkout() waits until the request's deadline, honors cancellation, and
 // fails with 503 db.busy. Managed pools with a ready() member are picked up by
 // GET /readyz automatically.
 
@@ -87,7 +87,7 @@ class Pool {
     bool got = shared_->cv.wait_until(lk, d.stop, until, [&] { return !shared_->idle.empty(); });
     if (!got)
       return std::unexpected(ApiError{503, opts_.busy_code, "service busy, try again",
-                                      d.stop.stop_requested() ? "pool wait cancelled" : "pool wait timed out"});
+                                      d.stop.stop_requested() ? "pool wait canceled" : "pool wait timed out"});
     auto item = std::move(shared_->idle.front());
     shared_->idle.pop_front();
     return Lease(shared_, std::move(item));

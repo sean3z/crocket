@@ -77,8 +77,8 @@ Hub::Hub(Options opts, bool text, std::atomic<std::uint64_t>* dropped)
   for (auto& r : opts_.redact) redact_.push_back(lower(r));
   if (opts_.buffer == 0) opts_.buffer = 1;
   if (text_ && !opts_.sink) {
-    const char* no_colour = std::getenv("NO_COLOR");
-    colour_ = isatty(STDERR_FILENO) && !(no_colour && *no_colour);
+    const char* no_color = std::getenv("NO_COLOR");
+    color_ = isatty(STDERR_FILENO) && !(no_color && *no_color);
   }
 }
 
@@ -329,10 +329,10 @@ void emit(Hub* hub, Level level, std::string_view text, std::span<Field> fields)
   if (hub->text()) {
     static constexpr std::string_view upper[] = {"DEBUG", "INFO ", "WARN ", "ERROR"};
     static constexpr std::string_view hue[] = {"2", "32", "33", "31"};
-    o = hub->colour() ? std::format("\x1b[2m{}\x1b[0m \x1b[{}m{}\x1b[0m {}", local_clock(), hue[int(level)],
+    o = hub->color() ? std::format("\x1b[2m{}\x1b[0m \x1b[{}m{}\x1b[0m {}", local_clock(), hue[int(level)],
                                     upper[int(level)], msg)
                       : std::format("{} {} {}", local_clock(), upper[int(level)], msg);
-    if (!request_id.empty()) o += hub->colour() ? std::format(" \x1b[2m[{}]\x1b[0m", request_id) : std::format(" [{}]", request_id);
+    if (!request_id.empty()) o += hub->color() ? std::format(" \x1b[2m[{}]\x1b[0m", request_id) : std::format(" [{}]", request_id);
   } else {
     o = R"({"ts":")";
     crocket::detail::append_iso8601_now(o);

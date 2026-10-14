@@ -24,7 +24,7 @@ class Hub {
 
   [[nodiscard]] bool enabled(Level l) const { return l >= opts_.level; }
   [[nodiscard]] bool text() const { return text_; }
-  [[nodiscard]] bool colour() const { return colour_; }
+  [[nodiscard]] bool color() const { return color_; }
   /// Whether the request line for a successful response is kept (Options::sample).
   [[nodiscard]] bool sampled(std::string_view request_id) const;
   [[nodiscard]] bool redacted(std::string_view field) const;
@@ -42,7 +42,7 @@ class Hub {
 
   Options opts_;
   bool text_;
-  bool colour_ = false;
+  bool color_ = false;
   std::atomic<std::uint64_t>* dropped_;
   std::vector<std::string> redact_;  // lower case
 

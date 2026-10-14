@@ -15,10 +15,10 @@ whether a feature belongs. The [README](../README.md) shows how to use it, and
    response.
 2. **Route metadata lives on the function** (`[[= http::get("/users/{id}")]]`). You mount
    a namespace or a controller class, not a handwritten list of functions.
-3. **Cross-cutting behaviour belongs to the application.** `attach` adds fairings and
+3. **Cross-cutting behavior belongs to the application.** `attach` adds fairings and
    `manage` adds typed singletons. CORS, logging, metrics and pools are not repeated on
    every handler.
-4. **Production behaviour is built in**, not left to each application: request ids,
+4. **Production behavior is built in**, not left to each application: request ids,
    structured errors, logs and metrics by route template, deadlines, readiness, limits,
    ignite checks, and draining on shutdown.
 5. **One wire engine:** h2o, for HTTP/1.1, HTTP/2 and TLS. Handlers never include h2o.
@@ -163,7 +163,7 @@ What every crocket application gets without writing it:
   ability to check out a connection.
 - Limits on connections, HTTP/2 streams, headers, bodies, bodies in memory, requests in
   flight, and pool waits (503 `db.busy`).
-- A deadline and stop token on every request, honoured by extractors and pools.
+- A deadline and stop token on every request, honored by extractors and pools.
 - Ignite checks: the certificate and key load, required state is managed, and no two
   routes conflict.
 - Graceful shutdown: stop accepting, drain within a timeout, then destroy managed state.

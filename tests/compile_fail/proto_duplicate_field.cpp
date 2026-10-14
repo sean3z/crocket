@@ -5,7 +5,7 @@ using namespace crocket;
 struct Widget {
   std::string name;                          // 1
   std::string size;                          // 2
-  [[= proto::field(2)]] std::string colour;  // 2 again
+  [[= proto::field(2)]] std::string color;  // 2 again
 };
 namespace bad {
 [[= grpc::rpc]]

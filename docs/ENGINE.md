@@ -273,7 +273,7 @@ On SIGINT or SIGTERM:
 4. Request stop on anything still open, discard queued jobs that never started, and give
    running handlers 1 s to finish. If a handler is still running, log it and
    `std::quick_exit(1)`. Destroying managed state under a running handler would be
-   undefined behaviour.
+   undefined behavior.
 5. Give h2o up to 1 s to finish writing and close the remaining connections, then
    destroy the h2o context, and call `detail::shut_down`. That runs `on_shutdown`
    fairings in reverse attach order, then destroys managed state in reverse

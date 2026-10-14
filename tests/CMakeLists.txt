@@ -108,3 +108,11 @@ add_test(NAME consumer
                  "-DLAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}" "-DLDFLAGS=${CMAKE_EXE_LINKER_FLAGS}"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/consumer.cmake)
 set_tests_properties(consumer PROPERTIES TIMEOUT 600)
+
+# crocket::db against a real Postgres: CROCKET_TEST_DATABASE_URL, else skipped (exit 77).
+if(CROCKET_HAS_DB)
+  add_executable(crocket_db_test db.cpp)
+  target_link_libraries(crocket_db_test PRIVATE crocket::db)
+  add_test(NAME db COMMAND crocket_db_test)
+  set_tests_properties(db PROPERTIES SKIP_RETURN_CODE 77)
+endif()

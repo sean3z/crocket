@@ -94,6 +94,16 @@ struct ProxyConfig {
   std::vector<std::string> allowed_hosts = {};
 };
 
+/// The database crocket::db connects to (the optional crocket::db component).
+/// Core crocket never reads it; db::Pool(cfg.database) does.
+struct DatabaseConfig {
+  std::string url = {};  // "postgresql://user:pass@host/db"; empty: libpq's PG* variables
+  unsigned pool_size = 8;  // connections, opened at startup
+  /// Longest a handler waits for a free connection (bounded by the request's
+  /// deadline too); past it, 503 db.busy.
+  std::chrono::milliseconds pool_wait{5'000};
+};
+
 /// Everything crocket can be told, in one place. Precedence, lowest first:
 /// these defaults (or from_env's base), the profile (dev()), the environment (from_env()), then
 /// whatever the program sets on the result, then launch({...}).
@@ -103,6 +113,7 @@ struct Config {
   LimitsConfig limits = {};
   TimeoutsConfig timeouts = {};
   ProxyConfig proxy = {};
+  DatabaseConfig database = {};
   bool debug_routes = false;  // expose GET /__routes
   json::ReadOptions json = {};  // limits for Json<T> bodies
   /// Run a plain-function route on the event loops once it has proved fast

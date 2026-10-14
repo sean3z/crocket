@@ -250,6 +250,10 @@ Config Config::from_env(Config base) {
   }
   env_list("CROCKET_ALLOWED_HOSTS", c.proxy.allowed_hosts);
 
+  env_string("CROCKET_DATABASE_URL", c.database.url);
+  env_uint("CROCKET_DATABASE_POOL_SIZE", c.database.pool_size, 1);
+  env_duration("CROCKET_DATABASE_POOL_WAIT", c.database.pool_wait);
+
   env_bool("CROCKET_DEBUG_ROUTES", c.debug_routes);
   env_bool("CROCKET_ADAPTIVE_PLACEMENT", c.adaptive_placement);
   if (auto v = env_of("CROCKET_LOG_LEVEL")) {

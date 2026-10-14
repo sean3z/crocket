@@ -9,6 +9,23 @@ section below into the GitHub Release.
 
 ## [Unreleased]
 
+### Added
+- **`crocket::db`**, an optional component for Postgres on libpqxx (built when libpqxx
+  is found; `-DCROCKET_DB=OFF|ON`). Plain structs, no annotations or base class: the
+  table is the type's name in plural snake_case (`Hero` -> `heroes`, overridable with
+  `db::table_name<T>`), columns are the members, `id` is the key. Handlers take `Db& db`;
+  `db.find<T>(id)`, `db.insert(v)`, `db.update(v)`, `db.erase<T>(id)`,
+  `db.where(&T::member, value | db::like(...) | db::gt(...) | db::in({...}))` with
+  `order_by`, `limit`, `offset`, `all`, `first` and `count`, plus `db.sql<T>(...)` and
+  `db.exec(...)` for raw SQL. Statements are prepared once per connection.
+- **`crocket_db_seconds{table,op}`** and **`crocket_db_pool_connections{state}`** in
+  `Metrics`, and **`db_ms`, `db_wait_ms` and `db_queries`** on `Logger` request lines,
+  when a request used the database.
+- **`Config::database`** (`url`, `pool_size`, `pool_wait`) and `CROCKET_DATABASE_URL`,
+  `CROCKET_DATABASE_POOL_SIZE` and `CROCKET_DATABASE_POOL_WAIT` in `Config::from_env()`.
+- `examples/heroes.cpp`: a CRUD API on `crocket::db`, and `bench/db.cpp`, `crocket::db`
+  against the same queries written with libpqxx.
+
 ## [0.2.0] - 2026-10-13
 
 One `Config` for everything, configurable from the environment. Breaking: settings

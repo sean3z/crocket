@@ -98,11 +98,19 @@ class Shield {
 ///   crocket_workers, crocket_workers_busy, crocket_workers_stuck (past their request's deadline)
 ///   crocket_requests_abandoned_total (the deadline passed, or the client left, before a worker took it)
 ///   crocket_build_info{version,commit,compiler,hostname} 1
+///   crocket_db_seconds{table,op} (histogram), crocket_db_pool_connections{state}: with crocket::db
 /// Served at GET `path` (default /metrics) from on_request.
 ///
 /// Constant labels are added to every series. By default they come from
 /// CROCKET_METRICS_LABELS, a comma-separated list such as
 /// `pod=web-7f9c,zone=a` (in Kubernetes, fill it from the Downward API).
+namespace detail {
+/// Optional components (crocket::db) add their series to every Metrics
+/// render through this. Registering the same function twice is a no-op.
+void add_metrics_renderer(void (*render)(std::string&));
+void render_extra_metrics(std::string& out);
+}  // namespace detail
+
 class Metrics {
  public:
   using Labels = std::vector<std::pair<std::string, std::string>>;

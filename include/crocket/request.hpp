@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <memory>
 #include <chrono>
+#include <cstdint>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -129,6 +130,12 @@ struct Request {
   Deadline deadline;
   bool dev_profile = false;  // error bodies include ApiError::detail
   json::ReadOptions json_options;  // Config::json
+
+  // Database time, added up by crocket::db while the handler runs. Logger
+  // writes db_ms, db_wait_ms and db_queries when db_queries is not 0.
+  Clock::duration db_time{};  // running queries, decode included
+  Clock::duration db_wait{};  // waiting for a pool connection
+  std::uint32_t db_queries = 0;
 
   // Set by the router for the candidate currently being tried.
   std::string_view route_template;  // "/users/{id}"; "" while unmatched

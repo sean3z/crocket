@@ -12,16 +12,30 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Ubuntu 26.04 with the ./dev setup packages and GCC 16.2 already built
+    # Ubuntu 26.04 with the ./dev setup packages, GCC 16.2 and libpqxx already built
     # (docker/toolchain.Dockerfile, published by toolchain.yml).
     container:
-      image: ghcr.io/sean3z/crocket-toolchain:gcc-16.2
+      image: ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 60
+    # The db test (crocket::db on crocket::pg) runs against this Postgres.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: crocket
+          POSTGRES_PASSWORD: crocket
+          POSTGRES_DB: crocket_test
+        options: >-
+          --health-cmd "pg_isready -U crocket"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       CCACHE_DIR: /github/home/.cache/ccache
+      CROCKET_TEST_DATABASE_URL: postgresql://crocket:crocket@postgres:5432/crocket_test
     steps:
       - uses: actions/checkout@v4
 
@@ -34,3 +48,6 @@ jobs:
 
       - name: Release build and all tests
         run: ./dev check
+
+      - name: The Postgres backend was built and tested
+        run: test -x build/tests/crocket_db_test

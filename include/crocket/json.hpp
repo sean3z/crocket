@@ -468,6 +468,15 @@ constexpr bool encodable() {
   else if constexpr (ReflectableStruct<U>) return true;  // members checked when instantiated
   else return false;
 }
+/// Members of T that json::read accepts as absent (leaving the member as it
+/// was, value-initialized) though they are neither optional nor have a
+/// default member initializer. crocket::db specializes it so a model's `id`
+/// may be left out of a create body.
+template <class T>
+struct omittable {
+  static constexpr bool member(std::string_view) { return false; }
+};
+
 template <class T>
 concept Encodable = encodable<T>();
 
@@ -1163,7 +1172,8 @@ bool read_struct(Reader& r, T& out, const Path* path, std::string_view tag_field
   template for (constexpr auto i : std::define_static_array(std::views::iota(std::size_t{0}, N))) {
     constexpr auto m = members[i];
     using M = [:std::meta::remove_cv(std::meta::type_of(m)):];
-    if constexpr (!is_optional<M>::value && !std::meta::has_default_member_initializer(m)) {
+    if constexpr (!is_optional<M>::value && !std::meta::has_default_member_initializer(m) &&
+                  !omittable<T>::member(std::meta::identifier_of(m))) {
       if (!seen[i]) {
         Path child{path, names[i]};
         return r.fail(Errc::type, &child, "required field is missing");

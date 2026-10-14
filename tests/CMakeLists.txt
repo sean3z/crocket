@@ -29,6 +29,11 @@ add_executable(crocket_grpc_test grpc.cpp)
 target_link_libraries(crocket_grpc_test PRIVATE crocket)
 add_test(NAME grpc COMMAND crocket_grpc_test)
 
+# Plain struct returns: JSON on HTTP routes, protobuf on gRPC routes; Json<T>/Proto<T> win.
+add_executable(crocket_returns_test returns.cpp)
+target_link_libraries(crocket_returns_test PRIVATE crocket)
+add_test(NAME returns COMMAND crocket_returns_test)
+
 # OpenAPI generated from the handlers, checked piece by piece, and served.
 add_executable(crocket_openapi_test openapi.cpp)
 target_link_libraries(crocket_openapi_test PRIVATE crocket)
@@ -108,3 +113,11 @@ add_test(NAME consumer
                  "-DLAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}" "-DLDFLAGS=${CMAKE_EXE_LINKER_FLAGS}"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/consumer.cmake)
 set_tests_properties(consumer PROPERTIES TIMEOUT 600)
+
+# crocket::db against a real Postgres: CROCKET_TEST_DATABASE_URL, else skipped (exit 77).
+if(CROCKET_HAS_PG)
+  add_executable(crocket_db_test db.cpp)
+  target_link_libraries(crocket_db_test PRIVATE crocket::pg)
+  add_test(NAME db COMMAND crocket_db_test)
+  set_tests_properties(db PROPERTIES SKIP_RETURN_CODE 77)
+endif()

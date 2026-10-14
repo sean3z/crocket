@@ -72,6 +72,8 @@ void Logger::on_response(const Request& rq, Response& rs) {
     auto o = std::format("{} {} {} {} {:.2f}ms", paint("2", log::detail::local_clock()), rq.method_text, rq.path,
                          paint(hue, std::to_string(rs.status)), dur);
     if (!rq.handler.empty()) o += std::format(" {}", rq.handler);
+    if (rq.db_queries)
+      o += paint("2", std::format(" db {:.2f}ms", std::chrono::duration<double, std::milli>(rq.db_time).count()));
     if (!rq.subject.empty()) o += std::format(" {}", paint("2", "as " + rq.subject));
     if (!rs.error_code.empty()) {
       auto what = rs.error_detail.empty() ? std::string(rs.error_code)
@@ -101,6 +103,17 @@ void Logger::on_response(const Request& rq, Response& rs) {
   char buf[32];
   auto r = std::to_chars(buf, buf + sizeof buf, dur, std::chars_format::fixed, 3);
   o.append(buf, r.ptr);
+  if (rq.db_queries) {  // crocket::db ran queries for this request
+    key(o, R"(,"db_ms":)");
+    r = std::to_chars(buf, buf + sizeof buf, std::chrono::duration<double, std::milli>(rq.db_time).count(),
+                      std::chars_format::fixed, 3);
+    o.append(buf, r.ptr);
+    key(o, R"(,"db_wait_ms":)");
+    r = std::to_chars(buf, buf + sizeof buf, std::chrono::duration<double, std::milli>(rq.db_wait).count(),
+                      std::chars_format::fixed, 3);
+    o.append(buf, r.ptr);
+    key(o, R"(,"db_queries":)"), number(o, rq.db_queries);
+  }
   key(o, R"(,"bytes_in":)"), number(o, rq.body.size());
   key(o, R"(,"bytes_out":)"), number(o, rs.body.size());
   key(o, R"(,"proto":)"), value(o, rq.protocol);
@@ -439,6 +452,26 @@ void Metrics::on_response(const Request& rq, Response& rs) {
   if (!rs.failure_kind.empty()) ++sh.failures[{slot, rs.failure_kind}];
 }
 
+namespace detail {
+namespace {
+std::mutex g_extra_mu;
+std::vector<void (*)(std::string&)>& extra_renderers() {
+  static std::vector<void (*)(std::string&)> v;
+  return v;
+}
+}  // namespace
+void add_metrics_renderer(void (*render)(std::string&)) {
+  std::lock_guard lk(g_extra_mu);
+  for (auto f : extra_renderers())
+    if (f == render) return;
+  extra_renderers().push_back(render);
+}
+void render_extra_metrics(std::string& out) {
+  std::lock_guard lk(g_extra_mu);
+  for (auto f : extra_renderers()) f(out);
+}
+}  // namespace detail
+
 std::string Metrics::render() const {
   // Add up every thread's shard, in the order the output has always had.
   struct Hist {
@@ -529,6 +562,7 @@ std::string Metrics::render() const {
        "# TYPE crocket_build_info gauge\n"
        "crocket_build_info{version=\"" + label(version::string) + "\",commit=\"" + label(version::commit) +
        "\",compiler=\"" + label(version::compiler) + "\",hostname=\"" + label(host_name()) + "\"} 1\n";
+  detail::render_extra_metrics(o);
   if (const_labels_.empty()) return o;
   // Constant labels on every sample line: name{a="b"} v -> name{a="b",k="v"} v.
   std::string out;

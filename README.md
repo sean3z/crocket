@@ -568,7 +568,9 @@ The return type is the response. Built-in responders:
 | Return type | Response |
 |---|---|
 | `std::string`, `std::string_view`, `const char*` | 200 `text/plain` |
-| `Json<T>` | 200 `application/json` |
+| A struct `T`, `std::vector<T>`, any JSON-encodable value | 200 `application/json`, as if wrapped in `Json<T>` |
+| `Json<T>` | 200 `application/json`, explicitly |
+| `Proto<T>` | 200 `application/x-protobuf` (the [protobuf](#grpc-and-protobuf) encoding of `T`) |
 | `std::optional<T>` | `T`, or 404 `not_found` when empty |
 | `std::expected<T, ApiError>` (alias `Result<T>`) | `T`, or the error as a problem+json body |
 | `Result<void>` / `void` | 204 |
@@ -579,8 +581,11 @@ The return type is the response. Built-in responders:
 | `Response` | Exactly what you built |
 | `Task<T>` | Any of the above, produced asynchronously |
 
-`T` can be any responder or any JSON-encodable type. A return type that is neither is a
-compile error.
+`T` can be any responder or any JSON-encodable type, so `std::optional<Hero>`,
+`std::vector<Hero>` and `Created<Hero>` need no `Json<...>` around the struct. A return
+type that is neither is a compile error. On a [gRPC](#grpc-and-protobuf) route the same
+plain `T` is sent as protobuf instead; there `Proto<T>` says so explicitly and `Json<T>`
+replies with JSON (`application/grpc+json`). OpenAPI describes each one as it is sent.
 
 ```cpp
 [[= http::post("/items")]]
@@ -698,6 +703,104 @@ auto get_user(std::uint64_t id, State<Pool<Conn>> db, Deadline d) -> Result<std:
   /* ... */
 }
 ```
+
+### Databases: `crocket::db`
+
+The `crocket::db` API (`Db&`, `db::Pool`, `find`, `insert`, `where`, ...) is generic;
+each database is a backend you link. Today there is one, **`crocket::pg`**, for Postgres
+on [libpqxx](https://github.com/jtv/libpqxx). It is built when libpqxx is found
+(`apt install libpqxx-dev`): `target_link_libraries(app PRIVATE crocket::pg)`.
+`-DCROCKET_PG=OFF` skips it and `-DCROCKET_PG=ON` makes a missing libpqxx an error.
+Programs that link only `crocket::crocket` are unaffected. Handlers name `Db&`, never
+the backend, so a later backend (`crocket::sqlite`, say) needs no handler changes.
+
+Your structs stay plain: no annotations and no base class.
+
+```cpp
+#include <crocket/db.hpp>
+
+struct Hero {
+  std::int64_t id;                    // the key: the member named id
+  std::string name;                   // "Barry Allen"
+  std::string alias;                  // "The Flash"
+  std::optional<std::string> mentor;  // NULL when empty
+};
+
+[[= http::get("/heroes/{id}")]]
+auto get(Db& db, std::int64_t id) -> std::optional<Hero> {
+  return db.find<Hero>(id);           // nullopt: 404
+}
+
+[[= http::post("/heroes")]]
+auto create(Db& db, Json<Hero> body) -> Created<Hero> {
+  return {db.insert(*body)};          // fills in id; a unique violation is 409 db.conflict
+}
+
+[[= http::get("/robins")]]
+auto robins(Db& db) -> std::vector<Hero> {
+  return db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id);
+}
+
+int main() {
+  auto cfg = Config::from_env();      // CROCKET_DATABASE_URL, CROCKET_DATABASE_POOL_SIZE, ...
+  return build(cfg)
+      .manage(db::Pool(cfg.database))
+      .attach(Logger{}).attach(Metrics{})
+      .mount("/", reflect_routes<^^api>())
+      .launch();
+}
+```
+
+Reflection reads the struct while compiling:
+
+- **The table** is the type's name in plural snake_case: `Hero` is `heroes`, `HeroTeam`
+  is `hero_teams`, `Category` is `categories`. To use another name, specialize
+  `table_name` next to the struct:
+  `template <> constexpr auto crocket::db::table_name<Hero> = "justice_league";`
+- **The columns** are the data members, by name and in declaration order. The member
+  named `id` is the key; the database fills it in on insert.
+- **`std::optional<T>`** members read and write `NULL`.
+- **`id` may be left out of a JSON body** (`{"name":"Barry Allen","alias":"The Flash"}`):
+  it reads as 0, `insert()` never sends it, and the stored row comes back with the id
+  the database assigned. An `id` a client does send is ignored on insert. OpenAPI does
+  not list `id` as required. (The core hook is `json::omittable<T>`.)
+
+| Call | Does |
+|---|---|
+| `db.find<Hero>(id)` | `std::optional<Hero>` |
+| `db.insert(hero)` | inserts every member but `id`, sets `hero.id`, returns the stored `Hero` |
+| `db.update(hero)` | writes every member to the row with `hero.id`; `false` if there is none |
+| `db.erase<Hero>(id)` | deletes it; `false` if there was none |
+| `db.where(&Hero::mentor, "Bruce Wayne")` | equality; `std::nullopt` is `IS NULL` |
+| `db.where(&Hero::alias, db::like("Robin%"))` | also `db::ilike`, `ne`, `lt`, `le`, `gt`, `ge`, `db::in({...})` |
+| `.where(...)`, `.order_by(&Hero::id, db::desc)`, `.limit(1)`, `.offset(n)` | chain them (conditions are ANDed) |
+| `.all()`, `.first()`, `.count()` | run it; a range-for or converting to `std::vector<Hero>` runs it too |
+| `db.all<Hero>()` | every row, to chain from |
+| `db.sql<Hero>("select ... where ...", args...)` | the escape hatch: any SQL, columns decoded into `Hero` by position |
+| `db.exec("update ...", args...)`, `db.connection()` | raw `pqxx::result`, and the libpqxx connection itself (transactions, `COPY`) |
+
+Filters name columns with member pointers, so a typo does not compile. The SQL for
+`find`, `insert`, `update` and `erase` is built while compiling; every statement is
+prepared once per connection and rows are decoded straight into the members.
+
+`Db& db` is managed state like any other: a route that takes it fails at ignite
+without a `db::Pool`, and stays on workers, since it may wait for a connection. The
+connection is checked out at the request's first query (waiting at most
+`database.pool_wait` and the request's deadline, then 503 `db.busy`) and returned
+when the handler ends. Outside a request, `pool.handle()` gives you a `Db` for
+seeding, migrations and jobs. The pool is part of `/readyz` (`select 1`).
+
+What it tells you, with no code of your own:
+
+- `crocket_db_seconds{table,op}`, a histogram of query time (decoding included) per
+  table and operation (`find`, `insert`, `update`, `erase`, `where`, `count`, `sql`),
+  and `crocket_db_pool_connections{state="idle"|"in_use"}`, in `Metrics`;
+- `db_ms`, `db_wait_ms` (waiting for a pool connection) and `db_queries` on the
+  request's `Logger` line, so `duration_ms - db_ms` is time spent outside the database.
+
+Each query is timed with two `steady_clock` reads and three relaxed atomic adds,
+about 70 ns, against a database round trip of tens of microseconds. Routes that never
+take `Db&` pay nothing. See `examples/heroes.cpp` for a full CRUD API.
 
 ### Controllers
 
@@ -1441,6 +1544,7 @@ corpus and two seconds of mutations, without coverage.
 | `tls_h2` | Real sockets, self-signed TLS, ALPN h2 and http/1.1, and the handler suite over both, including custom headers, `X-Request-Id`, CORS preflight, 431 for oversized headers and too many headers, a 304 for a matching `If-None-Match`, security headers, 20 async handlers sharing 2 workers, and a deadline waking a sleeping task, requests queued past their deadline never running their handler, and `crocket_workers_stuck` for handlers that ignore the deadline. Also adaptive placement: a route promoted after 1,000 fast runs, demoted by one slow run, and a `Pool` route that is never promoted. Also h2 bodies larger than the flow-control window, chunked uploads, a 413 that keeps the h1 connection, a handler longer than the h2 idle timeout, TLS certificate reload (a replaced file, a broken one, SIGHUP, a request in flight across it), connection limits (waiting at `max_connections`, closed past `max_connections_per_ip`), `http2_max_streams` in SETTINGS, `max_body_memory`, and graceful drain (acceptance item 7). Needs `openssl` and a curl built with HTTP/2. Uses ports 18443 and 8000. |
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `openapi` | The OpenAPI document for an API using every parameter, body and return type, checked piece by piece (schemas for every member kind and annotation, variants, recursion, name clashes, every `$ref` resolving), and served by the `OpenApi` fairing with its docs page. |
+| `db` | `crocket::db` against a real Postgres: table names, the generated SQL, insert, find, update, erase, every filter, the escape hatch, 409 on a unique violation, a `table_name` override, and `Db&` in handlers with its log fields, metrics and `/readyz`. Needs `CROCKET_TEST_DATABASE_URL`; skipped without it. |
 | `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 
@@ -1481,6 +1585,9 @@ booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-
 | `CROCKET_DEBUG_ROUTES` | `debug_routes` (`GET /__routes`) | `false` (`true` in dev) |
 | `CROCKET_ADAPTIVE_PLACEMENT` | `adaptive_placement` | `true` |
 | `CROCKET_LOG_LEVEL` | `log.level`: `debug`, `info`, `warn` or `error` | `info` (`debug` in dev) |
+| `CROCKET_DATABASE_URL` | `database.url`, for [`crocket::db`](#databases-crocketdb) | unset (libpq's `PG*` variables) |
+| `CROCKET_DATABASE_POOL_SIZE` | `database.pool_size` | `8` |
+| `CROCKET_DATABASE_POOL_WAIT` | `database.pool_wait` | `5s` |
 
 `CROCKET_METRICS_LABELS` is read by `Metrics`. `crocket_serve`
 uses `Config::from_env()` as is, with a 10 s request deadline and 5 s drain as its own

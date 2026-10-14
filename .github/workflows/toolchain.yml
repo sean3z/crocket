@@ -2,6 +2,11 @@ name: Toolchain image
 
 on:
   workflow_dispatch:
+    inputs:
+      reuse_gcc:
+        description: "Take GCC from the published gcc-16.2 image instead of building it (add libraries in minutes)"
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths: [docker/toolchain.Dockerfile, dev, .github/workflows/toolchain.yml]
@@ -27,5 +32,8 @@ jobs:
           context: .
           file: docker/toolchain.Dockerfile
           push: true
-          tags: ghcr.io/sean3z/crocket-toolchain:gcc-16.2
+          tags: ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg
+          build-args: ${{ inputs.reuse_gcc && 'BASE=ghcr.io/sean3z/crocket-toolchain:gcc-16.2' || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           labels: org.opencontainers.image.source=https://github.com/sean3z/crocket

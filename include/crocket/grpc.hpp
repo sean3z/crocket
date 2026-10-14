@@ -146,25 +146,44 @@ inline constexpr bool request_message_v = [] {
 
 /// What a handler's return type R replies with. `type` is the message (void
 /// for google.protobuf.Empty); `valid` is false for unsupported returns.
+/// One reply message: a plain message T (protobuf), Proto<T> (protobuf,
+/// explicitly) or Json<T> (JSON, sent as application/grpc+json).
 template <class R>
-struct reply_of {
+struct leaf_reply {
   static constexpr bool valid = proto::Message<R>;
   using type = R;
 };
+template <class T>
+struct leaf_reply<Proto<T>> {
+  static constexpr bool valid = proto::Message<T>;
+  using type = T;
+};
+template <class T>
+struct leaf_reply<Json<T>> {
+  static constexpr bool valid = proto::Message<T> && json::Encodable<T>;
+  using type = T;
+};
+template <class R>
+struct reply_of : leaf_reply<R> {};
 template <>
 struct reply_of<void> {
   static constexpr bool valid = true;
   using type = void;
 };
 template <class T>
-struct reply_of<std::optional<T>> {
-  static constexpr bool valid = proto::Message<T>;
-  using type = T;
-};
+struct reply_of<std::optional<T>> : leaf_reply<T> {};
 template <class T>
 struct reply_of<std::expected<T, ApiError>> {
-  static constexpr bool valid = std::is_void_v<T> || proto::Message<T>;
-  using type = T;
+  static constexpr bool valid = [] {
+    if constexpr (std::is_void_v<T>) return true;
+    else return leaf_reply<T>::valid;
+  }();
+  using type = typename leaf_reply<T>::type;
+};
+template <>
+struct reply_of<std::expected<void, ApiError>> {
+  static constexpr bool valid = true;
+  using type = void;
 };
 template <class R, bool = crocket::detail::Awaitable<std::remove_cvref_t<R>>>
 struct reply : reply_of<std::remove_cvref_t<R>> {};
@@ -184,6 +203,15 @@ void reply_value(T&& v, const Request& rq, Response& rs) {
     if (!v) write_error(v.error(), rq, rs);
     else if constexpr (std::is_void_v<typename U::value_type>) write_reply({}, rs);
     else reply_value(std::move(*v), rq, rs);
+  } else if constexpr (requires { typename leaf_reply<U>::type; } && !std::is_same_v<typename leaf_reply<U>::type, U>) {
+    if constexpr (std::is_same_v<U, Json<typename leaf_reply<U>::type>>) {
+      std::string body;
+      json::encode(body, v.value);
+      write_reply(body, rs);
+      rs.set_content_type("application/grpc+json");
+    } else {
+      write_reply(proto::encode(v.value), rs);  // Proto<T>
+    }
   } else {
     write_reply(proto::encode(v), rs);
   }
@@ -330,3 +358,14 @@ std::string proto_file(std::string_view package) {
 }
 
 }  // namespace crocket::grpc
+
+namespace crocket {
+/// Proto<T> on an HTTP route: the message as application/x-protobuf.
+template <proto::Message T>
+struct Responder<Proto<T>> {
+  static void respond(Proto<T>&& p, const Request&, Response& rs) {
+    rs.set_content_type("application/x-protobuf");
+    rs.body = proto::encode(p.value);
+  }
+};
+}  // namespace crocket

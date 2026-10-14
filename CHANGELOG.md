@@ -9,6 +9,33 @@ section below into the GitHub Release.
 
 ## [Unreleased]
 
+### Added
+- **`crocket::db`**, a small database API, with its first backend **`crocket::pg`**
+  (CMake target), Postgres on libpqxx, built when libpqxx is found
+  (`-DCROCKET_PG=AUTO|ON|OFF`). Handlers take `Db&` and never name the backend. Plain structs, no annotations or base class: the
+  table is the type's name in plural snake_case (`Hero` -> `heroes`, overridable with
+  `db::table_name<T>`), columns are the members, `id` is the key. Handlers take `Db& db`;
+  `db.find<T>(id)`, `db.insert(v)`, `db.update(v)`, `db.erase<T>(id)`,
+  `db.where(&T::member, value | db::like(...) | db::gt(...) | db::in({...}))` with
+  `order_by`, `limit`, `offset`, `all`, `first` and `count`, plus `db.sql<T>(...)` and
+  `db.exec(...)` for raw SQL. Statements are prepared once per connection.
+- A model's `id` may be missing from a JSON body (it reads as 0 and the database
+  assigns it); `insert()` never sends `id`, so a client-supplied one is ignored.
+  `json::omittable<T>` is the hook.
+- **`crocket_db_seconds{table,op}`** and **`crocket_db_pool_connections{state}`** in
+  `Metrics`, and **`db_ms`, `db_wait_ms` and `db_queries`** on `Logger` request lines,
+  when a request used the database.
+- **`Config::database`** (`url`, `pool_size`, `pool_wait`) and `CROCKET_DATABASE_URL`,
+  `CROCKET_DATABASE_POOL_SIZE` and `CROCKET_DATABASE_POOL_WAIT` in `Config::from_env()`.
+- **Handlers can return a plain struct**: `Hero`, `std::vector<Hero>`, `std::optional<Hero>`
+  (empty: 404) and `Created<Hero>` are JSON on HTTP routes, as if wrapped in `Json<T>`,
+  and protobuf on gRPC routes. `Json<T>` still works and always wins.
+- **`Proto<T>`**: an explicit protobuf body, `application/x-protobuf` on HTTP routes and
+  the normal reply on gRPC routes. A gRPC method returning `Json<T>` replies with JSON
+  (`application/grpc+json`). OpenAPI lists `application/x-protobuf` for `Proto<T>`.
+- `examples/heroes.cpp`: a CRUD API on `crocket::db`, and `bench/db.cpp`, `crocket::db`
+  against the same queries written with libpqxx.
+
 ## [0.2.0] - 2026-10-13
 
 One `Config` for everything, configurable from the environment. Breaking: settings

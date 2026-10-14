@@ -23,6 +23,18 @@ concept IsResponder = requires(std::remove_cvref_t<T>&& v, const Request& rq, Re
   Responder<std::remove_cvref_t<T>>::respond(std::move(v), rq, rs);
 };
 
+/// A protobuf body: `return Proto<HelloReply>{...};` sends application/x-protobuf
+/// on an HTTP route. On a gRPC route a plain T is already protobuf; Proto<T>
+/// says so explicitly. (The Responder lives in grpc.hpp, next to the encoder.)
+template <class T>
+struct Proto {
+  T value;
+  T& operator*() { return value; }
+  const T& operator*() const { return value; }
+  T* operator->() { return &value; }
+  const T* operator->() const { return &value; }
+};
+
 template <class T, class E = ApiError>
 using Result = std::expected<T, E>;
 
@@ -40,6 +52,10 @@ void respond_value(T&& v, const Request& rq, Response& rs) {
 template <class T>
 concept Payload = IsResponder<T> || json::Encodable<T>;
 }  // namespace detail
+
+// A handler may return a plain struct T, std::vector<T> and the like: anything
+// JSON-encodable is sent as JSON, as if wrapped in Json<T>. Wrapping it in
+// Json<T> or Proto<T> chooses the encoding explicitly.
 
 // ---- status wrappers --------------------------------------------------------
 // The payload may be any Responder or any JSON-encodable value (sent as JSON).

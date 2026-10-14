@@ -278,7 +278,8 @@ std::string struct_component(Components& c) {
     properties.emplace_back(std::string(key), std::move(s));
     // What a client must send: json::read needs every member that is neither
     // optional nor has a default member initializer.
-    if constexpr (!json::is_optional<M>::value && !std::meta::has_default_member_initializer(m))
+    if constexpr (!json::is_optional<M>::value && !std::meta::has_default_member_initializer(m) &&
+                  !json::omittable<T>::member(std::meta::identifier_of(m)))
       required.push_back(std::string(key));
   }
   Object o{{"type", std::string("object")}, {"properties", std::move(properties)}};
@@ -367,6 +368,11 @@ struct is_json<Json<T>> : std::true_type {
   using type = T;
 };
 
+template <class T>
+struct is_proto : std::false_type {};
+template <class T>
+struct is_proto<Proto<T>> : std::true_type {};
+
 /// What a handler returning R sends on success. `code` is "200", "201", ... or
 /// "2XX" when the status is chosen at run time.
 template <class R>
@@ -382,6 +388,9 @@ void respond(Operation& op, std::string code = "200") {
     op.respond(code, "text/plain", Value(Object{{"type", std::string("string")}}));
   } else if constexpr (is_json<U>::value) {
     op.respond(code, "application/json", schema<typename is_json<U>::type>(op.components));
+  } else if constexpr (is_proto<U>::value) {
+    op.respond(code, "application/x-protobuf",
+               Value(Object{{"type", std::string("string")}, {"format", std::string("binary")}}));
   } else if constexpr (is_with_status<U>::value) {
     respond<typename is_with_status<U>::type>(op, std::to_string(is_with_status<U>::code));
   } else if constexpr (is_cacheable<U>::value) {

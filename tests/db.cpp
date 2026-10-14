@@ -60,6 +60,7 @@ static_assert(std::string_view(db::detail::Statements<Hero>::insert) ==
 static_assert(std::string_view(db::detail::Statements<Hero>::update) ==
               R"(update "heroes" set "name" = $1, "alias" = $2, "mentor" = $3 where "id" = $4)");
 static_assert(db::Model<Hero>);
+static_assert(json::omittable<Hero>::member("id") && !json::omittable<Hero>::member("name"));
 struct NoKey { int x; };
 static_assert(!db::Model<NoKey>);
 
@@ -89,6 +90,9 @@ int main() {
   auto stored = d.insert(flash);
   CHECK(flash.id > 0);
   CHECK(stored.id == flash.id);
+  Hero chosen{.id = 777'777, .name = "Jesse Quick", .alias = "Quick"};
+  auto placed = d.insert(chosen);  // id is never sent: the database chooses
+  CHECK(placed.id != 777'777 && chosen.id == placed.id);
   auto got = d.find<Hero>(flash.id);
   CHECK(got && got->name == "Barry Allen" && got->alias == "The Flash" && !got->mentor);
   CHECK(!d.find<Hero>(999'999));
@@ -110,7 +114,7 @@ int main() {
   CHECK(first && first->name == "Dick Grayson");
   auto last = d.where(&Hero::alias, db::like("Robin%")).order_by(&Hero::id, db::desc).first();
   CHECK(last && last->name == "Damian Wayne");
-  CHECK(d.where(&Hero::mentor, std::nullopt).count() == 1);  // only Barry
+  CHECK(d.where(&Hero::mentor, std::nullopt).count() == 2);  // Barry and Jesse
   CHECK(d.where(&Hero::name, db::in({"Tim Drake", "Jason Todd"})).count() == 2);
   CHECK(d.where(&Hero::id, db::gt(wally.id)).count() == 0);
   CHECK(d.where(&Hero::id, db::ge(wally.id)).count() == 1);
@@ -157,6 +161,13 @@ int main() {
   CHECK(client.get("/heroes/424242").dispatch().status == 404);
   auto c = client.post("/heroes").json(R"({"id":0,"name":"Bart Allen","alias":"Impulse","mentor":"Barry Allen"})").dispatch();
   CHECK(c.status == 201 && contains(c.body, "Impulse"));
+  // No id in the body: it reads as 0, and the database assigns one.
+  auto noid = client.post("/heroes").json(R"({"name":"Jay Garrick","alias":"The Flash"})").dispatch();
+  CHECK(noid.status == 201 && contains(noid.body, "Jay Garrick") && !contains(noid.body, R"("id":0)"));
+  // A client-supplied id is ignored on insert.
+  auto forced = client.post("/heroes").json(R"({"id":4242,"name":"Max Mercury","alias":"Max"})").dispatch();
+  CHECK(forced.status == 201 && !contains(forced.body, R"("id":4242)"));
+  CHECK(client.get("/heroes/4242").dispatch().status == 404);
   auto dup = client.post("/heroes").json(R"({"id":0,"name":"Bart Allen","alias":"Impulse","mentor":null})").dispatch();
   CHECK(dup.status == 409);
   auto rb = client.get("/robins").dispatch();

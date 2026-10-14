@@ -579,6 +579,13 @@ class Pool {
 
 namespace crocket {
 
+/// A model's `id` may be left out of a JSON body: the database assigns it, and
+/// insert() never sends it. It reads as 0.
+template <db::Model T>
+struct json::omittable<T> {
+  static constexpr bool member(std::string_view name) { return name == "id"; }
+};
+
 using db::Db;
 
 /// `Db& db` in a handler: the request's database handle (needs a managed db::Pool).

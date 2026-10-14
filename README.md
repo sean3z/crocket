@@ -757,6 +757,10 @@ Reflection reads the struct while compiling:
 - **The columns** are the data members, by name and in declaration order. The member
   named `id` is the key; the database fills it in on insert.
 - **`std::optional<T>`** members read and write `NULL`.
+- **`id` may be left out of a JSON body** (`{"name":"Barry Allen","alias":"The Flash"}`):
+  it reads as 0, `insert()` never sends it, and the stored row comes back with the id
+  the database assigned. An `id` a client does send is ignored on insert. OpenAPI does
+  not list `id` as required. (The core hook is `json::omittable<T>`.)
 
 | Call | Does |
 |---|---|

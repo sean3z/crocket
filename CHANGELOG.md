@@ -18,6 +18,9 @@ section below into the GitHub Release.
   `db.where(&T::member, value | db::like(...) | db::gt(...) | db::in({...}))` with
   `order_by`, `limit`, `offset`, `all`, `first` and `count`, plus `db.sql<T>(...)` and
   `db.exec(...)` for raw SQL. Statements are prepared once per connection.
+- A model's `id` may be missing from a JSON body (it reads as 0 and the database
+  assigns it); `insert()` never sends `id`, so a client-supplied one is ignored.
+  `json::omittable<T>` is the hook.
 - **`crocket_db_seconds{table,op}`** and **`crocket_db_pool_connections{state}`** in
   `Metrics`, and **`db_ms`, `db_wait_ms` and `db_queries`** on `Logger` request lines,
   when a request used the database.

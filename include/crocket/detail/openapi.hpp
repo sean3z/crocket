@@ -278,7 +278,8 @@ std::string struct_component(Components& c) {
     properties.emplace_back(std::string(key), std::move(s));
     // What a client must send: json::read needs every member that is neither
     // optional nor has a default member initializer.
-    if constexpr (!json::is_optional<M>::value && !std::meta::has_default_member_initializer(m))
+    if constexpr (!json::is_optional<M>::value && !std::meta::has_default_member_initializer(m) &&
+                  !json::omittable<T>::member(std::meta::identifier_of(m)))
       required.push_back(std::string(key));
   }
   Object o{{"type", std::string("object")}, {"properties", std::move(properties)}};

@@ -117,6 +117,64 @@ target_link_libraries(my_app PRIVATE crocket::crocket)
 from [CHANGELOG.md](CHANGELOG.md). For the bleeding edge, opt in to `GIT_TAG main`
 (the latest channel); for reproducible builds off `main`, pin a full commit SHA.
 
+### Quick start: hello world in your own project
+
+`CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(hello_app CXX)
+
+include(FetchContent)
+FetchContent_Declare(crocket
+  GIT_REPOSITORY https://github.com/sean3z/crocket.git
+  GIT_TAG 0.3.0)
+FetchContent_MakeAvailable(crocket)
+
+add_executable(hello_app main.cpp)
+target_link_libraries(hello_app PRIVATE crocket::crocket)
+```
+
+`main.cpp`:
+
+```cpp
+#include <crocket/crocket.hpp>
+
+#include <string>
+#include <string_view>
+
+using namespace crocket;
+
+namespace api {
+
+[[= http::get("/hello/{name}")]]
+auto hello(std::string_view name) -> std::string {
+  return "Hello, " + std::string(name) + "!\n";
+}
+
+}  // namespace api
+
+int main() {
+  return build(Config::from_env())
+      .attach(Logger{})
+      .mount("/", reflect_routes<^^api>())
+      .launch();
+}
+```
+
+Build and run it with GCC 16.2:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-16.2
+cmake --build build
+./build/hello_app                 # listens on 0.0.0.0:8000; CROCKET_PORT=... to change
+curl localhost:8000/hello/Ada     # Hello, Ada!
+```
+
+The binary needs GCC 16.2's `libstdc++` at run time. If the system one is older
+(`GLIBCXX_3.4.35 not found`), point `LD_LIBRARY_PATH` at GCC's `lib64`, or link with
+`-Wl,-rpath` to it as [docker/hello.Dockerfile](docker/hello.Dockerfile) does.
+
 ## Try it
 
 **Docker, no toolchain needed:**
@@ -140,19 +198,6 @@ docker run --rm -it -v "$PWD:/src" -p 8000:8000 ghcr.io/sean3z/crocket-toolchain
 
 (`./dev run` uses the dev profile, which listens on 127.0.0.1; inside a container use
 `./dev check` and run `build/crocket_hello` to listen on 0.0.0.0.)
-
-### Quick start
-
-```bash
-git clone https://github.com/sean3z/crocket && cd crocket
-./dev setup     # apt packages for Ubuntu 26.04 (asks for sudo once)
-./dev gcc       # builds GCC 16.2 into ~/.local/gcc-16.2 (the slow part)
-./dev check     # release build plus the full test suite
-./build/crocket_hello
-curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
-```
-
-To use crocket in your own project, see [Using crocket](#using-crocket).
 
 ## Rocket, in C++
 
@@ -916,7 +961,7 @@ What you get:
 - **Protocols:** HTTP/1.1, HTTPS, and HTTP/2 when the client negotiates it over TLS.
   Unary gRPC over HTTP/2, either with TLS or on a plain-text port with
   `h2_prior_knowledge = true`.
-- **Built-in routes:** `GET /healthz` and `GET /readyz`.
+- **Built-in routes:** `GET /healthz` and `GET /readyz` (see [Health checks](#health-checks)).
 - **Request ids:** an `x-request-id` on every response, honoring the client's value
   when valid.
 - **Graceful shutdown on SIGINT/SIGTERM:** stop accepting, drain in-flight requests,
@@ -1165,7 +1210,7 @@ take `Db&` pay nothing. See `examples/heroes.cpp` for a full CRUD API.
 
 ## Production features
 
-The pieces you turn on to run crocket in production: fairings (logging, metrics, shields and health), deadlines, and how errors are reported and logged.
+The pieces you turn on to run crocket in production: fairings (including `Shield` security headers and CORS), health checks, metrics, deadlines, and how errors are reported and logged.
 
 ### Fairings
 
@@ -1270,33 +1315,49 @@ Built-in fairings:
   ```cpp
   app.attach(Shield{}.set("content-security-policy", "default-src 'self'").remove("x-frame-options"));
   ```
-- **`Metrics`:** Prometheus text at `GET /metrics`, labeled by route template.
-  - `crocket_http_requests_total` and a duration histogram.
-  - `crocket_http_requests_in_flight`.
-  - `crocket_extractor_failures_total`.
-  - `crocket_connections`, `crocket_connections_per_ip_closed_total` and
-    `crocket_request_body_bytes` (see [Limits](#limits)).
-  - `crocket_workers`, `crocket_workers_busy` and `crocket_workers_stuck` (still running
-    after their request's deadline), and `crocket_requests_abandoned_total`. See
-    [Deadlines and cancellation](#deadlines-and-cancellation).
-  - `crocket_build_info{version,commit,compiler,hostname} 1`, which says what is running where.
-  - **Constant labels** on every series from `CROCKET_METRICS_LABELS`, a comma-separated
-    `name=value` list (or pass them: `Metrics{"/metrics", {{"pod", "web-1"}}}`). In
-    Kubernetes, fill it from the Downward API:
-    ```yaml
-    env:
-      - name: POD_NAME
-        valueFrom: {fieldRef: {fieldPath: metadata.name}}
-      - name: CROCKET_METRICS_LABELS
-        value: pod=$(POD_NAME)
-    ```
-  - **Scrape each pod directly**, never through a load balancer or Service: each scrape
-    would land on a different instance, so counters jump between them and `rate()` sees
-    fake resets. Prometheus' Kubernetes service discovery (or a ServiceMonitor) scrapes pod
-    IPs and adds `instance`/`pod` itself. Keep `/metrics` off the public listener, or
-    behind auth.
+- **`Metrics`:** Prometheus text at `GET /metrics`. See [Metrics](#metrics).
 - **`OpenApi`:** the OpenAPI document at `GET /openapi.json`, and with `.docs`, a page to
   try the API. See [OpenAPI](#openapi).
+
+### Health checks
+
+Every app gets two built-in routes, `GET /healthz` and `GET /readyz`.
+
+- **`/healthz`** answers 200 `{"status":"ok"}` while the process is serving. Use it for liveness.
+- **`/readyz`** answers 200 `{"status":"ready","checks":{...}}` when every readiness
+  check passes, and 503 `not_ready` when one fails. The checks are each managed type with
+  a `bool ready() const` member, such as `Pool<T>` (see
+  [Managed state and sentinels](#managed-state-and-sentinels)), and the `crocket::db` pool
+  (`select 1`). During the drain on shutdown it answers 503 `server.draining`.
+
+### Metrics
+
+The `Metrics` fairing serves Prometheus text at `GET /metrics`, labeled by route template.
+
+- `crocket_http_requests_total` and a duration histogram.
+- `crocket_http_requests_in_flight`.
+- `crocket_extractor_failures_total`.
+- `crocket_connections`, `crocket_connections_per_ip_closed_total` and
+  `crocket_request_body_bytes` (see [Limits](#limits)).
+- `crocket_workers`, `crocket_workers_busy` and `crocket_workers_stuck` (still running
+  after their request's deadline), and `crocket_requests_abandoned_total`. See
+  [Deadlines and cancellation](#deadlines-and-cancellation).
+- `crocket_build_info{version,commit,compiler,hostname} 1`, which says what is running where.
+- **Constant labels** on every series from `CROCKET_METRICS_LABELS`, a comma-separated
+  `name=value` list (or pass them: `Metrics{"/metrics", {{"pod", "web-1"}}}`). In
+  Kubernetes, fill it from the Downward API:
+  ```yaml
+  env:
+    - name: POD_NAME
+      valueFrom: {fieldRef: {fieldPath: metadata.name}}
+    - name: CROCKET_METRICS_LABELS
+      value: pod=$(POD_NAME)
+  ```
+- **Scrape each pod directly**, never through a load balancer or Service: each scrape
+  would land on a different instance, so counters jump between them and `rate()` sees
+  fake resets. Prometheus' Kubernetes service discovery (or a ServiceMonitor) scrapes pod
+  IPs and adds `instance`/`pod` itself. Keep `/metrics` off the public listener, or
+  behind auth.
 
 ### Deadlines and cancellation
 
@@ -1402,22 +1463,103 @@ and carries the request id:
   500 `internal`, so a `Location` built from user input cannot inject headers. If an
   `on_response` fairing adds such a header, the engine drops it and reports it on stderr.
 
-## Not (yet) in crocket
+## Deployment
 
-Rocket features without an equivalent today:
+### Docker
 
-| Rocket feature | crocket today |
-|---|---|
-| `Form<T>`, `TempFile` | Use `Json<T>` |
-| Cookies and private cookies | Read headers via `Request`; set via `Response` |
-| Templates | Return `std::string` or a custom responder |
-| `FileServer` | Not implemented |
-| Typed URIs (`uri!`) | Not implemented |
-| WebSockets, SSE and streaming responses | Not implemented; responses are fully buffered |
-| Error catchers (`#[catch]`) | `ApiError` plus an `on_response` fairing, as in `NotFoundPage` above |
-| `on_liftoff` | Not implemented |
-| Config profiles (`Rocket.toml` / Figment) | A release and a [dev profile](#dev-profile) chosen with `CROCKET_PROFILE`; every other setting from `CROCKET_*` variables with `Config::from_env()` ([Environment variables](#environment-variables)); one `Config` struct in code |
-| Mutual TLS | Not implemented |
+Published images, from the [channels](#versions-and-channels) table:
+
+- `ghcr.io/sean3z/crocket-hello`: the hello example, tagged `:0.3.0`, `:0.3` and
+  `:stable` (the stable release), `:latest` and `:sha-<short>` (`main`). Pin `:0.3.0`
+  in anything you deploy.
+- `ghcr.io/sean3z/crocket-toolchain:gcc-16.2`: Ubuntu 26.04 with GCC 16.2, the image
+  CI builds in. `:gcc-16.2-pg` adds libpqxx built with that GCC, for `crocket::pg`.
+
+A minimal Dockerfile for the [quick start](#quick-start-hello-world-in-your-own-project)
+app, built the way [docker/hello.Dockerfile](docker/hello.Dockerfile) builds the hello
+image. It runs in the toolchain image so GCC 16.2's `libstdc++` is there at run time,
+and the build fetches crocket `0.3.0` and h2o from GitHub:
+
+```dockerfile
+FROM ghcr.io/sean3z/crocket-toolchain:gcc-16.2
+COPY . /src
+WORKDIR /src
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER=/opt/gcc-16.2/bin/gcc-16.2 \
+      -DCMAKE_CXX_COMPILER=/opt/gcc-16.2/bin/g++-16.2 \
+      -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,$(dirname $(/opt/gcc-16.2/bin/g++-16.2 -print-file-name=libstdc++.so))" \
+ && cmake --build build \
+ && install -m755 build/hello_app /usr/local/bin/ \
+ && rm -rf /src/build
+EXPOSE 8000
+CMD ["hello_app"]
+```
+
+The release profile listens on `0.0.0.0:8000`; every `CROCKET_*`
+[environment variable](#environment-variables) applies.
+
+### Kubernetes
+
+A Deployment using the built-in [health checks](#health-checks) and
+[metrics](#metrics):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: hello}
+  template:
+    metadata:
+      labels: {app: hello}
+    spec:
+      enableServiceLinks: false          # see below
+      terminationGracePeriodSeconds: 30  # > preStop + drain + slowest request
+      containers:
+        - name: hello
+          image: ghcr.io/sean3z/crocket-hello:0.3.0
+          ports:
+            - {name: http, containerPort: 8000}
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: CROCKET_METRICS_LABELS
+              value: pod=$(POD_NAME)
+            - name: CROCKET_EVENT_LOOPS  # match the CPU limit
+              value: "2"
+            - name: CROCKET_DRAIN_TIMEOUT
+              value: 10s
+          resources:
+            requests: {cpu: "2", memory: 128Mi}
+            limits: {cpu: "2", memory: 256Mi}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "5"]}
+```
+
+- **Probes:** `/healthz` for liveness and `/readyz` for readiness. `/readyz` turns 503
+  as soon as the drain starts, and while a managed pool or the database is down.
+- **Shutdown:** on SIGTERM crocket stops accepting, answers its in-flight requests
+  with `Connection: close`, and drains them for up to `timeouts.drain`
+  (`CROCKET_DRAIN_TIMEOUT`, 10 s by default). The `preStop` sleep keeps the pod serving
+  until the Service has stopped sending it new connections. Keep
+  `terminationGracePeriodSeconds` above `preStop` + the drain + your slowest request.
+- **CPU:** set `CROCKET_EVENT_LOOPS` to the CPU limit. crocket counts the CPUs in its
+  affinity mask, which a CPU quota doesn't change.
+- **Service links:** a Service named `crocket` makes Kubernetes inject
+  `CROCKET_PORT=tcp://...`, which crocket refuses to start with. Set
+  `enableServiceLinks: false`, or name the Service something else.
+- **Metrics:** the image above runs the hello example, which doesn't attach `Metrics`;
+  your app does. Scrape each pod directly (see [Metrics](#metrics)), with the Prometheus
+  Operator a ServiceMonitor on port `http`, path `/metrics`, or Prometheus' Kubernetes
+  pod discovery.
 
 ## Versions and channels
 
@@ -1498,6 +1640,17 @@ don't need it.
 and every pull request, and caches the GCC build. Builds go to `build-dev/` (Debug), `build/`
 (release) and `build-fuzz/` (see [Fuzzing](#fuzzing)), configured from `CMakePresets.json`. `./dev` picks the compiler in this
 order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
+
+### Building from source
+
+```bash
+git clone https://github.com/sean3z/crocket && cd crocket
+./dev setup     # apt packages for Ubuntu 26.04 (asks for sudo once)
+./dev gcc       # builds GCC 16.2 into ~/.local/gcc-16.2 (the slow part)
+./dev check     # release build plus the full test suite
+./build/crocket_hello
+curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
+```
 
 ### Benchmarks
 
@@ -1600,6 +1753,20 @@ corpus and two seconds of mutations, without coverage.
 | `db` | `crocket::db` against a real Postgres: table names, the generated SQL, insert, find, update, erase, every filter, the escape hatch, 409 on a unique violation, a `table_name` override, and `Db&` in handlers with its log fields, metrics and `/readyz`. Needs `CROCKET_TEST_DATABASE_URL`; skipped without it. |
 | `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
+
+## Roadmap
+
+What's planned on the way to 1.0, including features not in crocket yet, is tracked in
+[Roadmap to 1.0](https://github.com/sean3z/crocket/issues/37).
+
+## Contributing
+
+Issues and pull requests are welcome. To get a working tree, follow
+[Building from source](#building-from-source): `./dev setup`, `./dev gcc`, then
+`./dev check` runs the release build and the full test suite. [Working on crocket](#working-on-crocket)
+covers the rest of `./dev`, [Benchmarks](#benchmarks) (`./dev bench --compare main`
+for a change that touches the request path), [Fuzzing](#fuzzing) and [Tests](#tests).
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

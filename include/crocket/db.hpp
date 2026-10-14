@@ -1,5 +1,6 @@
 #pragma once
-// crocket::db: plain structs in and out of Postgres, through libpqxx.
+// crocket::db: plain structs in and out of a database. Handlers see only Db&;
+// the backend is a CMake target: crocket::pg (Postgres, through libpqxx) today.
 //
 //   struct Hero { std::int64_t id; std::string name; std::string alias; std::optional<std::string> mentor; };
 //

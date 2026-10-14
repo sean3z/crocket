@@ -1,4 +1,4 @@
-// Heroes: a CRUD API on Postgres with crocket::db.
+// Heroes: a CRUD API on Postgres with crocket::db (link crocket::pg).
 //
 //   createdb heroes
 //   CROCKET_DATABASE_URL=postgresql://localhost/heroes ./build/crocket_heroes

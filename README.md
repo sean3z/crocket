@@ -706,10 +706,13 @@ auto get_user(std::uint64_t id, State<Pool<Conn>> db, Deadline d) -> Result<std:
 
 ### Databases: `crocket::db`
 
-An optional component for Postgres, on [libpqxx](https://github.com/jtv/libpqxx). It is
-built when libpqxx is found (`apt install libpqxx-dev`) and links as `crocket::db`;
-`-DCROCKET_DB=OFF` skips it and `-DCROCKET_DB=ON` makes a missing libpqxx an error.
-Programs that link only `crocket::crocket` are unaffected.
+The `crocket::db` API (`Db&`, `db::Pool`, `find`, `insert`, `where`, ...) is generic;
+each database is a backend you link. Today there is one, **`crocket::pg`**, for Postgres
+on [libpqxx](https://github.com/jtv/libpqxx). It is built when libpqxx is found
+(`apt install libpqxx-dev`): `target_link_libraries(app PRIVATE crocket::pg)`.
+`-DCROCKET_PG=OFF` skips it and `-DCROCKET_PG=ON` makes a missing libpqxx an error.
+Programs that link only `crocket::crocket` are unaffected. Handlers name `Db&`, never
+the backend, so a later backend (`crocket::sqlite`, say) needs no handler changes.
 
 Your structs stay plain: no annotations and no base class.
 

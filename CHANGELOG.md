@@ -10,8 +10,9 @@ section below into the GitHub Release.
 ## [Unreleased]
 
 ### Added
-- **`crocket::db`**, an optional component for Postgres on libpqxx (built when libpqxx
-  is found; `-DCROCKET_DB=OFF|ON`). Plain structs, no annotations or base class: the
+- **`crocket::db`**, a small database API, with its first backend **`crocket::pg`**
+  (CMake target), Postgres on libpqxx, built when libpqxx is found
+  (`-DCROCKET_PG=AUTO|ON|OFF`). Handlers take `Db&` and never name the backend. Plain structs, no annotations or base class: the
   table is the type's name in plural snake_case (`Hero` -> `heroes`, overridable with
   `db::table_name<T>`), columns are the members, `id` is the key. Handlers take `Db& db`;
   `db.find<T>(id)`, `db.insert(v)`, `db.update(v)`, `db.erase<T>(id)`,

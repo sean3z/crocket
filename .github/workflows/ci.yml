@@ -20,7 +20,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 60
-    # The db test (crocket::db) runs against this Postgres.
+    # The db test (crocket::db on crocket::pg) runs against this Postgres.
     services:
       postgres:
         image: postgres:17
@@ -49,7 +49,7 @@ jobs:
       # libpqxx built here with GCC 16 in C++26, not the distro package: its ABI
       # depends on the compiler and C++ standard it was built with, and the
       # Ubuntu build crashes (double free) when mixed with crocket's.
-      - name: Build libpqxx (crocket::db)
+      - name: Build libpqxx (crocket::pg)
         run: |
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q

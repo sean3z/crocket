@@ -73,7 +73,17 @@ auto create(Db& db, Json<Hero> body) -> Created<Hero> { return {db.insert(*body)
 auto robins(Db& db) -> std::vector<Hero> { return db.where(&Hero::mentor, "Bruce Wayne").order_by(&Hero::id); }
 }  // namespace api
 
+static int run();
 int main() {
+  try {
+    return run();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "uncaught: %s\n", e.what());
+    return 1;
+  }
+}
+
+static int run() {
   const char* url = std::getenv("CROCKET_TEST_DATABASE_URL");
   if (!url || !*url) {
     std::fprintf(stderr, "CROCKET_TEST_DATABASE_URL is not set: skipping\n");

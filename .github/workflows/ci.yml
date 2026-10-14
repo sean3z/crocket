@@ -46,11 +46,20 @@ jobs:
           key: ccache-${{ github.sha }}
           restore-keys: ccache-
 
-      - name: Install libpqxx (crocket::db)
+      # libpqxx built here with GCC 16 in C++26, not the distro package: its ABI
+      # depends on the compiler and C++ standard it was built with, and the
+      # Ubuntu build crashes (double free) when mixed with crocket's.
+      - name: Build libpqxx (crocket::db)
         run: |
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
-          DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -q --no-install-recommends libpqxx-dev
+          DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -q --no-install-recommends libpq-dev
+          curl -fsSL https://github.com/jtv/libpqxx/archive/refs/tags/7.10.0.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/libpqxx-7.10.0 -B /tmp/pqxx-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=$CROCKET_GCC_PREFIX/bin/g++-16.2 -DCMAKE_C_COMPILER=$CROCKET_GCC_PREFIX/bin/gcc-16.2 \
+            -DCMAKE_CXX_STANDARD=26 -DSKIP_BUILD_TEST=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_DOC=OFF
+          cmake --build /tmp/pqxx-build
+          $SUDO cmake --install /tmp/pqxx-build
 
       - name: Release build and all tests
         run: ./dev check

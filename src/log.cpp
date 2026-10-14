@@ -146,12 +146,22 @@ void Hub::write(std::string_view line) {
   }
   {
     auto& sh = shard();
-    std::lock_guard lk(sh.mu);
-    // Numbered while holding the shard, so a writer that sees the count go up
-    // finds the line once it takes the shard; raised before the sleeping_ check.
+    // Numbered before it is published, so a writer that sees the count go up
+    // finds the line once this thread publishes it (it sweeps until it has).
     Record r{queued_.fetch_add(1), line.size()};
-    sh.buf.append(reinterpret_cast<const char*>(&r), sizeof r);
-    sh.buf.append(line);
+    auto need = sizeof r + line.size();
+    auto tail = sh.tail.load(std::memory_order_relaxed);
+    if (!sh.overflowing.load(std::memory_order_acquire) &&
+        need <= Shard::kRing - (tail - sh.head.load(std::memory_order_acquire))) {
+      sh.put(&r, sizeof r, tail);
+      sh.put(line.data(), line.size(), tail + sizeof r);
+      sh.tail.store(tail + need, std::memory_order_release);
+    } else {
+      std::lock_guard lk(sh.mu);
+      sh.overflow.append(reinterpret_cast<const char*>(&r), sizeof r);
+      sh.overflow.append(line);
+      sh.overflowing.store(true, std::memory_order_release);
+    }
   }
   if (!started_.load()) start_writer();
   // Waking the writer is a system call: only when it sleeps, which it does
@@ -176,6 +186,8 @@ void Hub::run() {
   std::vector<std::string> batch;  // one buffer per shard that had lines
   std::string spare;               // swapped into a shard, keeping its capacity
   std::vector<std::pair<std::uint64_t, std::string_view>> order;  // (sequence, line) of one sweep
+  std::string out;                 // a sweep's lines for stderr
+  std::vector<std::pair<std::uint64_t, std::string>> held, held_next;  // lines after a gap in the numbering
   std::uint64_t collected = 0;
   while (true) {
     {
@@ -193,12 +205,26 @@ void Hub::run() {
         sleeping_.store(false);
       }
       if (stop_ && queued_.load() == collected) break;
-      // Every thread's lines, in one pass.
+      // Every thread's lines, in one pass: its ring, then what overflowed
+      // (lines logged after the ring's, and before any the ring takes next).
       for (auto& sh : shards_) {
-        std::lock_guard slk(sh->mu);
-        if (sh->buf.empty()) continue;
+        // `overflowing` first: ring lines published before it was set are then
+        // all below the tail read next, so none is collected after a later line.
+        bool over = sh->overflowing.load(std::memory_order_acquire);
+        auto tail = sh->tail.load(std::memory_order_acquire);
+        auto head = sh->head.load(std::memory_order_relaxed);
+        if (tail == head && !over) continue;
         spare.clear();
-        spare.swap(sh->buf);  // the shard gets an empty buffer with the spare's capacity
+        if (tail != head) {
+          sh->take(spare, head, tail);
+          sh->head.store(tail, std::memory_order_release);
+        }
+        if (over) {
+          std::lock_guard slk(sh->mu);
+          spare += sh->overflow;
+          sh->overflow.clear();
+          sh->overflowing.store(false, std::memory_order_release);
+        }
         batch.push_back(std::move(spare));
         spare = {};
       }
@@ -222,13 +248,39 @@ void Hub::run() {
         at += sizeof r + r.size;
       }
     }
-    if (batch.size() > 1) std::ranges::sort(order, {}, &std::pair<std::uint64_t, std::string_view>::first);
-    for (auto& [seq, line] : order) write_line(line);
+    for (auto& [seq, line] : held) order.emplace_back(seq, line);
+    if (batch.size() + (held.empty() ? 0 : 1) > 1)
+      std::ranges::sort(order, {}, &std::pair<std::uint64_t, std::string_view>::first);
+    // A line is numbered just before its thread publishes it: one numbered
+    // earlier may still be on its way. Write only up to the first gap; the
+    // rest waits for the next sweep, so lines never come out of order.
+    std::size_t ready_lines = 0;
+    while (ready_lines < order.size() && order[ready_lines].first == collected + ready_lines) ++ready_lines;
+    if (ready_lines < order.size()) {
+      std::vector<std::pair<std::uint64_t, std::string>> wait;
+      for (std::size_t i = ready_lines; i < order.size(); ++i) wait.emplace_back(order[i].first, order[i].second);
+      order.resize(ready_lines);  // views into `held` stay valid until it is replaced below
+      held_next = std::move(wait);
+    }
+    if (opts_.sink) {
+      for (auto& [seq, line] : order) write_line(line);
+    } else if (!order.empty()) {
+      // The whole sweep in one write: one stdio lock and, per buffer, one system call.
+      out.clear();
+      for (auto& [seq, line] : order) {
+        out += line;
+        out += '\n';
+      }
+      std::fwrite(out.data(), 1, out.size(), stderr);
+      if (out.capacity() > (std::size_t(16) << 20)) out = {};  // keep a typical sweep's room, not a burst's
+    }
     lines = order.size();
     if (!opts_.sink) std::fflush(stderr);
     collected += lines;
     written_.fetch_add(lines);
     pace_ = lines > 0;
+    held = std::move(held_next);
+    held_next.clear();
     // Keep one buffer's capacity for the next swap; the rest go.
     if (!batch.empty()) {
       spare = std::move(batch.back());

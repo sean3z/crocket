@@ -8,7 +8,10 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <cstring>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace crocket::log::detail {
@@ -46,11 +49,32 @@ class Hub {
   std::atomic<std::uint64_t>* dropped_;
   std::vector<std::string> redact_;  // lower case
 
-  /// Lines a thread has logged and the writer has not collected yet. Only that
-  /// thread and the writer take its mutex, so threads never wait on each other.
+  /// Lines a thread has logged and the writer has not collected yet, in a
+  /// ring only that thread writes and only the writer reads: logging a line
+  /// takes no lock. A line that does not fit (the ring is full, or the line is
+  /// longer than it) goes to `overflow` under `mu`, and so do the lines after
+  /// it until the writer has collected them, which keeps a thread's lines in order.
   struct Shard {
-    std::mutex mu;
-    std::string buf;  // lines, each a Record then its bytes: no allocation per line
+    static constexpr std::size_t kRing = std::size_t(1) << 18;  // bytes, a power of two
+    std::unique_ptr<char[]> ring{new char[kRing]};
+    alignas(64) std::atomic<std::uint64_t> tail{0};  // bytes written, by the thread
+    alignas(64) std::atomic<std::uint64_t> head{0};  // bytes collected, by the writer
+    std::atomic<bool> overflowing{false};
+    std::mutex mu;         // overflow only
+    std::string overflow;  // lines, each a Record then its bytes
+    void put(const void* p, std::size_t n, std::uint64_t at) {
+      auto off = std::size_t(at & (kRing - 1));
+      auto first = std::min(n, kRing - off);
+      std::memcpy(ring.get() + off, p, first);
+      std::memcpy(ring.get(), static_cast<const char*>(p) + first, n - first);
+    }
+    void take(std::string& out, std::uint64_t from, std::uint64_t to) const {
+      auto off = std::size_t(from & (kRing - 1));
+      auto n = std::size_t(to - from);
+      auto first = std::min(n, kRing - off);
+      out.append(ring.get() + off, first);
+      out.append(ring.get(), n - first);
+    }
   };
   struct Record {
     std::uint64_t seq;  // the order lines were logged in, across threads

@@ -1,3 +1,4 @@
+#include "request_clock.hpp"
 #include "crocket/app.hpp"
 #include "crocket/fairings.hpp"
 #include "crocket/grpc.hpp"
@@ -849,6 +850,7 @@ void Crocket::finish(const Request& req, Response& res) {
     write_error(ApiError::internal(*bad_header + " contains a character not allowed in HTTP headers (CR, LF, NUL, ...)"),
                 req, res);
   }
+  if (!detail::stamped(req)) detail::stamp_request(req, Clock::now());
   res.headers.set("x-request-id", req.request_id);
   detail::conditional(req, res, core_->config.limits.etag_max_bytes);
   auto& fs = core_->fairings;
@@ -905,7 +907,9 @@ bool Crocket::run_routes(Request& req, Response& res) {
       auto started = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       auto out = def.invoke(req, res);
       if (timed && out.kind != detail::Outcome::Forward) {
-        auto took = std::chrono::steady_clock::now() - started;
+        auto ended = std::chrono::steady_clock::now();
+        detail::stamp_request(req, ended);  // Logger and Metrics time the request with this read
+        auto took = ended - started;
         if (req.exchange && req.exchange->loop) {
           req.exchange->loop_hold_reported = true;  // ran_on_loop reports a slow run
           ran_on_loop(def, took);

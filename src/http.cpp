@@ -1,3 +1,4 @@
+#include "request_clock.hpp"
 #include "crocket/app.hpp"
 #include "crocket/grpc.hpp"
 #include "crocket/responder.hpp"
@@ -225,9 +226,21 @@ std::string_view reason_phrase(int status) {
   return "Unknown Status";
 }
 
-void append_iso8601_now(std::string& out) {
+std::chrono::system_clock::time_point wall_time(Clock::time_point at) {
   using namespace std::chrono;
-  auto now = system_clock::now();
+  thread_local Clock::time_point base_steady{};
+  thread_local system_clock::time_point base_wall{};
+  if (base_steady == Clock::time_point{} || at - base_steady >= seconds(1) || at < base_steady) {
+    base_steady = Clock::now();
+    base_wall = system_clock::now();
+  }
+  return base_wall + duration_cast<system_clock::duration>(at - base_steady);
+}
+
+void append_iso8601_now(std::string& out) { append_iso8601(out, std::chrono::system_clock::now()); }
+
+void append_iso8601(std::string& out, std::chrono::system_clock::time_point now) {
+  using namespace std::chrono;
   auto secs = time_point_cast<seconds>(now);
   auto ms = duration_cast<milliseconds>(now - secs).count();
   // The date and time change once a second: format them then, per thread.

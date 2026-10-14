@@ -147,7 +147,8 @@ void conditional(const Request& rq, Response& rs, std::size_t etag_max_bytes) {
     tag[17] = '"';
     rs.headers.add("etag", std::string_view(tag, sizeof tag));
   }
-  std::string etag(rs.headers.get("etag").value_or(""));  // "": none (a body past etag_max_bytes)
+  // "": none (a body past etag_max_bytes). A view: rs.headers does not change before its last use.
+  std::string_view etag = rs.headers.get("etag").value_or("");
   auto last_modified = rs.headers.get("last-modified");
 
   // If-None-Match decides when present; If-Modified-Since only without it.

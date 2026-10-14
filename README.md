@@ -1102,6 +1102,9 @@ booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-
 | `CROCKET_DEBUG_ROUTES` | `debug_routes` (`GET /__routes`) | `false` (`true` in dev) |
 | `CROCKET_ADAPTIVE_PLACEMENT` | `adaptive_placement` | `true` |
 | `CROCKET_LOG_LEVEL` | `log.level`: `debug`, `info`, `warn` or `error` | `info` (`debug` in dev) |
+| `CROCKET_LOG_SAMPLE` | `log.sample`: the share of successful requests Logger writes a line for (errors and slow requests are always written) | `1` (every request) |
+| `CROCKET_LOG_SLOW` | `log.slow`: with a sample below 1, requests at least this long are written anyway; `0` turns that off | `500ms` |
+| `CROCKET_LOG_BUFFER` | `log.buffer`: lines waiting for the log writer before new ones are dropped (or wait, with `when_full = block`) | `10000` |
 | `CROCKET_DATABASE_URL` | `database.url`, for [`crocket::db`](#databases-crocketdb) | unset (libpq's `PG*` variables) |
 | `CROCKET_DATABASE_POOL_SIZE` | `database.pool_size` | `8` |
 | `CROCKET_DATABASE_POOL_WAIT` | `database.pool_wait` | `5s` |

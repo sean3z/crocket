@@ -62,8 +62,9 @@ void Logger::on_ignite(Ignite& ig) {
 void Logger::on_response(const Request& rq, Response& rs) {
   if (!hub_) return;
   auto level = rs.status >= 500 ? log::Level::error : rs.status >= 400 ? log::Level::warn : log::Level::info;
-  if (!hub_->enabled(level) || (rs.status < 400 && !hub_->sampled(rq.request_id))) return;
+  if (!hub_->enabled(level)) return;
   auto end = detail::response_time(rq);  // the request's one clock read for its end
+  if (rs.status < 400 && !hub_->sampled(rq.request_id) && !hub_->slow(end - rq.received)) return;
   auto dur = std::chrono::duration<double, std::milli>(end - rq.received).count();
   if (hub_->text()) {
     bool color = hub_->color();

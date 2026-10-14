@@ -30,6 +30,10 @@ class Hub {
   [[nodiscard]] bool color() const { return color_; }
   /// Whether the request line for a successful response is kept (Options::sample).
   [[nodiscard]] bool sampled(std::string_view request_id) const;
+  /// Whether a request this long is logged even when the sample skips it.
+  [[nodiscard]] bool slow(std::chrono::steady_clock::duration took) const {
+    return opts_.slow.count() > 0 && took >= opts_.slow;
+  }
   [[nodiscard]] bool redacted(std::string_view field) const;
   /// `json` with the values of redacted members (at any depth) replaced.
   [[nodiscard]] std::string redact(std::string json) const;
@@ -49,7 +53,7 @@ class Hub {
   std::atomic<std::uint64_t>* dropped_;
   std::vector<std::string> redact_;  // lower case
 
-  /// Lines a thread has logged and the writer has not collected yet, in a
+  /// Lines a thread has logged and the writer has not written yet, in a
   /// ring only that thread writes and only the writer reads: logging a line
   /// takes no lock. A line that does not fit (the ring is full, or the line is
   /// longer than it) goes to `overflow` under `mu`, and so do the lines after
@@ -58,7 +62,7 @@ class Hub {
     static constexpr std::size_t kRing = std::size_t(1) << 18;  // bytes, a power of two
     std::unique_ptr<char[]> ring{new char[kRing]};
     alignas(64) std::atomic<std::uint64_t> tail{0};  // bytes written, by the thread
-    alignas(64) std::atomic<std::uint64_t> head{0};  // bytes collected, by the writer
+    alignas(64) std::atomic<std::uint64_t> head{0};  // bytes written out, by the writer
     std::atomic<bool> overflowing{false};
     std::mutex mu;         // overflow only
     std::string overflow;  // lines, each a Record then its bytes
@@ -68,18 +72,24 @@ class Hub {
       std::memcpy(ring.get() + off, p, first);
       std::memcpy(ring.get(), static_cast<const char*>(p) + first, n - first);
     }
-    void take(std::string& out, std::uint64_t from, std::uint64_t to) const {
-      auto off = std::size_t(from & (kRing - 1));
-      auto n = std::size_t(to - from);
+    /// Copies `n` bytes at ring position `at` (which may wrap) to `out`.
+    void get(void* out, std::size_t n, std::uint64_t at) const {
+      auto off = std::size_t(at & (kRing - 1));
       auto first = std::min(n, kRing - off);
-      out.append(ring.get() + off, first);
-      out.append(ring.get(), n - first);
+      std::memcpy(out, ring.get() + off, first);
+      std::memcpy(static_cast<char*>(out) + first, ring.get(), n - first);
+    }
+    /// The bytes at `at` as one piece, when they do not wrap.
+    [[nodiscard]] const char* contiguous(std::uint64_t at, std::size_t n) const {
+      auto off = std::size_t(at & (kRing - 1));
+      return off + n <= kRing ? ring.get() + off : nullptr;
     }
   };
   struct Record {
     std::uint64_t seq;  // the order lines were logged in, across threads
-    std::uint64_t size;
+    std::uint64_t size;  // of the line, not counting the '\n' stored after it
   };
+  bool behind() const { return pending() >= opts_.buffer / 4; }  // the writer skips its pause
   Shard& shard();  // this thread's
   void start_writer();
   [[nodiscard]] std::uint64_t pending() const { return queued_.load() - written_.load(); }

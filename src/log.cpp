@@ -2,7 +2,14 @@
 
 #include "crocket/app.hpp"
 
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <climits>
 
 #include <algorithm>
 #include <chrono>
@@ -10,6 +17,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <format>
 
 namespace crocket::log {
@@ -149,17 +157,19 @@ void Hub::write(std::string_view line) {
     // Numbered before it is published, so a writer that sees the count go up
     // finds the line once this thread publishes it (it sweeps until it has).
     Record r{queued_.fetch_add(1), line.size()};
-    auto need = sizeof r + line.size();
+    auto need = sizeof r + line.size() + 1;  // the '\n' too: the writer hands lines to writev in place
     auto tail = sh.tail.load(std::memory_order_relaxed);
     if (!sh.overflowing.load(std::memory_order_acquire) &&
         need <= Shard::kRing - (tail - sh.head.load(std::memory_order_acquire))) {
       sh.put(&r, sizeof r, tail);
       sh.put(line.data(), line.size(), tail + sizeof r);
+      sh.put("\n", 1, tail + sizeof r + line.size());
       sh.tail.store(tail + need, std::memory_order_release);
     } else {
       std::lock_guard lk(sh.mu);
       sh.overflow.append(reinterpret_cast<const char*>(&r), sizeof r);
       sh.overflow.append(line);
+      sh.overflow += '\n';
       sh.overflowing.store(true, std::memory_order_release);
     }
   }
@@ -182,22 +192,83 @@ void Hub::flush() {
   done_.wait(lk, [&] { return written_.load() >= target || !started_.load(); });
 }
 
+namespace {
+
+/// Writes every byte of `iov` to `fd`, retrying partial writes and EINTR.
+/// False on any other error (the lines are lost, as with fwrite before).
+bool write_all(int fd, std::vector<iovec>& iov) {
+  std::size_t i = 0;
+  while (i < iov.size()) {
+    int n = int(std::min<std::size_t>(iov.size() - i, IOV_MAX));
+    ssize_t w = ::writev(fd, iov.data() + i, n);
+    if (w < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN) {  // a non-blocking descriptor: wait until it takes more
+        pollfd p{fd, POLLOUT, 0};
+        ::poll(&p, 1, 100);
+        continue;
+      }
+      return false;
+    }
+    auto left = std::size_t(w);
+    while (i < iov.size() && left >= iov[i].iov_len) left -= iov[i++].iov_len;
+    if (left) {
+      iov[i].iov_base = static_cast<char*>(iov[i].iov_base) + left;
+      iov[i].iov_len -= left;
+    }
+  }
+  return true;
+}
+
+/// A container runtime reads a pipe in turns: a bigger pipe rides out its
+/// pauses without the writer blocking. A hint; failures are ignored.
+void widen_pipe(int fd) {
+#ifdef F_SETPIPE_SZ
+  struct stat st{};
+  if (::fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode)) return;
+  int now = ::fcntl(fd, F_GETPIPE_SZ);
+  if (now >= 0 && now < (1 << 20)) (void)::fcntl(fd, F_SETPIPE_SZ, 1 << 20);
+#else
+  (void)fd;
+#endif
+}
+
+}  // namespace
+
 void Hub::run() {
-  std::vector<std::string> batch;  // one buffer per shard that had lines
-  std::string spare;               // swapped into a shard, keeping its capacity
-  std::vector<std::pair<std::uint64_t, std::string_view>> order;  // (sequence, line) of one sweep
-  std::string out;                 // a sweep's lines for stderr
+  // One sweep: what every thread has logged, put back in the order it was
+  // logged in, and written with one writev per IOV_MAX lines. Lines are
+  // written from where they lie (the thread's ring, or an overflow buffer)
+  // with the '\n' stored after each, so the writer copies nothing on the
+  // common path; a ring is released only once its lines are written.
+  struct Item {
+    std::uint64_t seq;
+    std::string_view line;  // followed in memory by its '\n'
+  };
+  struct Taken {
+    Shard* shard;
+    std::uint64_t tail;  // the ring's new head once written
+  };
+  std::vector<Taken> taken;
+  // Deques: adding one never moves the others, which `order` points into.
+  std::deque<std::string> overflows;  // swapped out of shards, keeping their lines alive
+  std::deque<std::string> wrapped;    // lines that wrapped around a ring's end, copied
+  std::vector<Item> order, waiting;
   std::vector<std::pair<std::uint64_t, std::string>> held, held_next;  // lines after a gap in the numbering
+  std::vector<iovec> iov;
+  std::string drop_line;
   std::uint64_t collected = 0;
+  if (!opts_.sink) widen_pipe(STDERR_FILENO);
   while (true) {
+    taken.clear();
     {
       std::unique_lock lk(mu_);
       auto ready = [&] { return queued_.load() > collected || stop_; };
-      // After a sweep that found lines, let more gather for a moment: sweeping
-      // constantly takes every thread's shard lock constantly, and moves it
-      // between cores. A line waits at most about a millisecond for this;
-      // flush() and shutdown wake the writer at once.
-      if (pace_) work_.wait_for(lk, std::chrono::milliseconds(1), [&] { return stop_ || flush_requested_; });
+      // After a sweep that found lines, let more gather for a moment, unless
+      // the writer is behind: a line waits at most about a millisecond for
+      // this; flush() and shutdown wake the writer at once.
+      if (pace_ && !behind())
+        work_.wait_for(lk, std::chrono::milliseconds(1), [&] { return stop_ || flush_requested_; });
       flush_requested_ = false;
       if (!ready()) {
         sleeping_.store(true);  // before wait() looks at queued_ again: see write()
@@ -213,80 +284,89 @@ void Hub::run() {
         bool over = sh->overflowing.load(std::memory_order_acquire);
         auto tail = sh->tail.load(std::memory_order_acquire);
         auto head = sh->head.load(std::memory_order_relaxed);
-        if (tail == head && !over) continue;
-        spare.clear();
         if (tail != head) {
-          sh->take(spare, head, tail);
-          sh->head.store(tail, std::memory_order_release);
+          for (auto at = head; at < tail;) {
+            Record r;
+            sh->get(&r, sizeof r, at);
+            auto pos = at + sizeof r;
+            auto n = std::size_t(r.size);
+            if (const char* p = sh->contiguous(pos, n + 1)) {
+              order.push_back({r.seq, std::string_view(p, n)});
+            } else {
+              std::string copy(n + 1, '\n');
+              sh->get(copy.data(), n + 1, pos);
+              wrapped.push_back(std::move(copy));
+              order.push_back({r.seq, std::string_view(wrapped.back()).substr(0, n)});
+            }
+            at = pos + n + 1;
+          }
+          taken.push_back({sh.get(), tail});
         }
         if (over) {
-          std::lock_guard slk(sh->mu);
-          spare += sh->overflow;
-          sh->overflow.clear();
-          sh->overflowing.store(false, std::memory_order_release);
+          std::string buf;
+          {
+            std::lock_guard slk(sh->mu);
+            buf.swap(sh->overflow);
+            sh->overflowing.store(false, std::memory_order_release);
+          }
+          overflows.push_back(std::move(buf));
         }
-        batch.push_back(std::move(spare));
-        spare = {};
       }
     }
-    std::size_t lines = 0;
-    auto drops = unreported_drops_.exchange(0);
-    if (drops) {
-      std::string o = R"({"ts":")";
-      crocket::detail::append_iso8601_now(o);
-      o += R"(","level":"warn","msg":"log lines dropped: the writer fell behind","count":)" + std::to_string(drops) + "}";
-      if (text_) o = local_clock() + " WARN  " + std::to_string(drops) + " log lines dropped: the writer fell behind";
-      write_line(o);
-    }
-    // Back in the order the lines were logged, across threads.
-    order.clear();
-    for (auto& buf : batch) {
+    for (auto& buf : overflows)
       for (std::size_t at = 0; at + sizeof(Record) <= buf.size();) {
         Record r;
         std::memcpy(&r, buf.data() + at, sizeof r);
-        order.emplace_back(r.seq, std::string_view(buf).substr(at + sizeof r, r.size));
-        at += sizeof r + r.size;
+        order.push_back({r.seq, std::string_view(buf).substr(at + sizeof r, r.size)});
+        at += sizeof r + r.size + 1;
       }
-    }
-    for (auto& [seq, line] : held) order.emplace_back(seq, line);
-    if (batch.size() + (held.empty() ? 0 : 1) > 1)
-      std::ranges::sort(order, {}, &std::pair<std::uint64_t, std::string_view>::first);
+    for (auto& [seq, line] : held) order.push_back({seq, std::string_view(line).substr(0, line.size() - 1)});
+    std::ranges::sort(order, {}, &Item::seq);
     // A line is numbered just before its thread publishes it: one numbered
     // earlier may still be on its way. Write only up to the first gap; the
-    // rest waits for the next sweep, so lines never come out of order.
+    // rest waits for the next sweep (copied: its ring is released below), so
+    // lines never come out of order.
     std::size_t ready_lines = 0;
-    while (ready_lines < order.size() && order[ready_lines].first == collected + ready_lines) ++ready_lines;
-    if (ready_lines < order.size()) {
-      std::vector<std::pair<std::uint64_t, std::string>> wait;
-      for (std::size_t i = ready_lines; i < order.size(); ++i) wait.emplace_back(order[i].first, order[i].second);
-      order.resize(ready_lines);  // views into `held` stay valid until it is replaced below
-      held_next = std::move(wait);
+    while (ready_lines < order.size() && order[ready_lines].seq == collected + ready_lines) ++ready_lines;
+    for (std::size_t i = ready_lines; i < order.size(); ++i) {
+      std::string copy(order[i].line);
+      copy += '\n';
+      held_next.emplace_back(order[i].seq, std::move(copy));
+    }
+    order.resize(ready_lines);
+
+    auto drops = unreported_drops_.exchange(0);
+    drop_line.clear();
+    if (drops) {
+      drop_line = R"({"ts":")";
+      crocket::detail::append_iso8601_now(drop_line);
+      drop_line += R"(","level":"warn","msg":"log lines dropped: the writer fell behind","count":)" + std::to_string(drops) + "}";
+      if (text_) drop_line = local_clock() + " WARN  " + std::to_string(drops) + " log lines dropped: the writer fell behind";
     }
     if (opts_.sink) {
-      for (auto& [seq, line] : order) write_line(line);
-    } else if (!order.empty()) {
-      // The whole sweep in one write: one stdio lock and, per buffer, one system call.
-      out.clear();
-      for (auto& [seq, line] : order) {
-        out += line;
-        out += '\n';
+      if (!drop_line.empty()) write_line(drop_line);
+      for (auto& it : order) write_line(it.line);
+    } else if (!order.empty() || !drop_line.empty()) {
+      iov.clear();
+      if (!drop_line.empty()) {
+        drop_line += '\n';
+        iov.push_back({drop_line.data(), drop_line.size()});
       }
-      std::fwrite(out.data(), 1, out.size(), stderr);
-      if (out.capacity() > (std::size_t(16) << 20)) out = {};  // keep a typical sweep's room, not a burst's
+      for (auto& it : order) iov.push_back({const_cast<char*>(it.line.data()), it.line.size() + 1});
+      std::fflush(stderr);  // anything printed with stdio first stays first
+      (void)write_all(STDERR_FILENO, iov);
     }
-    lines = order.size();
-    if (!opts_.sink) std::fflush(stderr);
+    // The rings' lines are out (or copied into held_next): release them.
+    for (auto& t : taken) t.shard->head.store(t.tail, std::memory_order_release);
+    std::size_t lines = order.size();
     collected += lines;
     written_.fetch_add(lines);
     pace_ = lines > 0;
-    held = std::move(held_next);
+    order.clear();
+    held.swap(held_next);
     held_next.clear();
-    // Keep one buffer's capacity for the next swap; the rest go.
-    if (!batch.empty()) {
-      spare = std::move(batch.back());
-      spare.clear();
-    }
-    batch.clear();
+    wrapped.clear();
+    overflows.clear();
     std::lock_guard lk(mu_);
     room_.notify_all();
     done_.notify_all();

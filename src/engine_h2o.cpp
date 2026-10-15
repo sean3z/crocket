@@ -1023,7 +1023,7 @@ int Engine::run() {
     }
   }
 
-  unsigned n_workers = opts_.workers ? opts_.workers : std::max(4u, cores);
+  unsigned n_workers = detail::resolve_workers(opts_.workers, cores, app_.core().blocking_pool_size);
   start_workers(n_workers);
   app_.core().executor.store(this);
 

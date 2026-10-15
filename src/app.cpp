@@ -181,6 +181,11 @@ void parse_listen(std::string_view listen, std::string& host, std::uint16_t& por
   port = std::uint16_t(*n);
 }
 
+unsigned resolve_workers(unsigned configured, unsigned cores, std::size_t blocking_pool_size) {
+  if (configured) return configured;
+  return std::max<unsigned>({4u, cores, unsigned(std::min<std::size_t>(blocking_pool_size, 1024))});
+}
+
 ServerConfig resolve_server(const Config& cfg, const ServerOverrides& o) {
   ServerConfig s = cfg.server;
   if (!s.listen.empty()) parse_listen(s.listen, s.host, s.port);

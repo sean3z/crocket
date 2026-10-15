@@ -14,10 +14,12 @@ from outside the project, for example
 ## [Unreleased]
 
 ### Added
-- **Log sampling settings:** `CROCKET_LOG_SAMPLE` / `log.sample` (share of successful
-  requests logged, default every one), `CROCKET_LOG_SLOW` / `log::Options::slow` (with
-  sampling, requests at least this slow are always logged, default `500ms`) and
-  `CROCKET_LOG_BUFFER` / `log.buffer` (default `10000`) ([#39](https://github.com/sean3z/crocket/pull/39))
+- **Environment variables for existing log settings:** `CROCKET_LOG_SAMPLE` sets
+  `log.sample` and `CROCKET_LOG_BUFFER` sets `log.buffer` (both options already
+  existed in code) ([#39](https://github.com/sean3z/crocket/pull/39))
+- **Slow-request logging:** new `log::Options::slow` (`CROCKET_LOG_SLOW`, default
+  `500ms`). With `sample` below 1, requests at least this slow are always logged;
+  `0` turns that off ([#39](https://github.com/sean3z/crocket/pull/39))
 
 ### Changed
 - **Faster hot path:** pooled header storage (fewer allocations), lock-free metrics and

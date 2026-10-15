@@ -28,7 +28,7 @@ from outside the project, for example
   has connections. Before, a 16-connection pool on 4 cores ran only 4 queries at a time
   and capped a Postgres-backed Heroes API at about 11k req/s on a 4-vCPU server, against
   31k with 16 workers. An explicit worker count still wins
-  ([#PR](https://github.com/sean3z/crocket/pull/PR))
+  ([#40](https://github.com/sean3z/crocket/pull/40))
 - **Faster hot path:** pooled header storage (fewer allocations), lock-free metrics and
   log shards, one clock read per request, and batched `writev` log writes with a bigger
   pipe. Roughly 1.6x h2c throughput with every production feature on, and far fewer
@@ -41,7 +41,7 @@ from outside the project, for example
   Rows are decoded from `pqxx::row_ref`, and `db::in(...)` builds its array literal
   itself, because libpqxx 8 won't convert an array without the connection's encoding.
   CI now also builds and runs the db test against libpqxx 8.0
-  ([#PR](https://github.com/sean3z/crocket/pull/PR))
+  ([#40](https://github.com/sean3z/crocket/pull/40))
 
 ## [0.3.0] - 2026-10-14
 

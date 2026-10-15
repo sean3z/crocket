@@ -21,6 +21,10 @@ fail() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
 expect() { if [[ "$3" == "$2" ]]; then pass "$1"; else fail "$1 (expected '$2', got '$3')"; fi; }
 
 start() { # mode(file|pipe) logfile
+  # The buffer holds more than every line a mode logs (about 43k), so a drop can
+  # only mean a lost line, never the writer briefly stalling on a slow disk or a
+  # busy pipe reader (which overflowed the default 10k once on a 2-vCPU runner).
+  export CROCKET_LOG_BUFFER=1000000
   if [[ $1 == pipe ]]; then
     ( CROCKET_PORT=$PORT CROCKET_H2_PRIOR_KNOWLEDGE=1 CROCKET_EVENT_LOOPS=2 CROCKET_WORKERS=2 "$SERVER" 2>&1 >/dev/null | cat > "$2" ) &
   else
@@ -77,6 +81,7 @@ for mode in ${MODES:-file pipe}; do
   ok_lines=$(grep -c '"msg":"request"' "$log")
   # Every request the metrics counted has its line; the /metrics request itself is counted after.
   expect "every request logged" "$served" "$((ok_lines - 1))"
+  unset CROCKET_LOG_BUFFER
   ! grep -q "hunter2" "$log" && pass "password redacted" || fail "password reached the log"
   grep -q '"password":"\[redacted\]"' "$log" && pass "redacted field present" || fail "no redacted field"
   grep -q '"msg":"issued \[redacted\] for ada"' "$log" && pass "token redacted in the message" || fail "token message"

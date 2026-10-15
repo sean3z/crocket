@@ -19,6 +19,7 @@
 
 #include "crocket/json.hpp"
 
+#include <chrono>
 #include <meta>
 #include <array>
 #include <cstdint>
@@ -46,13 +47,16 @@ enum class WhenFull : std::uint8_t {
 struct Options {
   Level level = Level::info;  // lines below it are skipped; Config::dev() uses debug
   /// Share of request lines (Logger) kept for responses below 400, decided per
-  /// request id. Errors are always kept.
+  /// request id. Errors are always kept, and so are requests slower than `slow`.
   double sample = 1.0;
   /// Fields whose name contains one of these (ignoring case) are written as
   /// "[redacted]", in the message too, and inside structs.
   std::vector<std::string> redact = {"password", "secret", "token", "authorization", "cookie", "api_key"};
   std::size_t buffer = 10'000;  // lines waiting for the writer
   WhenFull when_full = WhenFull::drop;
+  /// With `sample` below 1: a request taking at least this long is logged
+  /// whatever the sample decides (zero: no exception for slow requests).
+  std::chrono::milliseconds slow{500};
   /// Where lines go, one call per line, from the writer thread. Empty: stderr.
   std::function<void(std::string_view line)> sink = {};
 };

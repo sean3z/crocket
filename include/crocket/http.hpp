@@ -163,31 +163,57 @@ class Headers {
  public:
   using value_type = std::pair<std::string, std::string>;
 
+  Headers() = default;  // no storage until the first field
+  Headers(const Headers& o) { copy_from(o); }
+  Headers(Headers&& o) noexcept : items_(std::move(o.items_)), n_(o.n_) {
+    o.items_.clear();
+    o.n_ = 0;
+  }
+  Headers& operator=(const Headers& o) {
+    if (this != &o) copy_from(o);
+    return *this;
+  }
+  Headers& operator=(Headers&& o) noexcept {
+    if (this != &o) {
+      release();
+      items_ = std::move(o.items_);
+      n_ = o.n_;
+      o.items_.clear();
+      o.n_ = 0;
+    }
+    return *this;
+  }
+  ~Headers() { release(); }
+
   void add(std::string_view name, std::string_view value) {
-    reserve();
-    items_.emplace_back(lower(name), std::string(value));
+    auto& kv = next();
+    kv.first.assign(name);
+    for (auto& c : kv.first) c = ascii_lower(c);
+    kv.second.assign(value);
   }
   /// Replaces every field named `name` with one, or adds it.
   void set(std::string_view name, std::string_view value) {
-    auto it = std::ranges::find_if(items_, [&](auto& kv) { return iequals(kv.first, name); });
-    if (it == items_.end()) return add(name, value);
+    auto e = items_.begin() + std::ptrdiff_t(n_);
+    auto it = std::find_if(items_.begin(), e, [&](auto& kv) { return iequals(kv.first, name); });
+    if (it == e) return add(name, value);
     it->second.assign(value);
-    items_.erase(std::remove_if(it + 1, items_.end(), [&](auto& kv) { return iequals(kv.first, name); }), items_.end());
+    shrink_to(std::remove_if(it + 1, e, [&](auto& kv) { return iequals(kv.first, name); }));
   }
   void remove(std::string_view name) {
-    auto n = lower(name);
-    std::erase_if(items_, [&](auto& kv) { return kv.first == n; });
+    auto e = items_.begin() + std::ptrdiff_t(n_);
+    shrink_to(std::remove_if(items_.begin(), e, [&](auto& kv) { return iequals(kv.first, name); }));
   }
   [[nodiscard]] std::optional<std::string_view> get(std::string_view name) const {
-    for (auto& [k, v] : items_)
+    for (auto& [k, v] : *this)
       if (iequals(k, name)) return std::string_view(v);
     return std::nullopt;
   }
   [[nodiscard]] bool contains(std::string_view name) const { return get(name).has_value(); }
-  [[nodiscard]] auto begin() const { return items_.begin(); }
-  [[nodiscard]] auto end() const { return items_.end(); }
-  [[nodiscard]] std::size_t size() const { return items_.size(); }
-  [[nodiscard]] bool empty() const { return items_.empty(); }
+  using const_iterator = std::vector<value_type>::const_iterator;
+  [[nodiscard]] const_iterator begin() const { return items_.cbegin(); }
+  [[nodiscard]] const_iterator end() const { return items_.cbegin() + std::ptrdiff_t(n_); }
+  [[nodiscard]] std::size_t size() const { return n_; }
+  [[nodiscard]] bool empty() const { return n_ == 0; }
 
   static bool iequals(std::string_view a, std::string_view b) {
     return std::ranges::equal(a, b, [](char x, char y) { return ascii_lower(x) == ascii_lower(y); });
@@ -195,16 +221,70 @@ class Headers {
 
  private:
   static constexpr char ascii_lower(char c) { return (c >= 'A' && c <= 'Z') ? char(c + 32) : c; }
-  // Most messages carry a handful of fields: no regrowth for the first 8.
-  void reserve() {
-    if (items_.capacity() == 0) items_.reserve(8);
+
+  // Every request and response builds a few header lists. Their storage (the
+  // vector and the strings in it, with their capacity) goes back to a small
+  // per-thread pool when a list is destroyed, and the next list on that thread
+  // reuses it: in steady state adding a field allocates nothing. Fields past
+  // n_ are spares whose strings keep their capacity.
+  static constexpr std::size_t kPoolLists = 64;      // lists kept per thread
+  static constexpr std::size_t kPoolMaxFields = 32;  // larger lists are freed
+  static constexpr std::size_t kPoolMaxBytes = 512;  // as are lists holding a longer string
+  struct Pool {
+    std::vector<std::vector<value_type>> lists;
+    /// This thread's pool; null once the thread is exiting.
+    static Pool* get() {
+      thread_local bool gone = false;  // trivially destructible: readable at any point of thread exit
+      if (gone) return nullptr;
+      thread_local struct Holder {
+        Pool pool;
+        ~Holder() { gone = true; }
+      } holder;
+      return &holder.pool;
+    }
+  };
+  value_type& next() {
+    if (n_ < items_.size()) return items_[n_++];
+    if (items_.capacity() == 0) acquire();
+    if (n_ < items_.size()) return items_[n_++];
+    items_.emplace_back();
+    return items_[n_++];
   }
-  static std::string lower(std::string_view s) {
-    std::string r(s);
-    for (auto& c : r) c = ascii_lower(c);
-    return r;
+  void acquire() {
+    if (auto* p = Pool::get(); p && !p->lists.empty()) {
+      items_ = std::move(p->lists.back());
+      p->lists.pop_back();
+    } else {
+      items_.reserve(8);  // most messages carry a handful of fields
+    }
   }
-  std::vector<value_type> items_;
+  void release() noexcept {
+    if (items_.capacity() == 0) return;
+    n_ = 0;
+    Pool* p = Pool::get();
+    if (!p || p->lists.size() >= kPoolLists || items_.capacity() > kPoolMaxFields) return;
+    for (auto& [k, v] : items_) {
+      if (k.capacity() > kPoolMaxBytes || v.capacity() > kPoolMaxBytes) return;
+      k.clear();
+      v.clear();
+    }
+    try {
+      p->lists.push_back(std::move(items_));
+    } catch (...) {  // the list is simply freed
+    }
+  }
+  void copy_from(const Headers& o) {
+    n_ = 0;
+    for (auto& [k, v] : o) {
+      auto& kv = next();
+      kv.first.assign(k);
+      kv.second.assign(v);
+    }
+  }
+  void shrink_to(std::vector<value_type>::iterator new_end) { n_ = std::size_t(new_end - items_.begin()); }
+
+  std::vector<value_type> items_;  // [0, n_) are the fields
+  std::size_t n_ = 0;
 };
 
 }  // namespace crocket

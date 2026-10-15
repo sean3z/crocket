@@ -121,3 +121,14 @@ if(CROCKET_HAS_PG)
   add_test(NAME db COMMAND crocket_db_test)
   set_tests_properties(db PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+# Logging over real sockets: the line format byte for byte (tests/golden),
+# redaction, no lost lines at moderate load, and order within a connection,
+# with stderr to a file and to a pipe.
+if(CURL AND CROCKET_BUILD_EXAMPLES)
+  add_executable(crocket_log_server log_server.cpp)
+  target_link_libraries(crocket_log_server PRIVATE crocket)
+  add_test(NAME logging COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/logging.sh $<TARGET_FILE:crocket_log_server>
+           ${CMAKE_CURRENT_SOURCE_DIR}/golden/log_format.txt)
+  set_tests_properties(logging PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+endif()

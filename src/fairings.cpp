@@ -1,6 +1,7 @@
 #include "crocket/fairings.hpp"
 #include "crocket/grpc.hpp"
 #include "log_hub.hpp"
+#include "request_clock.hpp"
 #include "crocket/json.hpp"
 #include "crocket/responder.hpp"
 #include "crocket/version.hpp"
@@ -61,8 +62,10 @@ void Logger::on_ignite(Ignite& ig) {
 void Logger::on_response(const Request& rq, Response& rs) {
   if (!hub_) return;
   auto level = rs.status >= 500 ? log::Level::error : rs.status >= 400 ? log::Level::warn : log::Level::info;
-  if (!hub_->enabled(level) || (rs.status < 400 && !hub_->sampled(rq.request_id))) return;
-  auto dur = std::chrono::duration<double, std::milli>(Clock::now() - rq.received).count();
+  if (!hub_->enabled(level)) return;
+  auto end = detail::response_time(rq);  // the request's one clock read for its end
+  if (rs.status < 400 && !hub_->sampled(rq.request_id) && !hub_->slow(end - rq.received)) return;
+  auto dur = std::chrono::duration<double, std::milli>(end - rq.received).count();
   if (hub_->text()) {
     bool color = hub_->color();
     auto paint = [&](std::string_view code, std::string_view s) {
@@ -88,7 +91,7 @@ void Logger::on_response(const Request& rq, Response& rs) {
   thread_local std::string o;  // reused: the hub copies the line, so nothing is allocated per request
   o.clear();
   o += R"({"ts":")";
-  detail::append_iso8601_now(o);
+  detail::append_iso8601(o, detail::wall_time(end));
   o += '"';
   o += names[int(level)];
   o += R"(,"msg":"request","request_id":)";
@@ -311,16 +314,30 @@ std::string label(std::string_view v) {
 }  // namespace
 
 /// Counters live in one shard per thread: a request touches only its own
-/// thread's, under a mutex no other request takes. render() adds them up.
+/// thread's, without a lock or a locked instruction. Its thread is the only
+/// writer, so a counter goes up with a plain load and store; a sequence
+/// number around each update (a seqlock) lets render() copy a series that is
+/// not half updated, and add up the shards.
 struct Metrics::Store {
+  template <class T>
+  static void bump(std::atomic<T>& a, T by = T(1)) {  // single writer: no read-modify-write needed
+    a.store(a.load(std::memory_order_relaxed) + by, std::memory_order_relaxed);
+  }
+  struct StatusCount {
+    int status;
+    std::atomic<std::uint64_t> n{0};
+  };
   struct Series {  // one (route, method)
-    std::array<std::uint64_t, kBuckets.size()> counts{};
-    double sum = 0;
-    std::uint64_t count = 0;
-    std::vector<std::pair<int, std::uint64_t>> statuses;  // usually one or two
+    std::array<std::atomic<std::uint64_t>, kBuckets.size()> counts{};
+    std::atomic<double> sum{0};
+    std::atomic<std::uint64_t> count{0};
+    std::vector<std::unique_ptr<StatusCount>> statuses;  // usually one or two; grows under Shard::mu
   };
   struct Shard {
-    std::mutex mu;  // taken by its thread and by render(), never by other requests
+    std::atomic<std::uint64_t> seq{0};  // odd while its thread updates a series
+    // Taken by render(), and by its thread only to add a slot, series, status
+    // or failure (the first request of its kind on this thread).
+    std::mutex mu;
     std::vector<std::array<std::unique_ptr<Series>, kMethods>> slots;  // [route slot][method]
     std::map<std::pair<std::size_t, std::string_view>, std::uint64_t> failures;  // slot, kind (static)
   };
@@ -435,21 +452,37 @@ std::optional<Response> Metrics::on_request(Request& rq) {
 }
 
 void Metrics::on_response(const Request& rq, Response& rs) {
-  double secs = std::chrono::duration<double>(Clock::now() - rq.received).count();
+  double secs = std::chrono::duration<double>(detail::response_time(rq) - rq.received).count();
   std::size_t slot = store_->slot_of(rq);
   auto& sh = store_->shard();
-  std::lock_guard lk(sh.mu);
-  if (sh.slots.size() <= slot) sh.slots.resize(slot + 1);
-  auto& series = sh.slots[slot][method_index(rq.method)];
-  if (!series) series = std::make_unique<Store::Series>();
+  auto m = method_index(rq.method);
+  Store::Series* series = sh.slots.size() > slot ? sh.slots[slot][m].get() : nullptr;  // only this thread changes it
+  Store::StatusCount* st = nullptr;
+  if (series)
+    for (auto& sc : series->statuses)
+      if (sc->status == rs.status) st = sc.get();
+  if (!st || !rs.failure_kind.empty()) {  // something to add first: rare
+    std::lock_guard lk(sh.mu);
+    if (sh.slots.size() <= slot) sh.slots.resize(slot + 1);
+    auto& sp = sh.slots[slot][m];
+    if (!sp) sp = std::make_unique<Store::Series>();
+    series = sp.get();
+    if (!st) {
+      series->statuses.push_back(std::make_unique<Store::StatusCount>());
+      st = series->statuses.back().get();
+      st->status = rs.status;
+    }
+    if (!rs.failure_kind.empty()) ++sh.failures[{slot, rs.failure_kind}];
+  }
+  auto seq = sh.seq.load(std::memory_order_relaxed);
+  sh.seq.store(seq + 1, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
   for (std::size_t i = 0; i < kBuckets.size(); ++i)
-    if (secs <= kBuckets[i]) ++series->counts[i];
-  series->sum += secs;
-  ++series->count;
-  auto st = std::ranges::find(series->statuses, rs.status, &std::pair<int, std::uint64_t>::first);
-  if (st != series->statuses.end()) ++st->second;
-  else series->statuses.emplace_back(rs.status, 1);
-  if (!rs.failure_kind.empty()) ++sh.failures[{slot, rs.failure_kind}];
+    if (secs <= kBuckets[i]) Store::bump(series->counts[i]);
+  Store::bump(series->sum, secs);
+  Store::bump(series->count);
+  Store::bump(st->n);
+  sh.seq.store(seq + 2, std::memory_order_release);
 }
 
 namespace detail {
@@ -485,18 +518,41 @@ std::string Metrics::render() const {
   {
     std::lock_guard lk(store_->mu);
     for (auto& shp : store_->shards) {
-      std::lock_guard slk(shp->mu);
-      for (std::size_t slot = 0; slot < shp->slots.size(); ++slot)
-        for (std::size_t m = 0; m < kMethods; ++m) {
-          auto& series = shp->slots[slot][m];
-          if (!series) continue;
-          std::string method(method_label(m)), route = store_->slot_label(slot);
-          for (auto& [status, n] : series->statuses) requests[{method, route, status}] += n;
-          auto& h = durations[{method, route}];
-          for (std::size_t i = 0; i < kBuckets.size(); ++i) h.counts[i] += series->counts[i];
-          h.sum += series->sum;
-          h.count += series->count;
-        }
+      std::lock_guard slk(shp->mu);  // no series or status is added meanwhile
+      struct Copy {
+        Hist h;
+        std::vector<std::pair<int, std::uint64_t>> statuses;
+      };
+      std::vector<std::pair<std::size_t, Copy>> copies;  // (slot * kMethods + method, counters)
+      // A consistent copy of this shard: again if its thread updated it meanwhile.
+      while (true) {
+        auto before = shp->seq.load(std::memory_order_acquire);
+        if (before & 1) continue;
+        copies.clear();
+        for (std::size_t slot = 0; slot < shp->slots.size(); ++slot)
+          for (std::size_t m = 0; m < kMethods; ++m) {
+            auto& series = shp->slots[slot][m];
+            if (!series) continue;
+            Copy c;
+            for (std::size_t i = 0; i < kBuckets.size(); ++i) c.h.counts[i] = series->counts[i].load(std::memory_order_relaxed);
+            c.h.sum = series->sum.load(std::memory_order_relaxed);
+            c.h.count = series->count.load(std::memory_order_relaxed);
+            for (auto& sc : series->statuses) c.statuses.emplace_back(sc->status, sc->n.load(std::memory_order_relaxed));
+            copies.emplace_back(slot * kMethods + m, std::move(c));
+          }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (shp->seq.load(std::memory_order_relaxed) == before) break;
+      }
+      for (auto& [key, c] : copies) {
+        if (c.h.count == 0) continue;  // added a moment ago, not counted yet
+        std::string method(method_label(key % kMethods)), route = store_->slot_label(key / kMethods);
+        for (auto& [status, n] : c.statuses)
+          if (n) requests[{method, route, status}] += n;
+        auto& h = durations[{method, route}];
+        for (std::size_t i = 0; i < kBuckets.size(); ++i) h.counts[i] += c.h.counts[i];
+        h.sum += c.h.sum;
+        h.count += c.h.count;
+      }
       for (auto& [k, n] : shp->failures) failures[{store_->slot_label(k.first), std::string(k.second)}] += n;
     }
   }

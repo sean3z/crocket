@@ -1,3 +1,4 @@
+#include "request_clock.hpp"
 #include "crocket/app.hpp"
 #include "crocket/fairings.hpp"
 #include "crocket/grpc.hpp"
@@ -265,6 +266,16 @@ Config Config::from_env(Config base) {
     else if (lv == "error") c.log.level = log::Level::error;
     else bad_env("CROCKET_LOG_LEVEL", *v, "expected debug, info, warn or error");
   }
+  if (auto v = env_of("CROCKET_LOG_SAMPLE")) {
+    std::string t = trim(*v);
+    double d = 0;
+    auto r = std::from_chars(t.data(), t.data() + t.size(), d);
+    if (t.empty() || r.ec != std::errc() || r.ptr != t.data() + t.size() || !(d >= 0 && d <= 1))
+      bad_env("CROCKET_LOG_SAMPLE", *v, "expected a share from 0 to 1, such as 0.1 (1 logs every request)");
+    c.log.sample = d;
+  }
+  env_duration("CROCKET_LOG_SLOW", c.log.slow);
+  env_uint("CROCKET_LOG_BUFFER", c.log.buffer, 1);
   return c;
 }
 
@@ -849,6 +860,7 @@ void Crocket::finish(const Request& req, Response& res) {
     write_error(ApiError::internal(*bad_header + " contains a character not allowed in HTTP headers (CR, LF, NUL, ...)"),
                 req, res);
   }
+  if (!detail::stamped(req)) detail::stamp_request(req, Clock::now());
   res.headers.set("x-request-id", req.request_id);
   detail::conditional(req, res, core_->config.limits.etag_max_bytes);
   auto& fs = core_->fairings;
@@ -905,7 +917,9 @@ bool Crocket::run_routes(Request& req, Response& res) {
       auto started = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       auto out = def.invoke(req, res);
       if (timed && out.kind != detail::Outcome::Forward) {
-        auto took = std::chrono::steady_clock::now() - started;
+        auto ended = std::chrono::steady_clock::now();
+        detail::stamp_request(req, ended);  // Logger and Metrics time the request with this read
+        auto took = ended - started;
         if (req.exchange && req.exchange->loop) {
           req.exchange->loop_hold_reported = true;  // ran_on_loop reports a slow run
           ran_on_loop(def, took);

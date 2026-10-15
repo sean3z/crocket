@@ -2,6 +2,7 @@
 // (same pipeline as the network engine, no sockets). Items 5 and 7 live in
 // tests/compile_fail and tests/tls_h2.sh.
 
+#include <future>
 #include <crocket/crocket.hpp>
 
 #include <atomic>
@@ -1163,15 +1164,36 @@ int main() {
         inner(l);
       };
     };
+    // A full buffer, deterministically: the sink holds the writer on its first
+    // line until the burst is over. The writer counts lines as written only
+    // after a whole sweep, so all 50 lines stay pending against a buffer of 4,
+    // however the threads are scheduled.
     LogCapture dropping;
     Config small;
     small.log.buffer = 4;
     Metrics dm;
-    Config small_slow = small;
-    small_slow.log.sink = slow(dropping);
-    Crocket db = make_app(dropping, &dm, small_slow);
+    Config small_gated = small;
+    auto gate = std::make_shared<std::promise<void>>();
+    small_gated.log.sink = [inner = dropping.sink(), open = gate->get_future().share()](std::string_view l) {
+      open.wait();
+      inner(l);
+    };
+    Crocket db = make_app(dropping, &dm, small_gated);
     LocalClient dc(db);
-    (void)dc.get("/logs/burst").dispatch();
+    {
+      // dispatch() flushes the log, so it runs aside while the gate is shut.
+      std::thread burst([&] { (void)dc.get("/logs/burst").dispatch(); });
+      auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (contains(dm.render(), "crocket_log_lines_dropped_total 0\n") && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      gate->set_value();
+      burst.join();
+    }
+    db.flush_logs();
+    // The drop warning rides on the writer's next sweep; with every later line
+    // dropped too there may be none yet, so log one more line and flush again.
+    (void)dc.get("/healthz").dispatch();
+    db.flush_logs();
     lines = dropping.all();
     auto kept = std::ranges::count_if(lines, [](auto& l) { return contains(l, R"("msg":"line )"); });
     CHECK(kept < 50);

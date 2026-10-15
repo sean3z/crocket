@@ -1102,6 +1102,9 @@ booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-
 | `CROCKET_DEBUG_ROUTES` | `debug_routes` (`GET /__routes`) | `false` (`true` in dev) |
 | `CROCKET_ADAPTIVE_PLACEMENT` | `adaptive_placement` | `true` |
 | `CROCKET_LOG_LEVEL` | `log.level`: `debug`, `info`, `warn` or `error` | `info` (`debug` in dev) |
+| `CROCKET_LOG_SAMPLE` | `log.sample`: the share of successful requests Logger writes a line for (errors and slow requests are always written) | `1` (every request) |
+| `CROCKET_LOG_SLOW` | `log.slow`: with a sample below 1, requests at least this long are written anyway; `0` turns that off | `500ms` |
+| `CROCKET_LOG_BUFFER` | `log.buffer`: lines waiting for the log writer before new ones are dropped (or wait, with `when_full = block`) | `10000` |
 | `CROCKET_DATABASE_URL` | `database.url`, for [`crocket::db`](#databases-crocketdb) | unset (libpq's `PG*` variables) |
 | `CROCKET_DATABASE_POOL_SIZE` | `database.pool_size` | `8` |
 | `CROCKET_DATABASE_POOL_WAIT` | `database.pool_wait` | `5s` |
@@ -1419,6 +1422,7 @@ auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>
 ```cpp
 cfg.log.level = log::Level::debug;           // default info; Config::dev() uses debug
 cfg.log.sample = 0.1;                        // keep 10% of successful request lines
+cfg.log.slow = std::chrono::milliseconds{500}; // with sampling, always keep requests this slow
 cfg.log.redact = {"password", "card"};       // fields shown as "[redacted]"
 cfg.log.buffer = 10'000;                     // lines waiting for the writer
 cfg.log.when_full = log::WhenFull::drop;     // or block
@@ -1428,9 +1432,10 @@ cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
 | Option | Default | Meaning |
 |---|---|---|
 | `level` | `info` | Lines below it are skipped, request lines included (successes are `info`, 4xx `warn`, 5xx `error`). |
-| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept. |
+| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept, and so are requests slower than `slow`. Env: `CROCKET_LOG_SAMPLE`. |
+| `slow` | `500ms` | With `sample` below 1, a request taking at least this long is logged whatever the sample decides; `0` turns that off. Env: `CROCKET_LOG_SLOW`. |
 | `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these, ignoring case, is written as `"[redacted]"`, in the message too and inside structs. |
-| `buffer` | `10'000` | Lines waiting for the writer. |
+| `buffer` | `10'000` | Lines waiting for the writer. Env: `CROCKET_LOG_BUFFER`. |
 | `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
 | `sink` | stderr | Called on the writer thread with each line. |
 

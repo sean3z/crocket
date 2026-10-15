@@ -413,7 +413,9 @@ int Loop::on_req(h2o_req_t* req) {
   app_.prepare(s->meta);  // request id + deadline, fixed before anything can fail
   s->head_only = s->meta.method == http::Method::Head;
 
-  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(s->meta.deadline.remaining()).count();
+  // From the time the request arrived (read once, in build_request), not a fresh clock read.
+  auto left = s->meta.deadline.at > s->meta.received ? s->meta.deadline.at - s->meta.received : Clock::duration::zero();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(left).count();
   h2o_timer_link(ctx_.loop, std::uint64_t(std::max<std::int64_t>(1, ms)), &s->deadline.timer);
 
   if (header_bytes > cfg_.limits.max_header_bytes || header_count > cfg_.limits.max_header_count) {

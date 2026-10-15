@@ -1422,6 +1422,7 @@ auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>
 ```cpp
 cfg.log.level = log::Level::debug;           // default info; Config::dev() uses debug
 cfg.log.sample = 0.1;                        // keep 10% of successful request lines
+cfg.log.slow = std::chrono::milliseconds{500}; // with sampling, always keep requests this slow
 cfg.log.redact = {"password", "card"};       // fields shown as "[redacted]"
 cfg.log.buffer = 10'000;                     // lines waiting for the writer
 cfg.log.when_full = log::WhenFull::drop;     // or block
@@ -1431,9 +1432,10 @@ cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
 | Option | Default | Meaning |
 |---|---|---|
 | `level` | `info` | Lines below it are skipped, request lines included (successes are `info`, 4xx `warn`, 5xx `error`). |
-| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept. |
+| `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept, and so are requests slower than `slow`. Env: `CROCKET_LOG_SAMPLE`. |
+| `slow` | `500ms` | With `sample` below 1, a request taking at least this long is logged whatever the sample decides; `0` turns that off. Env: `CROCKET_LOG_SLOW`. |
 | `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these, ignoring case, is written as `"[redacted]"`, in the message too and inside structs. |
-| `buffer` | `10'000` | Lines waiting for the writer. |
+| `buffer` | `10'000` | Lines waiting for the writer. Env: `CROCKET_LOG_BUFFER`. |
 | `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
 | `sink` | stderr | Called on the writer thread with each line. |
 

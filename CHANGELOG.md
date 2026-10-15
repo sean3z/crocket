@@ -13,6 +13,20 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Added
+- **Log sampling settings:** `CROCKET_LOG_SAMPLE` / `log.sample` (share of successful
+  requests logged, default every one), `CROCKET_LOG_SLOW` / `log::Options::slow` (with
+  sampling, requests at least this slow are always logged, default `500ms`) and
+  `CROCKET_LOG_BUFFER` / `log.buffer` (default `10000`) ([#39](https://github.com/sean3z/crocket/pull/39))
+
+### Changed
+- **Faster hot path:** pooled header storage (fewer allocations), lock-free metrics and
+  log shards, one clock read per request, and batched `writev` log writes with a bigger
+  pipe. Roughly 1.6x h2c throughput with every production feature on, and far fewer
+  dropped log lines. No API changes, but apps must rebuild (the header type gained a
+  field). Request log `ts`/`duration_ms` mark when the handler returned, about 1 µs
+  earlier ([#39](https://github.com/sean3z/crocket/pull/39))
+
 ## [0.3.0] - 2026-10-14
 
 Databases: `crocket::db` with its Postgres backend `crocket::pg`, and handlers that

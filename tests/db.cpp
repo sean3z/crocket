@@ -126,6 +126,11 @@ static int run() {
   CHECK(last && last->name == "Damian Wayne");
   CHECK(d.where(&Hero::mentor, std::nullopt).count() == 2);  // Barry and Jesse
   CHECK(d.where(&Hero::name, db::in({"Tim Drake", "Jason Todd"})).count() == 2);
+  // Quotes, backslashes, commas and braces survive the array literal; ids work as numbers.
+  auto odd = d.insert(Hero{.name = R"(Jean-Paul "Az" Valley, {\})", .alias = "Azrael", .mentor = "Bruce Wayne"});
+  CHECK(d.where(&Hero::name, db::in({std::string(R"(Jean-Paul "Az" Valley, {\})"), std::string("Nobody")})).count() == 1);
+  CHECK(d.where(&Hero::id, db::in({odd.id, wally.id})).count() == 2);
+  CHECK(d.erase<Hero>(odd.id));
   CHECK(d.where(&Hero::id, db::gt(wally.id)).count() == 0);
   CHECK(d.where(&Hero::id, db::ge(wally.id)).count() == 1);
   CHECK(d.where(&Hero::mentor, "Bruce Wayne").where(&Hero::alias, db::ne("Robin")).count() == 3);

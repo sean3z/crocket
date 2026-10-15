@@ -203,22 +203,23 @@ template <class X>
 struct is_optional<std::optional<X>> : std::true_type {};
 
 template <class X>
-void read_field(const pqxx::field& f, X& out) {
+void read_field(const auto& f, X& out) {  // pqxx::field, or pqxx::field_ref (libpqxx 8)
   if constexpr (is_optional<X>::value) {
     if (f.is_null()) out.reset();
-    else out = f.as<typename X::value_type>();
+    else out = f.template as<typename X::value_type>();
   } else {
-    out = f.as<X>();
+    out = f.template as<X>();
   }
 }
 
 /// A row, columns in member order, into a T.
-template <class T>
-T decode(const pqxx::row& r) {
+/// Row is pqxx::row, or pqxx::row_ref when iterating a result in libpqxx 8.
+template <class T, class Row>
+T decode(const Row& r) {
   T out{};
   constexpr auto ms = std::define_static_array(fields(^^T));
   template for (constexpr std::size_t i : std::define_static_array(std::views::iota(std::size_t{0}, ms.size()))) {
-    read_field(r[pqxx::row::size_type(i)], out.[:ms[i]:]);
+    read_field(r[static_cast<int>(i)], out.[:ms[i]:]);
   }
   return out;
 }
@@ -263,6 +264,27 @@ Arg to_arg(const V& v) {
   else if constexpr (is_optional<V>::value) return v ? to_arg(*v) : std::nullopt;
   else if constexpr (std::is_convertible_v<const V&, std::string_view>) return std::string(std::string_view(v));
   else return pqxx::to_string(v);
+}
+
+/// A Postgres array literal, {"a","b\"c"}: every element quoted, so it works for
+/// text and numbers alike. Built here because libpqxx 8's array conversion needs
+/// the connection's encoding, which a query being composed does not have yet.
+template <class R>
+std::string array_literal(const R& values) {
+  std::string out = "{";
+  for (const auto& v : values) {
+    if (out.size() > 1) out += ',';
+    Arg a = to_arg(v);
+    if (!a) { out += "NULL"; continue; }
+    out += '"';
+    for (char ch : *a) {
+      if (ch == '"' || ch == '\\') out += '\\';
+      out += ch;
+    }
+    out += '"';
+  }
+  out += '}';
+  return out;
 }
 
 }  // namespace detail
@@ -349,7 +371,7 @@ class Query {
       push(v.value);
     } else if constexpr (requires { v.values; }) {
       sql_ += " = any(";
-      args_.push_back(pqxx::to_string(v.values));
+      args_.push_back(detail::array_literal(v.values));
       sql_ += "$" + std::to_string(args_.size()) + ")";
     } else {
       sql_ += " = ";

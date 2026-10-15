@@ -22,12 +22,26 @@ from outside the project, for example
   `0` turns that off ([#39](https://github.com/sean3z/crocket/pull/39))
 
 ### Changed
+- **Workers follow the database pool:** when the worker count isn't set
+  (`CROCKET_WORKERS`, `server.workers` or `launch({.workers})`), crocket now starts at
+  least as many workers as the largest managed blocking pool (`db::Pool` or `Pool<T>`)
+  has connections. Before, a 16-connection pool on 4 cores ran only 4 queries at a time
+  and capped a Postgres-backed Heroes API at about 11k req/s on a 4-vCPU server, against
+  31k with 16 workers. An explicit worker count still wins
+  ([#40](https://github.com/sean3z/crocket/pull/40))
 - **Faster hot path:** pooled header storage (fewer allocations), lock-free metrics and
   log shards, one clock read per request, and batched `writev` log writes with a bigger
   pipe. Roughly 1.6x h2c throughput with every production feature on, and far fewer
   dropped log lines. No API changes, but apps must rebuild (the header type gained a
   field). Request log `ts`/`duration_ms` mark when the handler returned, about 1 µs
   earlier ([#39](https://github.com/sean3z/crocket/pull/39))
+
+### Fixed
+- **libpqxx 8:** `crocket::pg` builds and runs against libpqxx 8.x as well as 7.10.
+  Rows are decoded from `pqxx::row_ref`, and `db::in(...)` builds its array literal
+  itself, because libpqxx 8 won't convert an array without the connection's encoding.
+  CI now also builds and runs the db test against libpqxx 8.0
+  ([#40](https://github.com/sean3z/crocket/pull/40))
 
 ## [0.3.0] - 2026-10-14
 

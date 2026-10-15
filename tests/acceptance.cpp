@@ -1424,6 +1424,20 @@ int main() {
     CHECK(s.h2_prior_knowledge);
     CHECK(s.http2);  // not overridden
     CHECK_EQ(resolve_server(base, {}).workers, 3u);
+    // Workers follow a managed blocking pool unless set explicitly.
+    using detail::resolve_workers;
+    CHECK_EQ(resolve_workers(0, 2, 0), 4u);     // at least 4
+    CHECK_EQ(resolve_workers(0, 8, 0), 8u);     // one per core
+    CHECK_EQ(resolve_workers(0, 4, 16), 16u);   // raised to the pool
+    CHECK_EQ(resolve_workers(0, 32, 16), 32u);  // never lowered
+    CHECK_EQ(resolve_workers(0, 4, 100000), 1024u);
+    CHECK_EQ(resolve_workers(3, 4, 16), 3u);    // explicit wins (CROCKET_WORKERS, Config, launch)
+    {
+      Crocket app{Config{}};
+      CHECK_EQ(app.core().blocking_pool_size, std::size_t(0));
+      app.manage(Pool<int>(24, [] { return 0; }));
+      CHECK_EQ(app.core().blocking_pool_size, std::size_t(24));
+    }
     std::string err;
     try {
       (void)resolve_server(Config{}, {.listen = "tcp://0.0.0.0:80"});

@@ -40,7 +40,10 @@ struct ServerConfig {
   std::string listen = {};
   std::string host = {};  // empty: 0.0.0.0, or 127.0.0.1 in the dev profile
   std::uint16_t port = 8000;
-  unsigned workers = 0;      // handler threads; 0 = hardware concurrency
+  /// Handler threads. 0 (the default) picks max(4, cores), raised to the size of the
+  /// largest managed blocking pool (db::Pool, Pool<T>) so every connection can be in use
+  /// at once. Any nonzero value (code, CROCKET_WORKERS or launch({.workers})) is used as is.
+  unsigned workers = 0;
   unsigned event_loops = 0;  // network I/O threads; 0 = one per physical core
   std::string tls_cert = {};
   std::string tls_key = {};
@@ -155,6 +158,10 @@ namespace detail {
 void parse_listen(std::string_view listen, std::string& host, std::uint16_t& port);
 /// cfg.server with the overrides applied and `listen` resolved.
 ServerConfig resolve_server(const Config& cfg, const ServerOverrides& o);
+/// The worker count launch uses: `configured` when nonzero (Config, CROCKET_WORKERS or
+/// launch({.workers})), else max(4, cores), raised to the largest managed blocking
+/// pool (capped at 1024) so each pooled connection can be in use at once.
+unsigned resolve_workers(unsigned configured, unsigned cores, std::size_t blocking_pool_size);
 }
 
 /// What a mount serves. Http mounts take a path prefix ("/api"); Grpc mounts
@@ -358,6 +365,8 @@ struct Core {
   StateRegistry state;
   std::vector<std::unique_ptr<FairingBase>> fairings;
   std::vector<ReadyCheck> ready_checks;
+  /// Largest blocking pool managed (db::Pool, Pool<T>): the floor for the default worker count.
+  std::size_t blocking_pool_size = 0;
   struct Mount {
     std::string base;
     Routes routes;
@@ -405,9 +414,16 @@ class Crocket {
     auto name = detail::type_display_name<T>();
     if (!core_->state.put<T>(std::move(value)))
       core_->build_errors.push_back(std::string("manage<") + name + ">() called twice");
-    else if constexpr (requires(const T& t) { { t.ready() } -> std::convertible_to<bool>; })
-      core_->ready_checks.push_back({name, detail::type_key<T>(),
-                                     [](void* p) -> bool { return static_cast<const T*>(p)->ready(); }});
+    else {
+      if constexpr (requires(const T& t) { { t.ready() } -> std::convertible_to<bool>; })
+        core_->ready_checks.push_back({name, detail::type_key<T>(),
+                                       [](void* p) -> bool { return static_cast<const T*>(p)->ready(); }});
+      // A pool whose handlers block a worker for each connection in use: size the
+      // default worker count so the whole pool can be busy at once.
+      if constexpr (requires(const T& t) { requires T::crocket_may_block; { t.size() } -> std::convertible_to<std::size_t>; })
+        if (auto* v = core_->state.template get<T>())
+          core_->blocking_pool_size = std::max(core_->blocking_pool_size, std::size_t(v->size()));
+    }
     return *this;
   }
   template <class T>

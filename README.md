@@ -1083,7 +1083,7 @@ booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-
 | `CROCKET_TLS_CERT`, `CROCKET_TLS_KEY` | `server.tls_cert`, `server.tls_key`; TLS needs both | unset |
 | `CROCKET_HTTP2` | `server.http2` | `true` |
 | `CROCKET_H2_PRIOR_KNOWLEDGE` | `server.h2_prior_knowledge` | `false` |
-| `CROCKET_WORKERS` | `server.workers` | one per core |
+| `CROCKET_WORKERS` | `server.workers` | one per core (at least 4), raised to the largest managed pool's size (`database.pool_size` with `crocket::db`) |
 | `CROCKET_EVENT_LOOPS` | `server.event_loops` | one per physical core |
 | `CROCKET_MAX_BODY_BYTES` | `limits.max_body_bytes` | `1M` |
 | `CROCKET_MAX_BODY_MEMORY` | `limits.max_body_memory` | `256M` |
@@ -1119,6 +1119,7 @@ The `crocket::db` API (`Db&`, `db::Pool`, `find`, `insert`, `where`, ...) is gen
 each database is a backend you link. Today there is one, **`crocket::pg`**, for Postgres
 on [libpqxx](https://github.com/jtv/libpqxx). It is built when libpqxx is found
 (`apt install libpqxx-dev`): `target_link_libraries(app PRIVATE crocket::pg)`.
+libpqxx 7.10 and 8.x both work; CI tests each.
 `-DCROCKET_PG=OFF` skips it and `-DCROCKET_PG=ON` makes a missing libpqxx an error.
 Programs that link only `crocket::crocket` are unaffected. Handlers name `Db&`, never
 the backend, so a later backend (`crocket::sqlite`, say) needs no handler changes.
@@ -1198,6 +1199,17 @@ connection is checked out at the request's first query (waiting at most
 `database.pool_wait` and the request's deadline, then 503 `db.busy`) and returned
 when the handler ends. Outside a request, `pool.handle()` gives you a `Db` for
 seeding, migrations and jobs. The pool is part of `/readyz` (`select 1`).
+
+**Workers follow the pool.** A query blocks the worker running its handler, so
+crocket can only have as many queries in flight as it has workers. Unless you set
+the worker count yourself, crocket raises it to the pool size: with
+`CROCKET_DATABASE_POOL_SIZE=16` on a 4-core machine you get 16 workers, not 4, and
+all 16 connections can be busy at once. Idle workers sleep on a condition
+variable, so the extra threads cost about 8 MB of virtual (not resident) stack
+each and no CPU while idle. A count you set (`CROCKET_WORKERS`, `server.workers`
+or `launch({.workers = n})`) is used as is, even when it is smaller than the pool.
+That makes sense when only some routes use the database. The same rule applies to a
+managed `Pool<T>` of your own. The worker count is capped at 1,024.
 
 What it tells you, with no code of your own:
 

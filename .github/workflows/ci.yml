@@ -51,3 +51,51 @@ jobs:
 
       - name: The Postgres backend was built and tested
         run: test -x build/tests/crocket_db_test
+
+  # crocket::pg against libpqxx 8 (the toolchain image has 7.10). Builds libpqxx 8 with
+  # the same GCC in C++26, then only the db test against a fresh Postgres.
+  libpqxx-8:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: crocket
+          POSTGRES_PASSWORD: crocket
+          POSTGRES_DB: crocket_test
+        options: >-
+          --health-cmd "pg_isready -U crocket"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PQXX_VERSION: 8.0.2
+      CROCKET_TEST_DATABASE_URL: postgresql://crocket:crocket@postgres:5432/crocket_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build libpqxx ${{ env.PQXX_VERSION }}
+        run: |
+          curl -fsSL https://github.com/jtv/libpqxx/archive/refs/tags/${PQXX_VERSION}.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/libpqxx-${PQXX_VERSION} -B /tmp/pqxx-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=/opt/gcc-16.2/bin/g++-16.2 -DCMAKE_C_COMPILER=/opt/gcc-16.2/bin/gcc-16.2 \
+            -DCMAKE_CXX_STANDARD=26 -DSKIP_BUILD_TEST=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_DOC=OFF \
+            -DCMAKE_INSTALL_PREFIX=/opt/pqxx8
+          cmake --build /tmp/pqxx-build
+          cmake --install /tmp/pqxx-build
+
+      - name: Build and run the db test against libpqxx 8
+        run: |
+          cmake -S . -B build-pqxx8 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=/opt/gcc-16.2/bin/g++-16.2 -DCMAKE_C_COMPILER=/opt/gcc-16.2/bin/gcc-16.2 \
+            -DCMAKE_PREFIX_PATH=/opt/pqxx8 -DCROCKET_PG=ON -DCROCKET_BUILD_TESTS=ON -DCROCKET_BUILD_EXAMPLES=ON
+          grep -q 'PQXX_VERSION "8\.' /opt/pqxx8/include/pqxx/version.hxx
+          grep -q 'libpqxx_DIR:PATH=/opt/pqxx8' build-pqxx8/CMakeCache.txt  # not the image's 7.10
+          cmake --build build-pqxx8 --target crocket_db_test crocket_heroes
+          LD_LIBRARY_PATH="$(dirname "$(/opt/gcc-16.2/bin/g++-16.2 -print-file-name=libstdc++.so)")" ./build-pqxx8/tests/crocket_db_test

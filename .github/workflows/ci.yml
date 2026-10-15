@@ -98,4 +98,4 @@ jobs:
           grep -q 'PQXX_VERSION "8\.' /opt/pqxx8/include/pqxx/version.hxx
           grep -q 'libpqxx_DIR:PATH=/opt/pqxx8' build-pqxx8/CMakeCache.txt  # not the image's 7.10
           cmake --build build-pqxx8 --target crocket_db_test crocket_heroes
-          ./build-pqxx8/tests/crocket_db_test
+          LD_LIBRARY_PATH="$(dirname "$(/opt/gcc-16.2/bin/g++-16.2 -print-file-name=libstdc++.so)")" ./build-pqxx8/tests/crocket_db_test

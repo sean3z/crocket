@@ -611,6 +611,33 @@ int main() {
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/users",kind="auth"})"));
     CHECK(contains(m.body, R"(crocket_extractor_failures_total{route="/hello/{name}/{age}",kind="path"})"));
     CHECK(contains(m.body, "crocket_http_requests_in_flight 1"));  // the scrape itself
+    // Autoscaling signals: present, typed, and idle here (no workers in-process).
+    CHECK(contains(m.body, "# TYPE crocket_worker_busy_seconds_total counter\ncrocket_worker_busy_seconds_total 0.0000\n"));
+    CHECK(contains(m.body, "# TYPE crocket_worker_busy_ratio gauge\ncrocket_worker_busy_ratio 0.0000\n"));
+    CHECK(contains(m.body, "# TYPE crocket_request_queue_wait_seconds histogram\n"));
+    CHECK(contains(m.body, "crocket_request_queue_wait_seconds_bucket{le=\"0.025\"} 0\n"));
+    CHECK(contains(m.body, "crocket_request_queue_wait_seconds_bucket{le=\"+Inf\"} 0\n"));
+    CHECK(contains(m.body, "# TYPE crocket_event_loop_lag_seconds histogram\n"));
+    CHECK(contains(m.body, "crocket_event_loop_lag_seconds_count 0\n"));
+    CHECK(contains(m.body, "crocket_requests_shed_total{reason=\"max_in_flight\"} 0\n"));
+    CHECK(contains(m.body, "crocket_requests_shed_total{reason=\"max_body_memory\"} 0\n"));
+    CHECK(contains(m.body, "# TYPE crocket_saturation gauge\ncrocket_saturation 0.0000\n"));
+    {  // bucket bounds are inclusive upper bounds, as Prometheus' le
+      using H = detail::LatencyHistogram;
+      CHECK_EQ(H::bucket(0), 0u);
+      CHECK_EQ(H::bucket(10'000), 0u);
+      CHECK_EQ(H::bucket(10'001), 1u);
+      CHECK_EQ(H::bucket(1'000'000'000), H::kBoundsNs.size() - 1);
+      CHECK_EQ(H::bucket(5'000'000'000), H::kBoundsNs.size());  // +Inf only
+      H h;
+      h.record(-5);  // a clock that went backwards counts as 0
+      h.record(30'000);
+      h.record_shared(2'000'000'000);
+      CHECK_EQ(h.count.load(), 3u);
+      CHECK_EQ(h.buckets[0].load(), 1u);
+      CHECK_EQ(h.buckets[2].load(), 1u);
+      CHECK_EQ(h.sum_ns.load(), 2'000'030'000);
+    }
     CHECK(!contains(m.body, "Rocketeer"));
     // crocket_build_info: the configured version, commit and compiler, and this host.
     CHECK(contains(m.body, "# TYPE crocket_build_info gauge"));

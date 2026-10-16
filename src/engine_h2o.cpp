@@ -304,6 +304,7 @@ class Loop final : public Executor {
     static_cast<Loop*>(listener->data)->on_accept(listener, err);
   }
   static void on_wake_cb(h2o_socket_t* sock, const char*) { h2o_buffer_consume(&sock->input, sock->input->size); }
+  static void on_lag_tick_cb(h2o_timer_t* t) { reinterpret_cast<LagTick*>(t)->loop->on_lag_tick(); }
 
  private:
   int on_body(Session* s, bool end);
@@ -313,6 +314,9 @@ class Loop final : public Executor {
   void complete(std::uint64_t txn, Response&& res);
   void on_accept(h2o_socket_t* listener, const char* err);
   void forget(Session* s);
+  /// Records how late the lag tick fired (crocket_event_loop_lag_seconds) and links the next.
+  void on_lag_tick();
+  void link_lag_tick();
 
   Request build_request(h2o_req_t* req, std::size_t& header_bytes, std::size_t& header_count) const;
   bool take_body(Session* s, h2o_iovec_t chunk);
@@ -345,12 +349,28 @@ class Loop final : public Executor {
 
   std::uint64_t next_txn_ = 1;
   std::unordered_map<std::uint64_t, Session*> live_;
+
+  /// A timer every kLagTick: how much later than due it fires is how long
+  /// something held the loop (a handler placed on it, a burst of I/O).
+  struct LagTick {
+    h2o_timer_t timer;  // first: h2o hands back its address
+    Loop* loop;
+    Clock::time_point due;
+  } lag_{};
+  static constexpr std::chrono::milliseconds kLagTick{100};
 };
 
 /// The loop that runs on this thread (h2o calls one handler for every context).
 thread_local Loop* t_loop = nullptr;
 /// This worker's slot in Stats::worker_deadline.
 thread_local std::atomic<std::int64_t>* t_worker_deadline = nullptr;
+/// This worker's busy time and queue wait, and when its current job started.
+thread_local WorkerUsage* t_worker_usage = nullptr;
+thread_local std::int64_t t_job_start_ns = 0;
+
+std::int64_t steady_ns(Clock::time_point t) {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+}
 
 int Engine::on_req_cb(h2o_handler_t*, h2o_req_t* req) { return t_loop->on_req(req); }
 
@@ -452,6 +472,7 @@ bool Loop::take_body(Session* s, h2o_iovec_t chunk) {
     auto& held = app_.core().stats.body_bytes;
     if (held.fetch_add(std::int64_t(chunk.len)) + std::int64_t(chunk.len) > std::int64_t(cfg_.limits.max_body_memory)) {
       held.fetch_sub(std::int64_t(chunk.len));
+      app_.core().stats.shed_body_memory.fetch_add(1, std::memory_order_relaxed);
       reject(s, {503, "server.busy", "too many request bodies in memory; try again shortly", {}});
       return false;
     }
@@ -495,6 +516,7 @@ void Loop::on_kick(Session* s) {
 
 void Loop::dispatch(Session* s) {
   if (e_.outstanding_.load() >= cfg_.limits.max_in_flight) {
+    app_.core().stats.shed_in_flight.fetch_add(1, std::memory_order_relaxed);
     reject(s, {503, "server.busy", "server is at capacity", {}});
     return;
   }
@@ -513,7 +535,8 @@ void Loop::dispatch(Session* s) {
     }, this);
     return;
   }
-  e_.queue_job([this, txn, rq = std::move(rq)]() mutable {
+  e_.queue_job([this, txn, rq = std::move(rq), queued = Clock::now()]() mutable {
+    note_queue_wait(queued);
     if (rq.deadline.expired()) {
       // Past its deadline (the loop answers 504, if it has not yet) or nobody
       // is waiting: whatever the handler did would be thrown away.
@@ -753,6 +776,7 @@ void Engine::start_workers(unsigned n) {
   auto& stats = app_.core().stats;
   stats.workers.store(0);  // nobody reads the old slots while they are replaced
   stats.worker_deadline = std::make_unique<std::atomic<std::int64_t>[]>(n);
+  stats.worker_usage = std::make_unique<WorkerUsage[]>(n);
   stats.workers.store(n);
   for (unsigned i = 0; i < n; ++i) workers_.emplace_back([this, i] { worker_loop(i); });
   pthread_sigmask(SIG_SETMASK, &old, nullptr);
@@ -761,6 +785,8 @@ void Engine::start_workers(unsigned n) {
 void Engine::worker_loop(unsigned index) {
   auto& deadline = app_.core().stats.worker_deadline[index];
   t_worker_deadline = &deadline;
+  auto& usage = app_.core().stats.worker_usage[index];
+  t_worker_usage = &usage;
   for (;;) {
     std::move_only_function<void()> job;
     {
@@ -774,8 +800,16 @@ void Engine::worker_loop(unsigned index) {
     }
     // Busy, with no deadline until the job names its request's.
     deadline.store(std::numeric_limits<std::int64_t>::max(), std::memory_order_relaxed);
+    auto start = steady_ns(Clock::now());
+    t_job_start_ns = start;
+    usage.since_ns.store(start, std::memory_order_relaxed);
     job();
+    auto took = steady_ns(Clock::now()) - start;
     deadline.store(0, std::memory_order_relaxed);
+    // Busy time first, then idle: a scrape in between counts this job twice for
+    // a moment (Metrics clamps the ratio), never not at all.
+    usage.busy_ns.store(usage.busy_ns.load(std::memory_order_relaxed) + took, std::memory_order_relaxed);
+    usage.since_ns.store(0, std::memory_order_relaxed);
     {
       std::lock_guard lk(jobs_m_);
       --busy_;
@@ -932,9 +966,23 @@ void Loop::use_tls(SSL_CTX* fresh) {
   if (old) SSL_CTX_free(old);
 }
 
+void Loop::link_lag_tick() {
+  lag_.due = Clock::now() + kLagTick;
+  h2o_timer_link(ctx_.loop, std::uint64_t(kLagTick.count()), &lag_.timer);
+}
+
+void Loop::on_lag_tick() {
+  app_.core().stats.loop_lag.record_shared(steady_ns(Clock::now()) - steady_ns(lag_.due));
+  link_lag_tick();
+}
+
 void Loop::serve() {
   t_loop = this;
+  lag_.loop = this;
+  h2o_timer_init(&lag_.timer, on_lag_tick_cb);
+  link_lag_tick();
   while (!g_stop.load()) h2o_evloop_run(ctx_.loop, INT32_MAX);
+  if (h2o_timer_is_linked(&lag_.timer)) h2o_timer_unlink(&lag_.timer);
 
   // 1. Stop accepting and drain this loop's requests (Engine::run waits for every loop).
   h2o_socket_read_stop(listener_);
@@ -1131,6 +1179,10 @@ void note_worker_deadline(Clock::time_point at) {
   if (t_worker_deadline)
     t_worker_deadline->store(std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count(),
                              std::memory_order_relaxed);
+}
+
+void note_queue_wait(Clock::time_point queued) {
+  if (t_worker_usage) t_worker_usage->queue_wait.record(t_job_start_ns - steady_ns(queued));
 }
 
 int run_engine(Crocket& app, const ServerConfig& opts) {

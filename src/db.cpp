@@ -4,7 +4,9 @@
 #include "crocket/db.hpp"
 #include "crocket/fairings.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cstdio>
 #include <deque>
@@ -43,6 +45,7 @@ namespace {
 
 struct Registry {
   std::mutex mu;
+  crocket::detail::LatencyHistogram pool_wait;  // Db::lease: every checkout, from any thread
   std::deque<Series> series;                   // stable addresses
   std::vector<std::weak_ptr<PoolState>> pools;
 };
@@ -97,7 +100,38 @@ void render(std::string& o) {
          "# TYPE crocket_db_pool_connections gauge\n";
     o += "crocket_db_pool_connections{state=\"idle\"} " + std::to_string(idle) + "\n";
     o += "crocket_db_pool_connections{state=\"in_use\"} " + std::to_string(total - idle) + "\n";
+    o += "# HELP crocket_db_pool_size Database pool connections, idle and in use.\n"
+         "# TYPE crocket_db_pool_size gauge\ncrocket_db_pool_size " + std::to_string(total) + "\n";
+    auto& h = r.pool_wait;
+    auto count = h.count.load(std::memory_order_acquire);
+    o += "# HELP crocket_db_pool_wait_seconds Time a request waited for a database pool connection.\n"
+         "# TYPE crocket_db_pool_wait_seconds histogram\n";
+    std::uint64_t cum = 0;
+    for (std::size_t i = 0; i < h.kBoundsNs.size(); ++i) {
+      cum += h.buckets[i].load(std::memory_order_relaxed);
+      char le[32];
+      std::snprintf(le, sizeof le, "%g", double(h.kBoundsNs[i]) / 1e9);
+      o += "crocket_db_pool_wait_seconds_bucket{le=\"" + std::string(le) + "\"} " + std::to_string(std::min(cum, count)) + "\n";
+    }
+    o += "crocket_db_pool_wait_seconds_bucket{le=\"+Inf\"} " + std::to_string(count) + "\n";
+    char sum[48];
+    std::snprintf(sum, sizeof sum, "%.6f", double(h.sum_ns.load(std::memory_order_relaxed)) / 1e9);
+    o += "crocket_db_pool_wait_seconds_sum " + std::string(sum) + "\n";
+    o += "crocket_db_pool_wait_seconds_count " + std::to_string(count) + "\n";
   }
+}
+
+/// The share of pool connections in use now, for crocket_saturation.
+double pool_load() {
+  auto& r = registry();
+  std::lock_guard lk(r.mu);
+  std::size_t total = 0, idle = 0;
+  for (auto& w : r.pools)
+    if (auto p = w.lock()) {
+      total += p->size;
+      idle += p->pool.available();
+    }
+  return total ? double(total - idle) / double(total) : 0.0;
 }
 
 }  // namespace
@@ -170,7 +204,9 @@ detail::Connection& Db::lease() {
   auto t0 = Clock::now();
   Deadline d = rq_ ? rq_->deadline : Deadline{Clock::now() + std::chrono::seconds(30), {}};
   auto l = pool_->pool.checkout(d);
-  if (rq_) rq_->db_wait += Clock::now() - t0;
+  auto waited = Clock::now() - t0;
+  if (rq_) rq_->db_wait += waited;
+  detail::registry().pool_wait.record_shared(std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
   if (!l) throw l.error();
   lease_.emplace(std::move(*l));
   return **lease_;
@@ -236,11 +272,15 @@ Pool::Pool(const DatabaseConfig& cfg) {
   };
   state_ = std::make_shared<detail::PoolState>(
       cfg.pool_size ? cfg.pool_size : 1, [url] { return detail::Connection(url); }, std::move(o));
-  auto& r = detail::registry();
-  std::lock_guard lk(r.mu);
-  std::erase_if(r.pools, [](auto& w) { return w.expired(); });
-  r.pools.push_back(state_);
+  {
+    auto& r = detail::registry();
+    std::lock_guard lk(r.mu);
+    std::erase_if(r.pools, [](auto& w) { return w.expired(); });
+    r.pools.push_back(state_);
+  }
+  // Outside r.mu: a render holds the renderers' lock and then takes r.mu.
   crocket::detail::add_metrics_renderer(&detail::render);
+  crocket::detail::add_saturation_source(&detail::pool_load);
 }
 
 bool Pool::ready() const { return state_->pool.ready(); }

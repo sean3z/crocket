@@ -97,8 +97,14 @@ class Shield {
 ///   crocket_extractor_failures_total{route,kind}
 ///   crocket_workers, crocket_workers_busy, crocket_workers_stuck (past their request's deadline)
 ///   crocket_requests_abandoned_total (the deadline passed, or the client left, before a worker took it)
+///   crocket_requests_shed_total{reason} (503 server.busy before a handler ran)
+///   crocket_worker_busy_seconds_total, crocket_worker_busy_ratio (since the previous scrape)
+///   crocket_request_queue_wait_seconds (histogram: queued until a worker took it)
+///   crocket_event_loop_lag_seconds (histogram: how late each loop's 100 ms tick fires)
+///   crocket_saturation (0..1, for autoscaling; see README "Autoscaling on crocket_saturation")
 ///   crocket_build_info{version,commit,compiler,hostname} 1
-///   crocket_db_seconds{table,op} (histogram), crocket_db_pool_connections{state}: with crocket::db
+///   crocket_db_seconds{table,op} (histogram), crocket_db_pool_connections{state}, crocket_db_pool_size,
+///   crocket_db_pool_wait_seconds (histogram): with crocket::db
 /// Served at GET `path` (default /metrics) from on_request.
 ///
 /// Constant labels are added to every series. By default they come from
@@ -109,6 +115,9 @@ namespace detail {
 /// render through this. Registering the same function twice is a no-op.
 void add_metrics_renderer(void (*render)(std::string&));
 void render_extra_metrics(std::string& out);
+/// Optional components (crocket::db) add a 0..1 load figure to crocket_saturation
+/// through this. Registering the same function twice is a no-op.
+void add_saturation_source(double (*load)());
 }  // namespace detail
 
 class Metrics {

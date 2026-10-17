@@ -788,7 +788,8 @@ void Crocket::run(detail::Exchange* ex) {
   if (ex->reroute) {  // after the last use of req here: the worker takes it over
     ex->reroute = false;
     detail::Executor* workers = core_->executor.load();
-    (workers ? *workers : detail::fallback_executor()).post([this, ex] {
+    (workers ? *workers : detail::fallback_executor()).post([this, ex, queued = Clock::now()] {
+      detail::note_queue_wait(queued);
       detail::ExchangeScope current{ex};
       log::detail::RequestScope scope{core_->log, &ex->req};
       if (ex->req.deadline.expired()) {  // nobody would see what the handler did

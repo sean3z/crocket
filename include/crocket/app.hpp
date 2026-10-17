@@ -333,6 +333,43 @@ struct LoopHold {
   ~LoopHold();
 };
 
+/// A latency histogram with fixed bounds (Prometheus buckets), in steady_clock
+/// nanoseconds. record() is for one writer per instance (a plain load and
+/// store); record_shared() for several (a locked add).
+struct LatencyHistogram {
+  static constexpr std::array<std::int64_t, 14> kBoundsNs = {
+      10'000,     25'000,     50'000,     100'000,     250'000,     500'000,     1'000'000,
+      2'500'000,  5'000'000,  10'000'000, 25'000'000,  50'000'000,  100'000'000, 1'000'000'000};
+  std::array<std::atomic<std::uint64_t>, kBoundsNs.size()> buckets{};  // not cumulative; +Inf is count
+  std::atomic<std::uint64_t> count{0};
+  std::atomic<std::int64_t> sum_ns{0};
+
+  static std::size_t bucket(std::int64_t ns) {
+    std::size_t i = 0;
+    while (i < kBoundsNs.size() && ns > kBoundsNs[i]) ++i;
+    return i;
+  }
+  void record(std::int64_t ns) {
+    if (ns < 0) ns = 0;
+    if (auto i = bucket(ns); i < kBoundsNs.size()) buckets[i].store(buckets[i].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    sum_ns.store(sum_ns.load(std::memory_order_relaxed) + ns, std::memory_order_relaxed);
+    count.store(count.load(std::memory_order_relaxed) + 1, std::memory_order_release);  // last: see Metrics
+  }
+  void record_shared(std::int64_t ns) {
+    if (ns < 0) ns = 0;
+    if (auto i = bucket(ns); i < kBoundsNs.size()) buckets[i].fetch_add(1, std::memory_order_relaxed);
+    sum_ns.fetch_add(ns, std::memory_order_relaxed);
+    count.fetch_add(1, std::memory_order_release);
+  }
+};
+
+/// What one worker thread records about itself; only that worker writes it.
+struct alignas(64) WorkerUsage {
+  std::atomic<std::int64_t> busy_ns{0};   // time spent running jobs, finished ones
+  std::atomic<std::int64_t> since_ns{0};  // steady_clock ns the current job started; 0 when idle
+  LatencyHistogram queue_wait;            // queued -> picked up by this worker
+};
+
 /// Counters the framework maintains itself (read by Metrics).
 struct Stats {
   std::atomic<std::int64_t> in_flight{0};
@@ -345,6 +382,13 @@ struct Stats {
   /// each one's current request (steady_clock nanoseconds; 0 when idle).
   std::atomic<unsigned> workers{0};
   std::unique_ptr<std::atomic<std::int64_t>[]> worker_deadline;
+  std::unique_ptr<WorkerUsage[]> worker_usage;  // the same slots: busy time and queue wait
+  /// Requests answered 503 server.busy before a handler ran: at max_in_flight,
+  /// or with max_body_memory of bodies held.
+  std::atomic<std::uint64_t> shed_in_flight{0};
+  std::atomic<std::uint64_t> shed_body_memory{0};
+  /// How late each event loop's 100 ms tick fires (every loop records here).
+  LatencyHistogram loop_lag;
   std::atomic<std::int64_t> connections{0};             // open now
   std::atomic<std::uint64_t> connections_per_ip_closed{0};  // closed by max_connections_per_ip
   std::atomic<std::int64_t> body_bytes{0};              // request bodies held now (max_body_memory)
@@ -568,6 +612,9 @@ std::string generate_request_id();
 /// On a worker thread: the deadline of the request it now runs (for
 /// crocket_workers_stuck). Elsewhere, nothing.
 void note_worker_deadline(Clock::time_point at);
+/// On a worker thread: a job queued at `queued` started now (for
+/// crocket_request_queue_wait_seconds). Elsewhere, nothing.
+void note_queue_wait(Clock::time_point queued);
 std::string_view reason_phrase(int status);
 std::string iso8601_now();
 /// iso8601_now() appended to `out`, without a temporary (log lines use it).

@@ -66,7 +66,8 @@ KEDA. Apps must rebuild (a header type gained a field).
   ([GHSA-67m7-gf4w-hw23](https://github.com/h2o/h2o/security/advisories/GHSA-67m7-gf4w-hw23));
   crocket does not use h2o as a reverse proxy. A request that sends both
   `Content-Length` and `Transfer-Encoding` now closes the connection (h2o
-  `8c95f068`, RFC 9112).
+  `8c95f068`, RFC 9112)
+  ([#42](https://github.com/sean3z/crocket/pull/42))
 
 ## [0.3.0] - 2026-10-14
 

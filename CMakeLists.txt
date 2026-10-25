@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(crocket VERSION 0.3.0 LANGUAGES C CXX)
+project(crocket VERSION 0.4.0 LANGUAGES C CXX)
 
 # Examples and tests are for working on crocket; a project that pulls crocket
 # in with FetchContent or add_subdirectory doesn't build them.

@@ -18,8 +18,8 @@ production, so crocket pins a master commit, plus the SHA-256 of that commit's G
 tarball:
 
 ```cmake
-set(CROCKET_H2O_COMMIT cac7e6568ad98a848f099ecd0a18b881f632479a)  # 2026-09-10
-set(CROCKET_H2O_SHA256 be4a7792211ab0d70513e5a2eea4e360b223dd1f8e43af4eacac214d1fba011b)
+set(CROCKET_H2O_COMMIT 8c95f0682c3ff573c8ab6451ed3587b82eb15a4d)  # 2026-10-24
+set(CROCKET_H2O_SHA256 2a30ed60b7d1a32572da188eef11570c7e402383ae2969fd9bec5ccb5aee4c4c)
 ```
 
 To move to the newest h2o:

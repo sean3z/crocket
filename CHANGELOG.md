@@ -13,6 +13,12 @@ from outside the project, for example
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-25
+
+Throughput, logging, and autoscaling. Roughly 1.6x h2c with production features
+on, workers that follow the database pool, and `crocket_saturation` for HPA or
+KEDA. Apps must rebuild (a header type gained a field).
+
 ### Added
 - **Autoscaling metrics:** `Metrics` now reports `crocket_worker_busy_seconds_total`,
   `crocket_worker_busy_ratio`, a `crocket_request_queue_wait_seconds` histogram, a
@@ -48,6 +54,19 @@ from outside the project, for example
   itself, because libpqxx 8 won't convert an array without the connection's encoding.
   CI now also builds and runs the db test against libpqxx 8.0
   ([#40](https://github.com/sean3z/crocket/pull/40))
+
+### Security
+- **h2o** is pinned to master `8c95f068` (2026-10-24), past the 2026-10-23
+  security fixes. That includes `3d47065`, which removes HTTP/2 Cache-Digest
+  decoding and closes
+  [GHSA-48jv-5969-gjg3](https://github.com/h2o/h2o/security/advisories/GHSA-48jv-5969-gjg3)
+  (high, CVSS 7.5): an unauthenticated client can send Cache-Digest headers that
+  expand until the process runs out of memory. The same pin includes the TLS 1.3
+  upstream hostname check
+  ([GHSA-67m7-gf4w-hw23](https://github.com/h2o/h2o/security/advisories/GHSA-67m7-gf4w-hw23));
+  crocket does not use h2o as a reverse proxy. A request that sends both
+  `Content-Length` and `Transfer-Encoding` now closes the connection (h2o
+  `8c95f068`, RFC 9112).
 
 ## [0.3.0] - 2026-10-14
 
@@ -146,7 +165,8 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labeled with their matched route instead of
   `<unmatched>` ([#30](https://github.com/sean3z/crocket/pull/30)).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/sean3z/crocket/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/sean3z/crocket/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/sean3z/crocket/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/sean3z/crocket/releases/tag/0.1.1

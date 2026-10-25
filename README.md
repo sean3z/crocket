@@ -1215,7 +1215,9 @@ What it tells you, with no code of your own:
 
 - `crocket_db_seconds{table,op}`, a histogram of query time (decoding included) per
   table and operation (`find`, `insert`, `update`, `erase`, `where`, `count`, `sql`),
-  and `crocket_db_pool_connections{state="idle"|"in_use"}`, in `Metrics`;
+  `crocket_db_pool_connections{state="idle"|"in_use"}`, `crocket_db_pool_size` and a
+  `crocket_db_pool_wait_seconds` histogram (time spent waiting for a connection), in
+  `Metrics`. The pool's in-use share also feeds `crocket_saturation`;
 - `db_ms`, `db_wait_ms` (waiting for a pool connection) and `db_queries` on the
   request's `Logger` line, so `duration_ms - db_ms` is time spent outside the database.
 
@@ -1358,6 +1360,28 @@ The `Metrics` fairing serves Prometheus text at `GET /metrics`, labeled by route
   after their request's deadline), and `crocket_requests_abandoned_total`. See
   [Deadlines and cancellation](#deadlines-and-cancellation).
 - `crocket_build_info{version,commit,compiler,hostname} 1`, which says what is running where.
+- **Capacity and autoscaling signals**, which say how close this instance is to its
+  ceiling (see [Autoscaling on crocket_saturation](#autoscaling-on-crocket_saturation)):
+  - `crocket_worker_busy_seconds_total` (counter, all workers together) and
+    `crocket_worker_busy_ratio` (0..1, share of worker time spent in handlers since the
+    previous scrape). CPU percent misleads for crocket, whose time is mostly kernel
+    I/O; this counts handler time directly.
+  - `crocket_request_queue_wait_seconds`, a histogram of how long requests waited for a
+    worker after they were ready. Rising queue wait means the workers are full.
+  - `crocket_event_loop_lag_seconds`, a histogram of how late each event loop's
+    100 ms tick fires. It catches handlers that hold the loop and CPU throttling from
+    container limits.
+  - `crocket_requests_shed_total{reason="max_in_flight"|"max_body_memory"}`, requests
+    answered 503 `server.busy` before a handler ran (see [Limits](#limits)). With
+    `crocket_requests_abandoned_total` and 504s in `crocket_http_requests_total`, these
+    say you scaled too late.
+  - `crocket_saturation`, one 0..1 gauge combining the above, for HPA or KEDA.
+  - With `crocket::db`: `crocket_db_pool_size` and `crocket_db_pool_wait_seconds` (see
+    [Databases](#databases-crocketdb)).
+
+  Each worker job adds two `steady_clock` reads and a few relaxed stores to memory only
+  that worker writes; each request handed to a worker adds one more clock read. No new
+  locks or shared counters are on the request path.
 - **Constant labels** on every series from `CROCKET_METRICS_LABELS`, a comma-separated
   `name=value` list (or pass them: `Metrics{"/metrics", {{"pod", "web-1"}}}`). In
   Kubernetes, fill it from the Downward API:
@@ -1373,6 +1397,83 @@ The `Metrics` fairing serves Prometheus text at `GET /metrics`, labeled by route
   fake resets. Prometheus' Kubernetes service discovery (or a ServiceMonitor) scrapes pod
   IPs and adds `instance`/`pod` itself. Keep `/metrics` off the public listener, or
   behind auth.
+
+### Autoscaling on crocket_saturation
+
+`crocket_saturation` is the largest of:
+
+| Input | Counts as 1.0 at |
+| --- | --- |
+| `crocket_worker_busy_ratio` | every worker busy for the whole window |
+| database pool connections in use / `crocket_db_pool_size` (with `crocket::db`) | every connection checked out |
+| mean `crocket_request_queue_wait_seconds` in the window / 25 ms | 25 ms average wait for a worker |
+| mean `crocket_event_loop_lag_seconds` in the window / 50 ms | loops 50 ms late on average |
+
+Each input is capped at 1. The window is the time since the previous scrape of that
+`/metrics`, so scrape each pod from one Prometheus (two scrapers would each see half
+windows); the pool share is read at scrape time. Taking the largest input means the
+first resource to run out drives it: target about 0.7 to leave headroom for spikes.
+
+When the pool input is the one at 1.0 while the database itself is near its limit,
+more pods will not help: scale the database instead. Compare
+`crocket_db_pool_wait_seconds` with the database's own CPU before scaling out.
+
+With [prometheus-adapter](https://github.com/kubernetes-sigs/prometheus-adapter),
+expose it as a pods metric and point an HPA at it:
+
+```yaml
+# prometheus-adapter rules
+rules:
+  - seriesQuery: 'crocket_saturation{namespace!="",pod!=""}'
+    resources: {overrides: {namespace: {resource: namespace}, pod: {resource: pod}}}
+    metricsQuery: 'max_over_time(crocket_saturation{<<.LabelMatchers>>}[1m])'
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: heroes}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: heroes}
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Pods
+      pods:
+        metric: {name: crocket_saturation}
+        target: {type: AverageValue, averageValue: "700m"}   # 0.7
+```
+
+Or with [KEDA](https://keda.sh), straight from Prometheus:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: heroes}
+spec:
+  scaleTargetRef: {name: heroes}
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: sum(avg_over_time(crocket_saturation{app="heroes"}[1m]))
+        threshold: "0.7"   # per replica: KEDA divides the sum by the target
+```
+
+Useful PromQL alongside it:
+
+```promql
+# Worker busy share over 5 minutes, independent of scrape timing
+sum by (pod) (rate(crocket_worker_busy_seconds_total[5m])) / sum by (pod) (crocket_workers)
+# p95 wait for a worker
+histogram_quantile(0.95, sum by (le) (rate(crocket_request_queue_wait_seconds_bucket[5m])))
+# Already late: requests shed or abandoned per second
+sum(rate(crocket_requests_shed_total[5m])) + sum(rate(crocket_requests_abandoned_total[5m]))
+```
+
+Handlers crocket places on the event loop (async ones, or fast plain functions) never use
+a worker, so an app that runs entirely on the loops shows up in event loop lag rather
+than in the busy ratio.
 
 ### Deadlines and cancellation
 

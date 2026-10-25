@@ -205,6 +205,11 @@ static int run() {
   // The handle `d` from before still holds one of the two connections.
   CHECK(contains(m, R"(crocket_db_pool_connections{state="idle"} 1)"));
   CHECK(contains(m, R"(crocket_db_pool_connections{state="in_use"} 1)"));
+  CHECK(contains(m, "crocket_db_pool_size 2\n"));
+  CHECK(contains(m, "# TYPE crocket_db_pool_wait_seconds histogram\n"));
+  CHECK(!contains(m, "crocket_db_pool_wait_seconds_count 0\n"));  // every query above checked one out
+  // One of two connections in use, nothing else busy: crocket_saturation is the pool's share.
+  CHECK(contains(m, "crocket_saturation 0.5000\n"));
 
   std::fprintf(stderr, "%d/%d checks passed\n", g_checks - g_failures, g_checks);
   return g_failures ? 1 : 0;

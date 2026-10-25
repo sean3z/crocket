@@ -14,6 +14,12 @@ from outside the project, for example
 ## [Unreleased]
 
 ### Added
+- **Autoscaling metrics:** `Metrics` now reports `crocket_worker_busy_seconds_total`,
+  `crocket_worker_busy_ratio`, a `crocket_request_queue_wait_seconds` histogram, a
+  `crocket_event_loop_lag_seconds` histogram, `crocket_requests_shed_total{reason}`
+  and, with `crocket::db`, `crocket_db_pool_size` and a `crocket_db_pool_wait_seconds`
+  histogram. `crocket_saturation` (0..1) combines them for an HPA or KEDA target; the
+  README documents the formula and example configs ([#41](https://github.com/sean3z/crocket/pull/41))
 - **Environment variables for existing log settings:** `CROCKET_LOG_SAMPLE` sets
   `log.sample` and `CROCKET_LOG_BUFFER` sets `log.buffer` (both options already
   existed in code) ([#39](https://github.com/sean3z/crocket/pull/39))

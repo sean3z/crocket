@@ -8,6 +8,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdio>
@@ -350,6 +351,14 @@ struct Metrics::Store {
   std::vector<std::string> extra;    // later slots: templates a fairing set ("/metrics")
   const detail::Stats* stats = nullptr;
 
+  /// Totals at the previous scrape: crocket_worker_busy_ratio and
+  /// crocket_saturation cover the time since then. Under mu.
+  struct Window {
+    std::int64_t at_ns = 0, busy_ns = 0, queue_sum_ns = 0, lag_sum_ns = 0;
+    std::uint64_t queue_count = 0, lag_count = 0;
+  };
+  Window last;
+
   Shard& shard() {
     // Per thread, the shard of each store this thread has recorded into.
     thread_local std::vector<std::pair<std::uint64_t, Shard*>> mine;
@@ -440,6 +449,8 @@ void Metrics::on_ignite(Ignite& ig) {
   store_->stats = &ig.stats();
   store_->routes = ig.routes().data();
   store_->n_routes = ig.routes().size();
+  store_->last = {};
+  store_->last.at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
 }
 
 std::optional<Response> Metrics::on_request(Request& rq) {
@@ -499,11 +510,73 @@ void add_metrics_renderer(void (*render)(std::string&)) {
     if (f == render) return;
   extra_renderers().push_back(render);
 }
+namespace {
+std::vector<double (*)()>& saturation_sources() {
+  static std::vector<double (*)()> v;
+  return v;
+}
+}  // namespace
+void add_saturation_source(double (*load)()) {
+  std::lock_guard lk(g_extra_mu);
+  for (auto f : saturation_sources())
+    if (f == load) return;
+  saturation_sources().push_back(load);
+}
+/// The largest load figure the optional components report, 0 without any.
+double saturation_from_sources() {
+  std::lock_guard lk(g_extra_mu);
+  double m = 0;
+  for (auto f : saturation_sources()) m = std::max(m, f());
+  return m;
+}
 void render_extra_metrics(std::string& out) {
   std::lock_guard lk(g_extra_mu);
   for (auto f : extra_renderers()) f(out);
 }
 }  // namespace detail
+
+namespace {
+
+// crocket_saturation: queue wait and loop lag count as full (1.0) at these means.
+constexpr double kQueueWaitTarget = 0.025;  // seconds
+constexpr double kLoopLagTarget = 0.050;
+
+/// Adds up per-thread histograms into one, and writes it.
+struct LatencyTotals {
+  std::array<std::uint64_t, detail::LatencyHistogram::kBoundsNs.size()> buckets{};
+  std::uint64_t count = 0;
+  std::int64_t sum_ns = 0;
+  void add(const detail::LatencyHistogram& h) {
+    // count first: it is written last, so the buckets hold at least that many
+    // (and the cumulative buckets are capped at it below).
+    count += h.count.load(std::memory_order_acquire);
+    sum_ns += h.sum_ns.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < buckets.size(); ++i) buckets[i] += h.buckets[i].load(std::memory_order_relaxed);
+  }
+  void write(std::string& o, std::string_view name, std::string_view help) const {
+    o += "# HELP "; o += name; o += ' '; o += help; o += "\n# TYPE "; o += name; o += " histogram\n";
+    std::uint64_t cum = 0;
+    for (std::size_t i = 0; i < buckets.size(); ++i) {
+      cum += buckets[i];
+      char le[32];
+      std::snprintf(le, sizeof le, "%g", double(detail::LatencyHistogram::kBoundsNs[i]) / 1e9);
+      o += name; o += "_bucket{le=\""; o += le; o += "\"} " + std::to_string(std::min(cum, count)) + "\n";
+    }
+    o += name; o += "_bucket{le=\"+Inf\"} " + std::to_string(count) + "\n";
+    char sum[48];
+    std::snprintf(sum, sizeof sum, "%.6f", double(sum_ns) / 1e9);
+    o += name; o += "_sum "; o += sum; o += "\n";
+    o += name; o += "_count " + std::to_string(count) + "\n";
+  }
+};
+
+std::string fixed(double v) {
+  char b[32];
+  std::snprintf(b, sizeof b, "%.4f", v);
+  return b;
+}
+
+}  // namespace
 
 std::string Metrics::render() const {
   // Add up every thread's shard, in the order the output has always had.
@@ -608,6 +681,49 @@ std::string Metrics::render() const {
          "crocket_connections_per_ip_closed_total " + std::to_string(st->connections_per_ip_closed.load()) + "\n";
     o += "# HELP crocket_request_body_bytes Request bodies held in memory now (Config::limits.max_body_memory).\n"
          "# TYPE crocket_request_body_bytes gauge\ncrocket_request_body_bytes " + std::to_string(st->body_bytes.load()) + "\n";
+    o += "# HELP crocket_requests_shed_total Requests answered 503 server.busy before a handler ran, by the limit "
+         "they hit.\n# TYPE crocket_requests_shed_total counter\n"
+         "crocket_requests_shed_total{reason=\"max_in_flight\"} " + std::to_string(st->shed_in_flight.load()) + "\n"
+         "crocket_requests_shed_total{reason=\"max_body_memory\"} " + std::to_string(st->shed_body_memory.load()) + "\n";
+
+    // Busy time: finished jobs, plus the running ones so far.
+    std::int64_t busy_ns = 0;
+    LatencyTotals queue;
+    for (unsigned i = 0; i < n; ++i) {
+      auto& u = st->worker_usage[i];
+      busy_ns += u.busy_ns.load(std::memory_order_relaxed);
+      if (auto since = u.since_ns.load(std::memory_order_relaxed); since && since < now) busy_ns += now - since;
+      queue.add(u.queue_wait);
+    }
+    LatencyTotals lag;
+    lag.add(st->loop_lag);
+    o += "# HELP crocket_worker_busy_seconds_total Time workers spent running handlers, all workers together.\n"
+         "# TYPE crocket_worker_busy_seconds_total counter\ncrocket_worker_busy_seconds_total " +
+         fixed(double(busy_ns) / 1e9) + "\n";
+    queue.write(o, "crocket_request_queue_wait_seconds",
+                "Time a request waited for a worker: from being queued until a worker took it.");
+    lag.write(o, "crocket_event_loop_lag_seconds",
+              "How late each event loop's 100 ms tick fired: how long something held the loop.");
+
+    // Since the previous scrape (since ignite, for the first).
+    double busy_ratio = 0, queue_mean = 0, lag_mean = 0;
+    {
+      std::lock_guard lk(store_->mu);
+      auto& w = store_->last;
+      auto dt = now - w.at_ns;
+      if (n && w.at_ns && dt > 0) busy_ratio = std::clamp(double(busy_ns - w.busy_ns) / (double(dt) * n), 0.0, 1.0);
+      if (queue.count > w.queue_count) queue_mean = double(queue.sum_ns - w.queue_sum_ns) / double(queue.count - w.queue_count) / 1e9;
+      if (lag.count > w.lag_count) lag_mean = double(lag.sum_ns - w.lag_sum_ns) / double(lag.count - w.lag_count) / 1e9;
+      w = {now, busy_ns, queue.sum_ns, lag.sum_ns, queue.count, lag.count};
+    }
+    double saturation = std::max({busy_ratio, std::min(1.0, std::max(0.0, queue_mean) / kQueueWaitTarget),
+                                  std::min(1.0, std::max(0.0, lag_mean) / kLoopLagTarget),
+                                  std::clamp(detail::saturation_from_sources(), 0.0, 1.0)});
+    o += "# HELP crocket_worker_busy_ratio Share of worker time spent running handlers since the previous scrape "
+         "(0..1).\n# TYPE crocket_worker_busy_ratio gauge\ncrocket_worker_busy_ratio " + fixed(busy_ratio) + "\n";
+    o += "# HELP crocket_saturation How close this instance is to its ceiling since the previous scrape (0..1): the "
+         "largest of the worker busy ratio, the database pool in use, mean queue wait over 25 ms and mean event loop "
+         "lag over 50 ms.\n# TYPE crocket_saturation gauge\ncrocket_saturation " + fixed(saturation) + "\n";
   }
   o += "# HELP crocket_extractor_failures_total Extractor failures by kind.\n"
        "# TYPE crocket_extractor_failures_total counter\n";

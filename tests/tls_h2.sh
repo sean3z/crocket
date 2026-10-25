@@ -143,6 +143,24 @@ expect "the queued handlers never ran" "2" "$(grep -c 'stubborn handler started'
 expect "  ... counted in crocket_requests_abandoned_total" "3" "$(( $(metric crocket_requests_abandoned_total) - abandoned ))"
 expect "a handler that outlives its deadline is logged" "2" "$(grep -c "after its request's deadline" "$WORK/serve.log")"
 
+echo "[saturation metrics]"
+# Two 400 ms handlers keep both workers busy while the scrape runs; the queued
+# requests above waited for a worker, and the loops have been ticking.
+busy=()
+for i in 1 2; do curl -sk -o /dev/null "$BASE/api/stubborn/400" & busy+=($!); done
+sleep 0.2
+curl -sk "$BASE/metrics" >/dev/null  # opens a short window for the ratio
+sleep 0.15
+scrape=$(curl -sk "$BASE/metrics")
+wait "${busy[@]}"
+m() { grep "^$1 " <<<"$scrape" | cut -d' ' -f2; }
+expect_match "crocket_worker_busy_seconds_total counts handler time" "^[1-9][0-9]*\.|^0\.[0-9]*[1-9]" "$(m crocket_worker_busy_seconds_total)"
+expect_match "crocket_worker_busy_ratio near 1 with both workers busy" "^(0\.[89]|1\.0)" "$(m crocket_worker_busy_ratio)"
+expect_match "crocket_saturation follows it" "^(0\.[89]|1\.0)" "$(m crocket_saturation)"
+expect_match "crocket_request_queue_wait_seconds counted the queued requests" "^[1-9]" "$(m crocket_request_queue_wait_seconds_count)"
+expect_match "crocket_event_loop_lag_seconds ticks" "^[1-9]" "$(m crocket_event_loop_lag_seconds_count)"
+expect "crocket_requests_shed_total exists" "0" "$(grep '^crocket_requests_shed_total{reason="max_in_flight"} ' <<<"$scrape" | cut -d' ' -f2)"
+
 echo "[connection and body limits]"
 LPORT=18444
 LBASE="https://127.0.0.1:$LPORT"

@@ -99,7 +99,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version || 'main' }}
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.2
       # The digest is the manifest the tags point at. Buildx provenance makes
       # that an image index, which is what `cosign verify` on the tag checks.
       - name: Sign the image

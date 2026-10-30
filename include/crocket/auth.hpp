@@ -23,12 +23,16 @@
 
 namespace crocket::auth {
 
-/// Signature algorithms this verifier accepts. HS256 and "none" are not
-/// among them and cannot be enabled.
-enum class Alg : std::uint8_t { RS256, ES256, EdDSA };
+/// Signature algorithms. The default `.algorithms` is RS256, ES256 and EdDSA.
+/// HS256, HS384 and HS512 are off until listed here and `.secret` is set.
+/// `none` cannot be enabled.
+enum class Alg : std::uint8_t { RS256, ES256, EdDSA, HS256, HS384, HS512 };
 inline constexpr Alg RS256 = Alg::RS256;
 inline constexpr Alg ES256 = Alg::ES256;
 inline constexpr Alg EdDSA = Alg::EdDSA;
+inline constexpr Alg HS256 = Alg::HS256;
+inline constexpr Alg HS384 = Alg::HS384;
+inline constexpr Alg HS512 = Alg::HS512;
 
 /// Resource-server JWT check. Aggregate, so `.issuer = ...` works.
 /// EdDSA verifies Ed25519 and Ed448 keys. The verified-token cache is per
@@ -43,6 +47,10 @@ struct Jwt {
   /// use its `jwks_uri`. The document's `issuer` must match `issuer` exactly.
   std::string jwks;
   std::vector<Alg> algorithms = {Alg::RS256, Alg::ES256, Alg::EdDSA};
+  /// HMAC key. Empty rejects HS256, HS384 and HS512 even if they are listed in
+  /// `.algorithms`. Never taken from a JWKS key (that is the alg-confusion
+  /// attack: an RSA or EC public key reused as an HMAC secret).
+  std::string secret;
   std::chrono::milliseconds leeway{60'000};
   /// Claim that holds roles: "roles", "groups", "scope", or a dotted path
   /// such as "realm_access.roles". An array of strings, or one space-separated
@@ -78,6 +86,7 @@ struct Jwt {
   std::shared_ptr<State> activate() const;
   /// True after the first JWKS document (and, for OIDC, discovery) has loaded.
   /// A failed fetch keeps the previous keys and leaves this false until one succeeds.
+  /// An HMAC-only verifier (a secret, no JWKS URL) is ready without a fetch.
   [[nodiscard]] bool ready() const;
 
   operator Authenticator() const;

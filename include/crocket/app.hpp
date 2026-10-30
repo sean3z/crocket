@@ -104,6 +104,10 @@ struct AuthConfig {
   std::string issuer;     // CROCKET_AUTH_ISSUER; exact `iss` match
   std::string audience;   // CROCKET_AUTH_AUDIENCE; empty skips the aud check
   std::string jwks;       // CROCKET_AUTH_JWKS; empty: discover from the issuer
+  /// Shared secret for HMAC. Empty rejects every HS* algorithm. `Jwt::from`
+  /// adds HS256 to `.algorithms` when this is set; the struct's default list
+  /// does not include it.
+  std::string secret;  // CROCKET_AUTH_SECRET
   std::chrono::milliseconds leeway{60'000};
   std::string roles_claim = "roles";
   std::chrono::milliseconds jwks_refresh{600'000};

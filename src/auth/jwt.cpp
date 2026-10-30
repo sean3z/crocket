@@ -124,11 +124,15 @@ struct Jwt::State {
     std::string roles_claim = "roles";
     std::string subject_claim = "sub";
     std::string tls_ca_file;
+    std::string secret;
     std::chrono::milliseconds leeway{60'000};
     std::chrono::milliseconds refresh{600'000};
     bool rs = true;
     bool es = true;
     bool ed = true;
+    bool hs256 = false;
+    bool hs384 = false;
+    bool hs512 = false;
     std::size_t cache_entries = 1024;
     std::uint64_t id = 0;
   } cfg;
@@ -165,19 +169,29 @@ Jwt::State::State(const Jwt& src) {
   cfg.roles_claim = src.roles_claim.empty() ? "roles" : src.roles_claim;
   cfg.subject_claim = src.subject_claim.empty() ? "sub" : src.subject_claim;
   cfg.tls_ca_file = src.tls_ca_file;
+  cfg.secret = src.secret;
   cfg.leeway = src.leeway.count() < 0 ? std::chrono::milliseconds::zero() : src.leeway;
   cfg.refresh = src.refresh < std::chrono::seconds(1) ? std::chrono::seconds(1) : src.refresh;
   cfg.cache_entries = src.cache_entries;
   cfg.rs = cfg.es = cfg.ed = false;
+  bool listed = false;
   for (auto a : src.algorithms) {
+    listed = true;
     if (a == Alg::RS256) cfg.rs = true;
     else if (a == Alg::ES256) cfg.es = true;
     else if (a == Alg::EdDSA) cfg.ed = true;
+    else if (a == Alg::HS256) cfg.hs256 = true;
+    else if (a == Alg::HS384) cfg.hs384 = true;
+    else if (a == Alg::HS512) cfg.hs512 = true;
   }
-  if (!cfg.rs && !cfg.es && !cfg.ed) cfg.rs = cfg.es = cfg.ed = true;
+  // An empty list is the default asymmetric set. A list of only HMAC algs
+  // must not grow RS256 back.
+  if (!listed) cfg.rs = cfg.es = cfg.ed = true;
   interval = cfg.refresh;
   std::call_once(g_metrics_once, [] { crocket::detail::add_metrics_renderer(&render_metrics); });
 
+  const bool asymmetric = cfg.rs || cfg.es || cfg.ed;
+  const bool hmac = !cfg.secret.empty() && (cfg.hs256 || cfg.hs384 || cfg.hs512);
   if (!src.jwks_json.empty()) {
     auto parsed = detail::parse_jwks(src.jwks_json);
     if (!parsed) {
@@ -186,6 +200,11 @@ Jwt::State::State(const Jwt& src) {
     }
     keys.store(std::move(*parsed));
     loaded.store(true, std::memory_order_release);
+    return;
+  }
+  if (!asymmetric) {
+    if (hmac) loaded.store(true, std::memory_order_release);
+    else log::warn("auth::Jwt has no issuer and no JWKS");
     return;
   }
   if (src.jwks.empty() && src.issuer.empty()) {
@@ -296,6 +315,9 @@ bool Jwt::State::alg_ok(std::string_view alg) const {
   if (alg == "RS256") return cfg.rs;
   if (alg == "ES256") return cfg.es;
   if (alg == "EdDSA") return cfg.ed;
+  if (alg == "HS256") return cfg.hs256;
+  if (alg == "HS384") return cfg.hs384;
+  if (alg == "HS512") return cfg.hs512;
   return false;
 }
 
@@ -400,7 +422,7 @@ std::expected<Authenticator::Verified, ApiError> Jwt::State::verify(std::string_
   auto* algv = header->find("alg");
   if (!algv || !algv->is_string()) return invalid("missing alg");
   auto alg = algv->as_string();
-  if (alg == "none" || alg.starts_with("HS") || !alg_ok(alg)) return invalid("algorithm is not allowed");
+  if (alg == "none" || !alg_ok(alg)) return invalid("algorithm is not allowed");
   if (auto* typ = header->find("typ"); typ) {
     if (!typ->is_string()) return invalid("bad typ");
     std::string t = typ->as_string();
@@ -415,35 +437,42 @@ std::expected<Authenticator::Verified, ApiError> Jwt::State::verify(std::string_
   }
   if (!detail::b64url_decode(s64, sig)) return invalid("signature is not base64url");
 
-  if (!loaded.load(std::memory_order_acquire)) return invalid("signing keys are not loaded");
-  auto set = keys.load(std::memory_order_acquire);
-  if (!set) return invalid("signing keys are not loaded");
-
-  std::vector<const detail::Key*> candidates;
-  if (!kid.empty()) {
-    bool saw = false;
-    for (auto& k : set->keys) {
-      if (k.kid != kid) continue;
-      saw = true;
-      if (detail::key_matches(k, alg)) candidates.push_back(&k);
-    }
-    if (!saw) {
-      nudge();
-      return coded("auth.unknown_key", "unknown signing key", "kid " + kid + " not in JWKS");
-    }
-    if (candidates.empty()) return invalid("signing key does not match alg");
+  // HMAC uses only .secret. A JWK is never the HMAC key: that is the
+  // alg-confusion attack (sign with HS256 and the RSA/EC public key bytes).
+  if (alg.starts_with("HS")) {
+    if (cfg.secret.empty()) return invalid("hmac secret is not configured");
+    if (!detail::verify_hmac(cfg.secret, alg, signing, sig)) return invalid("signature verification failed");
   } else {
-    for (auto& k : set->keys)
-      if (detail::key_matches(k, alg)) candidates.push_back(&k);
-    if (candidates.empty()) return invalid("no signing key for this algorithm");
-  }
-  bool signed_ok = false;
-  for (auto* k : candidates)
-    if (detail::verify_signature(*k, alg, signing, sig)) {
-      signed_ok = true;
-      break;
+    if (!loaded.load(std::memory_order_acquire)) return invalid("signing keys are not loaded");
+    auto set = keys.load(std::memory_order_acquire);
+    if (!set) return invalid("signing keys are not loaded");
+
+    std::vector<const detail::Key*> candidates;
+    if (!kid.empty()) {
+      bool saw = false;
+      for (auto& k : set->keys) {
+        if (k.kid != kid) continue;
+        saw = true;
+        if (detail::key_matches(k, alg)) candidates.push_back(&k);
+      }
+      if (!saw) {
+        nudge();
+        return coded("auth.unknown_key", "unknown signing key", "kid " + kid + " not in JWKS");
+      }
+      if (candidates.empty()) return invalid("signing key does not match alg");
+    } else {
+      for (auto& k : set->keys)
+        if (detail::key_matches(k, alg)) candidates.push_back(&k);
+      if (candidates.empty()) return invalid("no signing key for this algorithm");
     }
-  if (!signed_ok) return invalid("signature verification failed");
+    bool signed_ok = false;
+    for (auto* k : candidates)
+      if (detail::verify_signature(*k, alg, signing, sig)) {
+        signed_ok = true;
+        break;
+      }
+    if (!signed_ok) return invalid("signature verification failed");
+  }
 
   if (!detail::b64url_decode(p64, payload_json)) return invalid("payload is not base64url");
   auto checked = check_claims(std::move(payload_json));
@@ -480,6 +509,15 @@ Jwt Jwt::from(const AuthConfig& cfg) {
   j.leeway = cfg.leeway;
   if (!cfg.roles_claim.empty()) j.roles_claim = cfg.roles_claim;
   if (cfg.jwks_refresh.count() > 0) j.refresh = cfg.jwks_refresh;
+  j.secret = cfg.secret;
+  // Env has no algorithms list. A secret is the opt-in for HS256 there.
+  // A Jwt written in code still has to list auth::HS256 itself.
+  if (!j.secret.empty()) {
+    bool listed = false;
+    for (auto a : j.algorithms)
+      if (a == Alg::HS256) listed = true;
+    if (!listed) j.algorithms.push_back(Alg::HS256);
+  }
   return j;
 }
 

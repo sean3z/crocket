@@ -52,6 +52,9 @@ bool b64url_decode(std::string_view in, std::string& out);
 /// True when `sig` is a valid `alg` signature over `signing_input` for `key`.
 bool verify_signature(const Key& key, std::string_view alg, std::string_view signing_input, std::string_view sig);
 
+/// HMAC-SHA256/384/512 over `signing_input` with `secret`. Does not read a JWK.
+bool verify_hmac(std::string_view secret, std::string_view alg, std::string_view signing_input, std::string_view sig);
+
 /// Whether this parsed key can verify `alg` (RS256 / ES256 / EdDSA).
 bool key_matches(const Key& key, std::string_view alg);
 

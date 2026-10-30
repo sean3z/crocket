@@ -174,6 +174,31 @@ static std::string sign_bytes(const Key& key, std::string_view alg, std::string_
   return sig;
 }
 
+static std::string hmac_raw(std::string_view secret, std::string_view alg, std::string_view input) {
+  const char* digest = alg == "HS512" ? "SHA512" : alg == "HS384" ? "SHA384" : "SHA256";
+  std::size_t expect = alg == "HS512" ? 64 : alg == "HS384" ? 48 : 32;
+  EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
+  EVP_MAC_CTX* ctx = mac ? EVP_MAC_CTX_new(mac) : nullptr;
+  char digest_name[8] = {};
+  std::memcpy(digest_name, digest, std::strlen(digest));
+  OSSL_PARAM params[] = {OSSL_PARAM_construct_utf8_string("digest", digest_name, 0), OSSL_PARAM_construct_end()};
+  unsigned char out[64];
+  std::size_t out_len = 0;
+  std::string sig;
+  if (ctx && EVP_MAC_init(ctx, reinterpret_cast<const unsigned char*>(secret.data()), secret.size(), params) == 1 &&
+      EVP_MAC_update(ctx, reinterpret_cast<const unsigned char*>(input.data()), input.size()) == 1 &&
+      EVP_MAC_final(ctx, out, &out_len, sizeof out) == 1 && out_len == expect)
+    sig.assign(reinterpret_cast<char*>(out), out_len);
+  EVP_MAC_CTX_free(ctx);
+  EVP_MAC_free(mac);
+  return sig;
+}
+
+static std::string mint_hs(std::string_view secret, std::string_view alg, std::string payload) {
+  auto input = b64url(std::format(R"({{"alg":"{}","typ":"JWT"}})", alg)) + "." + b64url(payload);
+  return input + "." + b64url(hmac_raw(secret, alg, input));
+}
+
 static std::string mint(const Key& key, std::string_view alg, std::string_view kid, std::string payload) {
   auto header = std::format(R"({{"alg":"{}","typ":"JWT","kid":"{}"}})", alg, kid);
   auto input = b64url(header) + "." + b64url(payload);
@@ -693,6 +718,65 @@ int main() {
     CHECK(contains(ready.body, "fail"));
   }
 
+  section("HS256 needs an explicit secret");
+  {
+    constexpr std::string_view kSecret = "test-secret-value";
+    auto hs = mint_hs(kSecret, "HS256", payload(exp));
+    auto hs512 = mint_hs(kSecret, "HS512", payload(exp));
+
+    auth::Jwt ok = jwt_inline(rsa_doc);
+    ok.secret = std::string(kSecret);
+    ok.algorithms.push_back(auth::HS256);
+    ok.algorithms.push_back(auth::HS512);
+    Harness h(std::move(ok));
+    auto good = h.get("/me").bearer(hs).dispatch();
+    CHECK_EQ(good.status, 200);
+    CHECK_EQ(good.body, std::string("alice"));
+    CHECK(!contains(good.body, kSecret));
+    CHECK_EQ(h.get("/me").bearer(hs512).dispatch().status, 200);
+    CHECK_EQ(h.get("/me").bearer(mint(rsa, "RS256", "rsa-1", payload(exp))).dispatch().status, 200);
+
+    auth::Jwt listed = jwt_inline(rsa_doc);
+    listed.algorithms.push_back(auth::HS256);
+    Config dev;
+    dev.profile = Profile::Dev;
+    Harness no_secret(std::move(listed), dev);
+    auto missing_secret = no_secret.get("/me").bearer(hs).dispatch();
+    CHECK_EQ(missing_secret.status, 401);
+    CHECK_EQ(missing_secret.error_code, std::string_view("auth.invalid"));
+    CHECK(contains(missing_secret.body, "hmac secret is not configured"));
+    CHECK(!contains(missing_secret.body, kSecret));
+
+    auth::Jwt asym = jwt_inline(rsa_doc);
+    asym.secret = std::string(kSecret);
+    Harness only_asym(std::move(asym), dev);
+    auto not_listed = only_asym.get("/me").bearer(hs).dispatch();
+    CHECK_EQ(not_listed.error_code, std::string_view("auth.invalid"));
+    CHECK(contains(not_listed.body, "algorithm is not allowed"));
+
+    BIGNUM* modulus = nullptr;
+    EVP_PKEY_get_bn_param(rsa.p, "n", &modulus);
+    std::string n_bytes(static_cast<std::size_t>(BN_num_bytes(modulus)), '\0');
+    BN_bn2bin(modulus, reinterpret_cast<unsigned char*>(n_bytes.data()));
+    BN_free(modulus);
+    auto confused = mint_hs(n_bytes, "HS256", payload(exp));
+    CHECK_EQ(h.get("/me").bearer(confused).dispatch().error_code, std::string_view("auth.invalid"));
+    CHECK_EQ(only_asym.get("/me").bearer(confused).dispatch().error_code, std::string_view("auth.invalid"));
+    Harness jwks_only(jwt_inline(rsa_doc), dev);
+    auto confused_default = jwks_only.get("/me").bearer(confused).dispatch();
+    CHECK_EQ(confused_default.error_code, std::string_view("auth.invalid"));
+    CHECK(contains(confused_default.body, "algorithm is not allowed"));
+
+    auth::Jwt hmac_only;
+    hmac_only.issuer = std::string(kIssuer);
+    hmac_only.audience = std::string(kAudience);
+    hmac_only.secret = std::string(kSecret);
+    hmac_only.algorithms = {auth::HS256};
+    Harness bare(std::move(hmac_only));
+    CHECK(bare.app.core().state.get<auth::Jwt>()->ready());
+    CHECK_EQ(bare.get("/me").bearer(hs).dispatch().status, 200);
+  }
+
   section("from_env and one authenticator");
   {
     ::setenv("CROCKET_AUTH_ISSUER", "https://login.example/", 1);
@@ -701,6 +785,7 @@ int main() {
     ::setenv("CROCKET_AUTH_LEEWAY", "15s", 1);
     ::setenv("CROCKET_AUTH_ROLES_CLAIM", "realm_access.roles", 1);
     ::setenv("CROCKET_AUTH_JWKS_REFRESH", "2m", 1);
+    ::setenv("CROCKET_AUTH_SECRET", "env-secret-value", 1);
     auto j = auth::Jwt::from_env();
     CHECK_EQ(j.issuer, std::string("https://login.example/"));
     CHECK_EQ(j.audience, std::string("orders-api"));
@@ -708,8 +793,13 @@ int main() {
     CHECK_EQ(j.leeway, 15s);
     CHECK_EQ(j.roles_claim, std::string("realm_access.roles"));
     CHECK_EQ(j.refresh, 2min);
+    CHECK_EQ(j.secret, std::string("env-secret-value"));
+    bool hs256 = false;
+    for (auto a : j.algorithms)
+      if (a == auth::HS256) hs256 = true;
+    CHECK(hs256);
     for (auto* name : {"CROCKET_AUTH_ISSUER", "CROCKET_AUTH_AUDIENCE", "CROCKET_AUTH_JWKS", "CROCKET_AUTH_LEEWAY",
-                       "CROCKET_AUTH_ROLES_CLAIM", "CROCKET_AUTH_JWKS_REFRESH"})
+                       "CROCKET_AUTH_ROLES_CLAIM", "CROCKET_AUTH_JWKS_REFRESH", "CROCKET_AUTH_SECRET"})
       ::unsetenv(name);
 
     Crocket app;

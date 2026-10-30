@@ -722,9 +722,15 @@ memory. An unknown `kid` does not wait: the request fails at once with 401
 `auth.unknown_key`, and at most one refresh is started per 30 seconds.
 
 Algorithms are RS256, ES256 and EdDSA (Ed25519 and Ed448). That is the default
-`.algorithms`. `none` and anything HMAC, including HS256, is rejected. `.leeway`
-defaults to 60 seconds, `.roles_claim` to `"roles"`, `.refresh` to 10 minutes,
-`.subject_claim` to `"sub"`.
+`.algorithms`. `none` is rejected. HS256, HS384 and HS512 stay off that list:
+set `.secret` and add `auth::HS256` (or `HS384` / `HS512`) to `.algorithms`.
+Without `.secret`, every HMAC algorithm is rejected even if it is listed.
+`Jwt::from` / `from_env` add HS256 when `auth.secret` is set, because the
+environment has no algorithms list. The HMAC key is only `.secret`. A JWK is
+never used as that key: treating an RSA or EC public key as an HMAC secret is
+the alg-confusion attack, and a token signed that way does not verify.
+`.leeway` defaults to 60 seconds, `.roles_claim` to `"roles"`, `.refresh` to
+10 minutes, `.subject_claim` to `"sub"`.
 
 `Auth<>` is the untyped principal: `subject` and `scopes` (the space-separated
 `scope` claim, or an array of strings). `Auth<T>` adds `T claims`, filled from the
@@ -775,6 +781,7 @@ removed from log lines and from error text.
 | `CROCKET_AUTH_ISSUER` | `auth.issuer` | unset |
 | `CROCKET_AUTH_AUDIENCE` | `auth.audience` | unset (the `aud` check is skipped) |
 | `CROCKET_AUTH_JWKS` | `auth.jwks` | discovered from the issuer |
+| `CROCKET_AUTH_SECRET` | `auth.secret` | unset (HMAC off; `from_env` adds HS256 when set) |
 | `CROCKET_AUTH_LEEWAY` | `auth.leeway` | `60s` |
 | `CROCKET_AUTH_ROLES_CLAIM` | `auth.roles_claim` | `roles` |
 | `CROCKET_AUTH_JWKS_REFRESH` | `auth.jwks_refresh` | `10min` |
@@ -1215,6 +1222,7 @@ booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-
 | `CROCKET_AUTH_ISSUER` | `auth.issuer`, for [`crocket::auth`](#authentication) | unset |
 | `CROCKET_AUTH_AUDIENCE` | `auth.audience` | unset (no `aud` check) |
 | `CROCKET_AUTH_JWKS` | `auth.jwks` | discovered from the issuer |
+| `CROCKET_AUTH_SECRET` | `auth.secret` | unset (HMAC off) |
 | `CROCKET_AUTH_LEEWAY` | `auth.leeway` | `60s` |
 | `CROCKET_AUTH_ROLES_CLAIM` | `auth.roles_claim` | `roles` |
 | `CROCKET_AUTH_JWKS_REFRESH` | `auth.jwks_refresh` | `10min` |

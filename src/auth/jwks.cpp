@@ -4,8 +4,10 @@
 
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
+#include <openssl/crypto.h>
 #include <openssl/ecdsa.h>
 #include <openssl/param_build.h>
+#include <openssl/params.h>
 
 #include <cstring>
 #include <vector>
@@ -193,6 +195,28 @@ bool verify_signature(const Key& key, std::string_view alg, std::string_view sig
   if (alg == "ES256") return verify_es256(key.pkey, signing_input, sig);
   if (alg == "EdDSA") return verify_eddsa(key.pkey, signing_input, sig);
   return false;
+}
+
+bool verify_hmac(std::string_view secret, std::string_view alg, std::string_view signing_input, std::string_view sig) {
+  if (secret.empty()) return false;
+  const char* digest = alg == "HS256" ? "SHA256" : alg == "HS384" ? "SHA384" : alg == "HS512" ? "SHA512" : nullptr;
+  std::size_t expect = alg == "HS256" ? 32 : alg == "HS384" ? 48 : alg == "HS512" ? 64 : 0;
+  if (!digest || sig.size() != expect) return false;
+  EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
+  if (!mac) return false;
+  EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(mac);
+  char digest_name[8] = {};
+  std::memcpy(digest_name, digest, std::strlen(digest));
+  OSSL_PARAM params[] = {OSSL_PARAM_construct_utf8_string("digest", digest_name, 0), OSSL_PARAM_construct_end()};
+  unsigned char out[64];
+  std::size_t out_len = 0;
+  bool ok = ctx && EVP_MAC_init(ctx, reinterpret_cast<const unsigned char*>(secret.data()), secret.size(), params) == 1 &&
+            EVP_MAC_update(ctx, reinterpret_cast<const unsigned char*>(signing_input.data()), signing_input.size()) == 1 &&
+            EVP_MAC_final(ctx, out, &out_len, sizeof out) == 1 && out_len == expect &&
+            CRYPTO_memcmp(out, sig.data(), expect) == 0;
+  EVP_MAC_CTX_free(ctx);
+  EVP_MAC_free(mac);
+  return ok;
 }
 
 std::expected<std::shared_ptr<const KeySet>, std::string> parse_jwks(std::string_view json) {

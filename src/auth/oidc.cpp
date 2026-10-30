@@ -21,6 +21,10 @@
 namespace crocket::auth::detail {
 namespace {
 
+// TODO: stopgap. Replace this hand-rolled HTTPS GET with crocket::client when
+// that lands (Roadmap #37 / RESILIENCE). That client is built on h2o_httpclient.
+// Do not call h2o directly from crocket_auth.
+
 constexpr int kTimeoutMs = 5000;
 constexpr std::size_t kMaxBody = 1 << 20;
 

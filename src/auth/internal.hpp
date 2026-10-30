@@ -22,6 +22,8 @@ struct Fetched {
 
 /// One HTTPS (or loopback HTTP) GET. Times out. Does not follow more than
 /// three redirects. `ca_file` empty: the default trust store.
+/// Stopgap: replace with crocket::client (Roadmap #37 / RESILIENCE, on
+/// h2o_httpclient). Do not call h2o directly from crocket_auth.
 std::expected<Fetched, std::string> http_get(std::string_view url, std::string_view ca_file);
 
 struct Key {

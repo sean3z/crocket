@@ -171,8 +171,9 @@ endif()
 if(CROCKET_HAS_AUTH)
   add_library(crocket_auth STATIC src/auth/jwt.cpp src/auth/jwks.cpp src/auth/oidc.cpp)
   add_library(crocket::auth ALIAS crocket_auth)
-  # libssl as well as libcrypto: the JWKS fetch is a small HTTPS client until
-  # crocket has a resilience HTTP client to swap in.
+  # libssl as well as libcrypto: the JWKS fetch is a hand-rolled HTTPS GET.
+  # TODO: replace it with crocket::client (Roadmap #37 / RESILIENCE, on
+  # h2o_httpclient). Do not call h2o directly from crocket_auth.
   target_link_libraries(crocket_auth PUBLIC crocket PRIVATE OpenSSL::SSL OpenSSL::Crypto)
   target_compile_options(crocket_auth PRIVATE -Wall -Wextra)
   message(STATUS "crocket: crocket::auth enabled (OpenSSL; JWT/OIDC)")

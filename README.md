@@ -719,7 +719,10 @@ If the issuer or the JWKS URL is down at startup, the process still starts.
 `GET /readyz` stays not ready until the first JWKS document has loaded (for OIDC,
 discovery has to succeed too). A later failed refresh keeps the keys already in
 memory. An unknown `kid` does not wait: the request fails at once with 401
-`auth.unknown_key`, and at most one refresh is started per 30 seconds.
+`auth.unknown_key`, and at most one refresh is started per 30 seconds. The JWKS
+and discovery GET is a hand-rolled HTTPS client in `crocket_auth` until
+`crocket::client` lands (Roadmap #37 / RESILIENCE, on `h2o_httpclient`; auth
+should not call h2o directly).
 
 Algorithms are RS256, ES256 and EdDSA (Ed25519 and Ed448). That is the default
 `.algorithms`. `none` is rejected. HS256, HS384 and HS512 stay off that list:

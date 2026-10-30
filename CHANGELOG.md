@@ -13,6 +13,16 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Security
+- **Vulnerability reports:** [SECURITY.md](SECURITY.md) is the security policy.
+  It says how to report a vulnerability in private, what is in scope for the
+  framework, and how long a report should expect to wait
+- **Signed hello images and SBOMs:** the release workflow signs
+  `ghcr.io/sean3z/crocket-hello` with Sigstore (keyless) on every channel, and
+  publishes a CycloneDX and an SPDX software bill of materials for that image.
+  A tagged release attaches both files. [SECURITY.md](SECURITY.md) has the
+  verify commands
+
 ## [0.4.0] - 2026-10-25
 
 Throughput, logging, and autoscaling. Roughly 1.6x h2c with production features

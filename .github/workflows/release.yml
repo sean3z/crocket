@@ -4,6 +4,10 @@ name: Release
 #   latest:       every push to main        -> :latest, :sha-<short>
 #   stable:       tag X.Y.Z                 -> :X.Y.Z, :X.Y, :stable + GitHub Release
 #   experimental: tag X.Y.Z-rc.N            -> :X.Y.Z-rc.N, :experimental + pre-release
+#
+# Every pushed image is signed with keyless Sigstore (cosign) and gets a
+# CycloneDX and SPDX SBOM attested to that digest. A tag also attaches the
+# SBOM files to the GitHub Release. See SECURITY.md.
 on:
   workflow_dispatch:
   push:
@@ -11,8 +15,7 @@ on:
     tags: ['[0-9]+.[0-9]+.[0-9]+', '[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+']
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -26,6 +29,7 @@ jobs:
       version: ${{ steps.t.outputs.version }}
       channel: ${{ steps.t.outputs.channel }}
       short: ${{ steps.t.outputs.short }}
+      image: ${{ steps.t.outputs.image }}
     steps:
       - uses: actions/checkout@v4
       - id: t
@@ -54,16 +58,27 @@ jobs:
             v=""; channel=latest
             tags="$img:latest,$img:sha-$short"
           fi
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "short=$short" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags=$tags"
+            echo "version=$v"
+            echo "channel=$channel"
+            echo "short=$short"
+            echo "image=$img"
+          } >> "$GITHUB_OUTPUT"
           echo "channel=$channel tags=$tags"
 
   image:
     needs: meta
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      # actions/attest records provenance. Storage records are org-only, and
+      # this job turns them off; the permission is what the action documents.
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -73,6 +88,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           file: docker/hello.Dockerfile
@@ -83,13 +99,99 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version || 'main' }}
+      - uses: sigstore/cosign-installer@v4
+      # The digest is the manifest the tags point at. Buildx provenance makes
+      # that an image index, which is what `cosign verify` on the tag checks.
+      - name: Sign the image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ needs.meta.outputs.image }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+      - uses: anchore/sbom-action/download-syft@v0
+        id: syft
+        with:
+          syft-version: v1.55.0
+      - name: Software bill of materials
+        id: sbom
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ needs.meta.outputs.image }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          SHORT: ${{ needs.meta.outputs.short }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+        run: |
+          set -euo pipefail
+          if [[ -n "$VERSION" ]]; then
+            base="crocket-hello-${VERSION}"
+            src_version="$VERSION"
+          else
+            base="crocket-hello-sha-${SHORT}"
+            src_version="main"
+          fi
+          mkdir -p sbom
+          "$SYFT" "${IMAGE}@${DIGEST}" \
+            --config .github/syft.yaml \
+            --source-name "$IMAGE" \
+            --source-version "$src_version" \
+            -o "cyclonedx-json=sbom/${base}.cdx.json" \
+            -o "spdx-json=sbom/${base}.spdx.json"
+          cdx="sbom/${base}.cdx.json"
+          spdx="sbom/${base}.spdx.json"
+          python3 - "$cdx" "$spdx" <<'PY'
+          import json, os, sys
+          cdx, spdx = sys.argv[1:]
+          doc = json.load(open(cdx))
+          n = len(doc.get("components") or [])
+          if n < 10:
+              sys.exit(f"{cdx} has {n} components")
+          doc = json.load(open(spdx))
+          n = len(doc.get("packages") or [])
+          if n < 10:
+              sys.exit(f"{spdx} has {n} packages")
+          for p in (cdx, spdx):
+              print(f"{p}: {os.path.getsize(p)} bytes")
+          PY
+          echo "cdx=$cdx" >> "$GITHUB_OUTPUT"
+          echo "spdx=$spdx" >> "$GITHUB_OUTPUT"
+      - name: Attest the software bill of materials
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ needs.meta.outputs.image }}
+          CDX: ${{ steps.sbom.outputs.cdx }}
+          SPDX: ${{ steps.sbom.outputs.spdx }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes --type cyclonedx --predicate "$CDX" "${IMAGE}@${DIGEST}"
+          cosign attest --yes --type spdxjson --predicate "$SPDX" "${IMAGE}@${DIGEST}"
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ needs.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crocket-hello-sbom
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 90
 
   release:
     needs: [meta, image]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: crocket-hello-sbom
+          path: sbom
       - name: Notes from CHANGELOG.md
         shell: bash
         run: |
@@ -103,10 +205,13 @@ jobs:
           if [[ ! -s notes.md ]]; then
             echo "::error::CHANGELOG.md has no section for [$v]"; exit 1
           fi
+          compgen -G 'sbom/*.cdx.json' >/dev/null
+          compgen -G 'sbom/*.spdx.json' >/dev/null
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           flags=()
           if [[ "${{ needs.meta.outputs.channel }}" == experimental ]]; then flags+=(--prerelease); else flags+=(--latest); fi
-          gh release create "$GITHUB_REF_NAME" --title "crocket $GITHUB_REF_NAME" --notes-file notes.md --verify-tag "${flags[@]}"
+          gh release create "$GITHUB_REF_NAME" sbom/*.cdx.json sbom/*.spdx.json \
+            --title "crocket $GITHUB_REF_NAME" --notes-file notes.md --verify-tag "${flags[@]}"

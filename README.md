@@ -1692,6 +1692,12 @@ release is in [CHANGELOG.md](CHANGELOG.md) and on
 | latest (opt-in) | `main`, every merge | `:latest`, `:sha-<short>` | Trying what's next |
 | experimental (opt-in) | `X.Y.Z-rc.N` pre-release tags | `:X.Y.Z-rc.N`, `:experimental` | Testing risky changes |
 
+Every tag of `ghcr.io/sean3z/crocket-hello` is signed with Sigstore, keyless, by
+the release workflow. A stable or experimental release also attaches a CycloneDX
+and an SPDX software bill of materials to the GitHub Release.
+[SECURITY.md](SECURITY.md#signed-images-and-sboms) has the commands to check a
+signature and to fetch the bill of materials.
+
 The version is in `<crocket/version.hpp>` (included by `<crocket/crocket.hpp>`):
 `crocket::version::string` (`"0.4.0"`), `major`/`minor`/`patch`, `commit` (the short git
 commit at configure time, or `-DCROCKET_GIT_COMMIT=...`) and `compiler`.
@@ -1852,7 +1858,10 @@ instrumentation, so an input that reaches new code is kept and mutated further. 
 needs GCC, so libFuzzer, which needs clang, is out; the harness in `tests/fuzz/fuzz.cpp`
 does the same job.) A problem leaves the input in `build-fuzz/crashes/`; fix it, then add
 the input to the target's corpus so it stays fixed. In `ctest`, each target runs its
-corpus and two seconds of mutations, without coverage.
+corpus and two seconds of mutations, without coverage. Continuous fuzzing in CI
+is planned on the way to 1.0 and is not running yet
+([Roadmap to 1.0](https://github.com/sean3z/crocket/issues/37)). A crash is a
+vulnerability: report it as [SECURITY.md](SECURITY.md) describes.
 
 ### Tests
 
@@ -1879,7 +1888,8 @@ What's planned on the way to 1.0, including features not in crocket yet, is trac
 
 ## Contributing
 
-Issues and pull requests are welcome. To get a working tree, follow
+Issues and pull requests are welcome. Report a vulnerability in private, as
+[SECURITY.md](SECURITY.md) describes, not in a public issue. To get a working tree, follow
 [Building from source](#building-from-source): `./dev setup`, `./dev gcc`, then
 `./dev check` runs the release build and the full test suite. [Working on crocket](#working-on-crocket)
 covers the rest of `./dev`, [Benchmarks](#benchmarks) (`./dev bench --compare main`

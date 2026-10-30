@@ -16,7 +16,8 @@ from outside the project, for example
 ### Added
 - **`crocket::auth`:** opt-in JWT and OIDC (`auth::Jwt`, `Auth<T>`, `auth::require` /
   `auth::any_of`). RS256, ES256 and EdDSA only. JWKS refresh does not block a request;
-  `/readyz` stays not ready until the first key set loads. See the README.
+  `/readyz` stays not ready until the first key set loads. See the README
+  ([#45](https://github.com/sean3z/crocket/pull/45))
 
 ### Security
 - **Vulnerability reports:** [SECURITY.md](SECURITY.md) is the security policy.

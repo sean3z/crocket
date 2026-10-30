@@ -1,0 +1,10 @@
+# Package bill of materials for the hello image.
+# "owned-by-package" (Syft's default) records every file each Debian package
+# owns, which makes an SPDX document too large to attest. The package list is
+# what a consumer scans. h2o is linked statically and is pinned in
+# cmake/h2o.cmake; it does not appear here as its own package.
+file:
+  metadata:
+    selection: "none"
+relationships:
+  package-file-ownership: false

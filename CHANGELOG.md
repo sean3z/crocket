@@ -13,6 +13,11 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Added
+- **`crocket::auth`:** opt-in JWT and OIDC (`auth::Jwt`, `Auth<T>`, `auth::require` /
+  `auth::any_of`). RS256, ES256 and EdDSA only. JWKS refresh does not block a request;
+  `/readyz` stays not ready until the first key set loads. See the README.
+
 ### Security
 - **Vulnerability reports:** [SECURITY.md](SECURITY.md) is the security policy.
   It says how to report a vulnerability in private, what is in scope for the

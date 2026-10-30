@@ -53,6 +53,8 @@ struct Operation {
   std::optional<Value> body = {};          // the requestBody object
   std::vector<std::pair<std::string, Value>> responses = {};  // "200" -> response object
   bool bearer = false;                     // takes Auth: security bearer
+  std::vector<std::string> required_roles = {};  // auth::require / auth::any_of
+  bool roles_all = true;                    // false: any one role is enough
 
   void parameter(std::string_view in, std::string_view name, bool required, Value schema);
   /// A successful response; `media` empty for one without a body.
@@ -328,11 +330,14 @@ struct DescribeExtractor<Header<Name, T>> {
     op.error(400, "the header is missing or not valid");
   }
 };
-template <>
-struct DescribeExtractor<Auth> {
+template <class Claims>
+struct DescribeExtractor<Auth<Claims>> {
   static void apply(Operation& op) {
     op.bearer = true;
-    op.error(401, "the bearer token is missing or not valid");
+    if constexpr (std::is_void_v<Claims>)
+      op.error(401, "the bearer token is missing or not valid");
+    else
+      op.error(401, "the bearer token is missing, not valid, or missing a required claim");
   }
 };
 

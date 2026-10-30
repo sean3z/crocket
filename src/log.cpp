@@ -142,7 +142,43 @@ void Hub::start_writer() {
   started_.store(true);
 }
 
+namespace {
+void replace_all(std::string& s, std::string_view needle) {
+  if (needle.size() < 4) return;
+  constexpr std::string_view repl = "[redacted]";
+  for (std::size_t at = 0; (at = s.find(needle, at)) != std::string::npos;) {
+    s.replace(at, needle.size(), repl);
+    at += repl.size();
+  }
+}
+}  // namespace
+
+std::string without_credentials(const Request* rq, std::string text) {
+  if (!rq) return text;
+  auto strip = [&](std::string_view name) {
+    if (auto v = rq->header(name)) replace_all(text, *v);
+  };
+  // The whole header value, so "Bearer <jwt>" cannot appear. The bare token is
+  // removed only when it is long: a short opaque token is often also the
+  // subject ("alice"), and that subject is meant to be in the log line.
+  strip("authorization");
+  strip("proxy-authorization");
+  strip("cookie");
+  if (auto h = rq->header("authorization")) {
+    constexpr std::string_view scheme = "bearer ";
+    if (h->size() > scheme.size() + 16 && Headers::iequals(h->substr(0, scheme.size()), scheme))
+      replace_all(text, h->substr(scheme.size()));
+  }
+  return text;
+}
+
 void Hub::write(std::string_view line) {
+  std::string scrubbed;
+  if (t_current.rq && (t_current.rq->header("authorization") || t_current.rq->header("proxy-authorization") ||
+                       t_current.rq->header("cookie"))) {
+    scrubbed = without_credentials(t_current.rq, std::string(line));
+    line = scrubbed;
+  }
   if (pending() >= opts_.buffer) {
     if (opts_.when_full == WhenFull::drop) {
       unreported_drops_.fetch_add(1);
@@ -488,6 +524,10 @@ void emit(Hub* hub, Level level, std::string_view text, std::span<Field> fields)
 }
 
 }  // namespace detail
+
+std::string without_credentials(const Request* rq, std::string text) {
+  return detail::without_credentials(rq, text);
+}
 
 Context context() {
   Context c;

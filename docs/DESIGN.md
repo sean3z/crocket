@@ -75,10 +75,10 @@ auto hello(std::string_view name, std::uint8_t age) -> std::string {
 }
 
 [[= http::post("/users")]]
-auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>>;
+auto create(Json<NewUser> body, Auth<> auth, State<Db> db) -> Result<Created<User>>;
 
 [[= http::get("/me")]]
-auto me(Auth auth) -> Json<User>;
+auto me(Auth<> auth) -> Json<User>;
 
 auto helper(int) -> int;  // no route annotation: not mounted
 
@@ -198,9 +198,9 @@ The test suite checks each of these:
 
 1. `hello(name, uint8_t age)`: an age that does not parse is 404, and the function does
    not run.
-2. `create(Json<NewUser>, Auth, State<Db>)`: missing or invalid JSON is 422, and a
+2. `create(Json<NewUser>, Auth<>, State<Db>)`: missing or invalid JSON is 422, and a
    missing token is 401.
-3. `me(Auth)`: a route with no body extractor.
+3. `me(Auth<>)`: a route with no body extractor.
 4. `helper` in `api` is not a route.
 5. A path with `{age}` and a parameter named `years` does not compile, and the error
    names both identifiers.

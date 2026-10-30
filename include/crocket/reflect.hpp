@@ -134,6 +134,9 @@ consteval std::string analyze_rpc(std::meta::info fn, std::vector<Binding>& out)
 /// Computes the parameter bindings for `fn`, or returns a diagnostic.
 consteval std::string analyze(std::meta::info fn, std::vector<Binding>& out) {
   out.clear();
+  if (std::meta::annotations_of_with_type(fn, ^^auth::RoleCheck).size() > 1)
+    return "crocket: handler " + qualified_name(fn) +
+           " has more than one auth role annotation (auth::require or auth::any_of)";
   if (grpc::detail::is_rpc(fn)) return analyze_rpc(fn, out);
   auto anns = std::meta::annotations_of_with_type(fn, ^^http::Route);
   std::string where = "crocket: handler " + qualified_name(fn);
@@ -257,6 +260,17 @@ void describe_operation(openapi::Operation& op) {
     if constexpr (B[i].kind == BindKind::Path) op.parameter("path", B[i].name, true, openapi::param_schema<T>());
     else if constexpr (B[i].kind == BindKind::Extract) openapi::DescribeExtractor<T>::apply(op);
   }
+  constexpr auto roles = std::define_static_array(std::meta::annotations_of_with_type(Fn, ^^auth::RoleCheck));
+  if constexpr (roles.size() == 1) {
+    constexpr auth::RoleCheck need = std::meta::extract<auth::RoleCheck>(roles[0]);
+    op.bearer = true;
+    op.roles_all = need.all;
+    op.error(401, "the bearer token is missing or not valid");
+    if (need.count > 0) {
+      auth::for_each_role(need, [&](std::string_view role) { op.required_roles.emplace_back(role); });
+      op.error(403, "the token does not have the required role");
+    }
+  }
   openapi::respond<typename fn_traits<decltype(&[:Fn:])>::ret>(op);
 }
 
@@ -283,14 +297,14 @@ Routes reflect_routes() {
         d.service = grpc::detail::service_name(Scope);
         d.rpc = grpc::detail::method_name(fn);
         d.path = "/" + std::string(d.service) + "/" + std::string(d.rpc);  // mount() adds the package
-        d.invoke = &grpc::detail::invoke<&[:fn:], bindings.data()>;
+        d.invoke = &grpc::detail::invoke<fn, bindings.data()>;
         d.async = detail::Awaitable<std::remove_cvref_t<typename detail::fn_traits<decltype(&[:fn:])>::ret>>;
       } else {
         constexpr http::Route route = r::route_of(fn);
         d.method = route.method;
         d.path = route.path;
         d.rank = route.rank;
-        d.invoke = &detail::invoke<&[:fn:], bindings.data()>;
+        d.invoke = &detail::invoke<fn, bindings.data()>;
         d.async = detail::Awaitable<std::remove_cvref_t<typename detail::fn_traits<decltype(&[:fn:])>::ret>>;
         d.openapi = &r::describe_operation<fn, bindings.data()>;
       }
@@ -306,6 +320,8 @@ Routes reflect_routes() {
         using C = [:std::meta::parent_of(fn):];
         d.needs.push_back(detail::state_dep<C>());
       }
+      if constexpr (!std::meta::annotations_of_with_type(fn, ^^auth::RoleCheck).empty())
+        d.needs.push_back(detail::state_dep<Authenticator>());
       out.push_back(std::move(d));
     }
   }

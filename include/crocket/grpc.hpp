@@ -5,7 +5,7 @@
 //
 //   namespace greeter {
 //   [[= grpc::rpc]]
-//   auto say_hello(HelloRequest req, Auth auth) -> Result<HelloReply> { ... }
+//   auto say_hello(HelloRequest req, Auth<> auth) -> Result<HelloReply> { ... }
 //   }
 //
 //   crocket::build().mount("helloworld", reflect_routes<^^greeter>(), Mode::Grpc);
@@ -275,10 +275,20 @@ Outcome invoke_impl(Request& rq, Response& rs, type_list<A...>, std::index_seque
   return out;
 }
 
-template <auto Fn, const Binding* B>
+template <std::meta::info Fn, const Binding* B>
 Outcome invoke(Request& rq, Response& rs) {
-  using Traits = crocket::detail::fn_traits<decltype(Fn)>;
-  return grpc::detail::invoke_impl<Fn, B>(rq, rs, typename Traits::args{}, std::make_index_sequence<Traits::arity>{});
+  if constexpr (std::meta::annotations_of_with_type(Fn, ^^crocket::auth::RoleCheck).size() > 0) {
+    if (auto err = crocket::detail::role_gate<Fn>(rq)) {
+      crocket::detail::Outcome out;
+      out.kind = crocket::detail::Outcome::Failed;
+      out.failure_kind = "auth";
+      out.error = std::move(*err);
+      return out;
+    }
+  }
+  using Traits = crocket::detail::fn_traits<decltype(&[:Fn:])>;
+  return grpc::detail::invoke_impl<&[:Fn:], B>(rq, rs, typename Traits::args{},
+                                               std::make_index_sequence<Traits::arity>{});
 }
 
 // ---- schema -----------------------------------------------------------------------

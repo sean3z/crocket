@@ -234,6 +234,12 @@ std::string build_document(std::span<const RouteDef> routes, const OpenApi::Opti
       operation.emplace_back("security", Array{Object{{"bearer", Array{}}}});
       bearer = true;
     }
+    if (!op.required_roles.empty()) {
+      Array roles;
+      for (auto& role : op.required_roles) roles.push_back(role);
+      operation.emplace_back("x-required-roles", std::move(roles));
+      operation.emplace_back("x-required-roles-match", std::string(op.roles_all ? "all" : "any"));
+    }
 
     auto it = std::ranges::find(paths, r.path, &std::pair<std::string, Object>::first);
     if (it == paths.end()) {

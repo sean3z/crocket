@@ -281,6 +281,13 @@ Config Config::from_env(Config base) {
   }
   env_duration("CROCKET_LOG_SLOW", c.log.slow);
   env_uint("CROCKET_LOG_BUFFER", c.log.buffer, 1);
+
+  env_string("CROCKET_AUTH_ISSUER", c.auth.issuer);
+  env_string("CROCKET_AUTH_AUDIENCE", c.auth.audience);
+  env_string("CROCKET_AUTH_JWKS", c.auth.jwks);
+  env_duration("CROCKET_AUTH_LEEWAY", c.auth.leeway);
+  env_string("CROCKET_AUTH_ROLES_CLAIM", c.auth.roles_claim);
+  env_duration("CROCKET_AUTH_JWKS_REFRESH", c.auth.jwks_refresh);
   return c;
 }
 

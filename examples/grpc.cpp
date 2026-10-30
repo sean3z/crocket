@@ -51,7 +51,7 @@ auto say_hello(HelloRequest req, State<Counter> counter) -> Result<HelloReply> {
 }
 
 [[= grpc::rpc]]
-auto whoami(Auth auth) -> HelloReply { return {auth.subject}; }  // UNAUTHENTICATED without a token
+auto whoami(Auth<> auth) -> HelloReply { return {auth.subject}; }  // UNAUTHENTICATED without a token
 
 /// Custom metadata arrives as request headers (grpcurl -H 'x-tenant: acme').
 [[= grpc::rpc]]
@@ -72,8 +72,8 @@ int main(int argc, char** argv) {
   return build(std::move(cfg))
       .attach(Logger{})
       .manage(Counter{})
-      .manage(Authenticator{[](std::string_view token) -> std::expected<Auth, ApiError> {
-        if (token == "letmein") return Auth{"ada"};
+      .manage(Authenticator{[](std::string_view token) -> std::expected<Auth<>, ApiError> {
+        if (token == "letmein") return Auth<>{"ada"};
         return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
       }})
       .mount("helloworld", reflect_routes<^^greeter>(), Mode::Grpc)

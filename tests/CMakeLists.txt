@@ -44,6 +44,10 @@ add_test(NAME openapi COMMAND crocket_openapi_test)
 # with coverage guidance and AddressSanitizer.
 add_executable(crocket_fuzz fuzz/fuzz.cpp fuzz/targets.cpp fuzz/h2.cpp)
 target_link_libraries(crocket_fuzz PRIVATE crocket)
+if(CROCKET_HAS_AUTH)
+  target_compile_definitions(crocket_fuzz PRIVATE CROCKET_HAS_AUTH=1)
+  target_link_libraries(crocket_fuzz PRIVATE crocket::auth)
+endif()
 target_include_directories(crocket_fuzz PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(crocket_fuzz PRIVATE CROCKET_FUZZ_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus")
 if(CROCKET_FUZZ_COVERAGE)
@@ -52,6 +56,9 @@ endif()
 foreach(target json json_typed proto query route request h2)
   add_test(NAME fuzz.${target} COMMAND crocket_fuzz ${target} --seconds 2)
 endforeach()
+if(CROCKET_HAS_AUTH)
+  add_test(NAME fuzz.jwt COMMAND crocket_fuzz jwt --seconds 2)
+endif()
 
 # Acceptance 5 and friends: programs that must NOT compile. Each is an
 # EXCLUDE_FROM_ALL object library; the test builds it and expects failure with
@@ -113,6 +120,20 @@ add_test(NAME consumer
                  "-DLAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}" "-DLDFLAGS=${CMAKE_EXE_LINKER_FLAGS}"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/consumer.cmake)
 set_tests_properties(consumer PROPERTIES TIMEOUT 600)
+
+if(CROCKET_HAS_AUTH)
+  add_executable(crocket_auth_test auth.cpp)
+  target_link_libraries(crocket_auth_test PRIVATE crocket::auth OpenSSL::Crypto OpenSSL::SSL)
+  target_compile_options(crocket_auth_test PRIVATE -Wall -Wextra)
+  add_test(NAME auth COMMAND crocket_auth_test)
+  set_tests_properties(auth PROPERTIES TIMEOUT 90)
+endif()
+
+if(CROCKET_HAS_AUTH AND CROCKET_BUILD_EXAMPLES)
+  add_test(NAME auth_not_in_core
+           COMMAND ${CMAKE_COMMAND} -DBIN=$<TARGET_FILE:crocket_hello>
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/auth_not_in_core.cmake)
+endif()
 
 # crocket::db against a real Postgres: CROCKET_TEST_DATABASE_URL, else skipped (exit 77).
 if(CROCKET_HAS_PG)

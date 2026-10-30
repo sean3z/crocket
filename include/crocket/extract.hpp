@@ -212,49 +212,239 @@ struct FromRequest<Json<T>> {
   }
 };
 
-/// Authenticated principal. Requires a managed Authenticator.
+namespace detail {
+inline bool string_in(const std::vector<std::string>& v, std::string_view s) {
+  for (auto& x : v)
+    if (x == s) return true;
+  return false;
+}
+inline std::uint64_t token_fingerprint(std::string_view s) {
+  std::uint64_t h = 14695981039346656037ull;
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return h == 0 ? 1 : h;
+}
+}  // namespace detail
+
+/// Authenticated principal. Write `Auth<>` (that is, `Auth<void>`): subject and
+/// scopes, as before. `Auth<T>` also carries `claims`, read from the verified
+/// token payload with the same reflection as `Json<T>`. A class template needs
+/// the `<>` in a parameter. Requires a managed Authenticator.
+template <class Claims = void>
 struct Auth {
   std::string subject;
   std::vector<std::string> scopes = {};
-  [[nodiscard]] bool has_scope(std::string_view s) const {
-    for (auto& x : scopes)
-      if (x == s) return true;
-    return false;
-  }
+  /// Roles the verifier took from its roles claim. `auth::require` reads these.
+  /// A custom Authenticator may set them; an empty list means no roles.
+  std::vector<std::string> roles = {};
+  [[nodiscard]] bool has_scope(std::string_view s) const { return detail::string_in(scopes, s); }
+  [[nodiscard]] bool has_role(std::string_view s) const { return detail::string_in(roles, s); }
+};
+
+template <class Claims>
+  requires(!std::is_void_v<Claims>)
+struct Auth<Claims> {
+  std::string subject;
+  std::vector<std::string> scopes = {};
+  std::vector<std::string> roles = {};
+  Claims claims{};
+  [[nodiscard]] bool has_scope(std::string_view s) const { return detail::string_in(scopes, s); }
+  [[nodiscard]] bool has_role(std::string_view s) const { return detail::string_in(roles, s); }
 };
 
 /// Verifies bearer tokens. Manage one: `.manage(Authenticator{verify_fn})`.
-/// The verifier returns Auth, or an ApiError (conventionally 401 auth.expired
-/// or auth.invalid). It runs on the worker thread and may block briefly.
+/// The verifier returns Auth, or an ApiError (401 auth.expired, auth.invalid,
+/// and the codes crocket::auth adds). It runs on the worker thread. A verifier
+/// that waits on the network blocks that worker; crocket::auth does not.
 class Authenticator {
  public:
-  using Verify = std::function<std::expected<Auth, ApiError>(std::string_view token)>;
+  using Verify = std::function<std::expected<Auth<>, ApiError>(std::string_view token)>;
+  /// A verifier that also hands back the payload object, so Auth<T> can read claims.
+  /// `claims_json` empty means this principal has no structured claims.
+  struct Verified {
+    Auth<> auth;
+    std::string claims_json;
+  };
+  using VerifyClaims = std::function<std::expected<Verified, ApiError>(std::string_view token)>;
+
   explicit Authenticator(Verify v) : verify_(std::move(v)) {}
-  [[nodiscard]] std::expected<Auth, ApiError> verify(std::string_view token) const { return verify_(token); }
+  explicit Authenticator(VerifyClaims v) : claims_(std::move(v)) {}
+
+  [[nodiscard]] std::expected<Auth<>, ApiError> verify(std::string_view token) const {
+    auto full = verify_claims(token);
+    if (!full) return std::unexpected(std::move(full.error()));
+    return std::move(full->auth);
+  }
+  [[nodiscard]] std::expected<Verified, ApiError> verify_claims(std::string_view token) const {
+    if (claims_) return claims_(token);
+    auto auth = verify_(token);
+    if (!auth) return std::unexpected(std::move(auth.error()));
+    return Verified{std::move(*auth), {}};
+  }
 
  private:
   Verify verify_;
+  VerifyClaims claims_;
 };
 
-template <>
-struct FromRequest<Auth> {
+namespace detail {
+inline std::expected<std::string_view, ApiError> bearer_token(const Request& r) {
+  auto h = r.header("authorization");
+  if (!h || h->empty()) return std::unexpected(ApiError::unauthorized("auth.missing", "missing bearer token"));
+  constexpr std::string_view scheme = "bearer ";
+  if (h->size() <= scheme.size() || !Headers::iequals(h->substr(0, scheme.size()), scheme))
+    return std::unexpected(ApiError::unauthorized("auth.invalid", "authorization must use the Bearer scheme"));
+  return h->substr(scheme.size());
+}
+
+/// Verifies the request's bearer token once and caches the principal on it.
+inline std::expected<void, ApiError> load_bearer(Request& r) {
+  auto token = bearer_token(r);
+  if (!token) return std::unexpected(std::move(token.error()));
+  auto fp = token_fingerprint(*token);
+  if (r.bearer_material.fingerprint == fp && r.bearer_material.token_size == token->size()) {
+    r.subject = r.bearer_material.subject;
+    return {};
+  }
+  auto* verifier = r.state_registry ? r.state_registry->get<Authenticator>() : nullptr;
+  if (!verifier) return std::unexpected(ApiError::internal("Auth used without a managed Authenticator"));
+  auto full = verifier->verify_claims(*token);
+  if (!full) return std::unexpected(std::move(full.error()));
+  r.bearer_material.fingerprint = fp;
+  r.bearer_material.token_size = token->size();
+  r.bearer_material.subject = full->auth.subject;
+  r.bearer_material.scopes = std::move(full->auth.scopes);
+  r.bearer_material.roles = std::move(full->auth.roles);
+  r.bearer_material.claims_json = std::move(full->claims_json);
+  r.subject = r.bearer_material.subject;
+  return {};
+}
+}  // namespace detail
+
+template <class Claims>
+struct FromRequest<Auth<Claims>> {
   static constexpr std::string_view kind = "auth";
   static constexpr bool consumes_body = false;
-  static std::expected<Auth, ApiError> extract(Request& r) {
-    auto h = r.header("authorization");
-    if (!h || h->empty())
-      return std::unexpected(ApiError::unauthorized("auth.missing", "missing bearer token"));
-    constexpr std::string_view scheme = "bearer ";
-    if (h->size() <= scheme.size() || !Headers::iequals(h->substr(0, scheme.size()), scheme))
-      return std::unexpected(ApiError::unauthorized("auth.invalid", "authorization must use the Bearer scheme"));
-    auto* verifier = r.state_registry ? r.state_registry->get<Authenticator>() : nullptr;
-    if (!verifier) return std::unexpected(ApiError::internal("Auth used without a managed Authenticator"));
-    auto auth = verifier->verify(h->substr(scheme.size()));
-    if (auth) r.subject = auth->subject;  // for log lines
-    return auth;
+  static std::expected<Auth<Claims>, ApiError> extract(Request& r) {
+    if (auto ok = detail::load_bearer(r); !ok) return std::unexpected(std::move(ok.error()));
+    Auth<Claims> out;
+    out.subject = r.bearer_material.subject;
+    out.scopes = r.bearer_material.scopes;
+    out.roles = r.bearer_material.roles;
+    if constexpr (!std::is_void_v<Claims>) {
+      if (r.bearer_material.claims_json.empty()) {
+        ApiError e = ApiError::unauthorized("auth.claims", "token claims do not match this route");
+        e.detail = "verifier did not provide claim JSON";
+        return std::unexpected(std::move(e));
+      }
+      if (auto ok = json::read(r.bearer_material.claims_json, out.claims, r.json_options); !ok) {
+        ApiError e = ApiError::unauthorized("auth.claims", "token claims do not match this route");
+        e.detail = ok.error().describe();
+        return std::unexpected(std::move(e));
+      }
+    }
+    return out;
   }
   static void state_deps(std::vector<detail::StateDep>& out) { out.push_back(detail::state_dep<Authenticator>()); }
 };
+
+namespace auth {
+
+/// Roles a route demands. Produced by auth::require (every role) and auth::any_of
+/// (any one role). `packed` is the names separated by newlines, in static storage.
+struct RoleCheck {
+  const char* packed = nullptr;
+  unsigned count = 0;
+  bool all = true;
+  constexpr bool operator==(const RoleCheck&) const = default;
+};
+
+template <class F>
+void for_each_role(const RoleCheck& check, F&& fn) {
+  if (!check.packed || check.count == 0) return;
+  std::string_view s = check.packed;
+  for (unsigned i = 0; i < check.count && !s.empty(); ++i) {
+    auto nl = s.find('\n');
+    fn(s.substr(0, nl));
+    if (nl == std::string_view::npos) break;
+    s.remove_prefix(nl + 1);
+  }
+}
+
+namespace detail {
+template <std::size_t... N>
+consteval RoleCheck make_role_check(bool all, const char (&...name)[N]) {
+  std::string packed;
+  unsigned count = 0;
+  auto add = [&](std::string_view role) {
+    if (role.empty() || role.find('\n') != std::string_view::npos)
+      throw std::meta::exception(u8"crocket: a role name must be one non-empty line", ^^RoleCheck);
+    if (count) packed += '\n';
+    packed += role;
+    ++count;
+  };
+  (add(std::string_view(name, N - 1)), ...);
+  return RoleCheck{std::define_static_string(packed), count, all};
+}
+}  // namespace detail
+
+/// Every listed role must be on the token (`auth::require("admin", "ops")`).
+/// `requires` is a C++ keyword, so the annotation is spelled `require`.
+/// No arguments means any authenticated caller.
+template <std::size_t... N>
+consteval RoleCheck require(const char (&...name)[N]) {
+  return detail::make_role_check(true, name...);
+}
+
+/// At least one listed role (`auth::any_of("admin", "ops")`).
+template <std::size_t... N>
+consteval RoleCheck any_of(const char (&...name)[N]) {
+  return detail::make_role_check(false, name...);
+}
+
+/// 403 auth.forbidden when a verified principal lacks the route's roles.
+/// nullopt when the check passes (including a check that names no roles).
+inline std::optional<ApiError> denied(const Auth<>& auth, const RoleCheck& need) {
+  if (need.count == 0) return std::nullopt;
+  bool matched = false;
+  unsigned seen = 0;
+  std::string missing;
+  for_each_role(need, [&](std::string_view role) {
+    ++seen;
+    if (auth.has_role(role)) matched = true;
+    else if (missing.empty()) missing = std::string(role);
+  });
+  if (seen == 0) return std::nullopt;
+  if (need.all) {
+    if (missing.empty()) return std::nullopt;
+  } else if (matched) {
+    return std::nullopt;
+  }
+  ApiError e = ApiError::forbidden("auth.forbidden", "missing required role");
+  e.detail = need.all ? "missing role " + missing : "none of the roles in auth::any_of";
+  return e;
+}
+
+}  // namespace auth
+
+namespace detail {
+/// Runs the route's auth::require / auth::any_of annotation, if it has one.
+/// The caller skips the call when the function has no such annotation.
+template <std::meta::info Fn>
+std::optional<ApiError> role_gate(Request& rq) {
+  constexpr auto anns = std::define_static_array(std::meta::annotations_of_with_type(Fn, ^^auth::RoleCheck));
+  if constexpr (anns.size() == 0) {
+    return std::nullopt;
+  } else {
+    constexpr auth::RoleCheck need = std::meta::extract<auth::RoleCheck>(anns[0]);
+    auto auth = FromRequest<Auth<>>::extract(rq);
+    if (!auth) return std::move(auth.error());
+    return auth::denied(*auth, need);
+  }
+}
+}  // namespace detail
 
 /// Deadline / cancellation for blocking work in handlers.
 template <>

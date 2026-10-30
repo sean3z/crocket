@@ -153,6 +153,33 @@ else()
   message(STATUS "crocket: crocket::pg disabled (no libpqxx)")
 endif()
 
+# ---- crocket::auth (optional): JWT / OIDC ---------------------------------------------------------------------
+# A resource-server verifier. Built when OpenSSL 3 is found (CROCKET_AUTH=AUTO,
+# the default); ON makes a missing OpenSSL an error, OFF skips it. Core crocket
+# never links it, and crocket.hpp does not include the header.
+set(CROCKET_AUTH AUTO CACHE STRING "Build crocket::auth (JWT/OIDC) (AUTO, ON or OFF)")
+set_property(CACHE CROCKET_AUTH PROPERTY STRINGS AUTO ON OFF)
+set(CROCKET_HAS_AUTH OFF)
+if(NOT CROCKET_AUTH STREQUAL "OFF")
+  find_package(OpenSSL 3.0)
+  if(OpenSSL_FOUND)
+    set(CROCKET_HAS_AUTH ON)
+  elseif(CROCKET_AUTH STREQUAL "ON")
+    message(FATAL_ERROR "crocket: CROCKET_AUTH=ON but OpenSSL 3 was not found")
+  endif()
+endif()
+if(CROCKET_HAS_AUTH)
+  add_library(crocket_auth STATIC src/auth/jwt.cpp src/auth/jwks.cpp src/auth/oidc.cpp)
+  add_library(crocket::auth ALIAS crocket_auth)
+  # libssl as well as libcrypto: the JWKS fetch is a small HTTPS client until
+  # crocket has a resilience HTTP client to swap in.
+  target_link_libraries(crocket_auth PUBLIC crocket PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+  target_compile_options(crocket_auth PRIVATE -Wall -Wextra)
+  message(STATUS "crocket: crocket::auth enabled (OpenSSL; JWT/OIDC)")
+else()
+  message(STATUS "crocket: crocket::auth disabled")
+endif()
+
 if(CROCKET_BUILD_EXAMPLES)
   if(CROCKET_HAS_PG)
     add_executable(crocket_heroes examples/heroes.cpp)

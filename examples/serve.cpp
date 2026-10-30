@@ -94,7 +94,7 @@ auto list_users(State<DbPool> db, Deadline d) -> Result<Json<std::vector<User>>,
 }
 
 [[= http::post("/users")]]
-auto create(Json<NewUser> body, Auth auth, State<DbPool> db, Deadline d) -> Result<Created<User>, ApiError> {
+auto create(Json<NewUser> body, Auth<> auth, State<DbPool> db, Deadline d) -> Result<Created<User>, ApiError> {
   if (body->email.find('@') == std::string::npos)
     return std::unexpected(ApiError::unprocessable("user.email", "email must contain '@'"));
   auto conn = db->checkout(d);
@@ -105,7 +105,7 @@ auto create(Json<NewUser> body, Auth auth, State<DbPool> db, Deadline d) -> Resu
 }
 
 [[= http::get("/me")]]
-auto me(Auth auth) -> Json<Auth> { return Json<Auth>{auth}; }
+auto me(Auth<> auth) -> Json<Auth<>> { return Json<Auth<>>{auth}; }
 
 /// Sleeps in small steps, honoring the request deadline and client cancellation.
 [[= http::get("/slow/{ms}")]]
@@ -164,9 +164,9 @@ int main() {
   auto table = std::make_shared<Table>();
   DbPool pool(8, [&] { return Conn{table}; }, {.max_wait = 2s});
 
-  Authenticator auth{[](std::string_view token) -> std::expected<Auth, ApiError> {
+  Authenticator auth{[](std::string_view token) -> std::expected<Auth<>, ApiError> {
     // Demo tokens. A real verifier checks a signature and expiry.
-    if (token == "alice") return Auth{"alice", {"users:write"}};
+    if (token == "alice") return Auth<>{"alice", {"users:write"}};
     if (token == "expired") return std::unexpected(ApiError::unauthorized("auth.expired", "token expired"));
     return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
   }};

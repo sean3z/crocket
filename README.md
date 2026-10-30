@@ -332,7 +332,7 @@ crocket's request guards. They run before the handler, and if one fails, its
 | `Json<T>` | Request body decoded into `T` via reflection (see [JSON](#json)) | 415 `json.unsupported_media_type`, 422 `json.invalid` / `json.validation` / `json.unknown_field` / `json.duplicate_key` / `json.limit_exceeded` / `json.path_mismatch` / `json.read_only` |
 | `Query<T>` | Query string mapped onto the members of `T` | 422 `query.invalid` |
 | `Header<"name", T>` | Header `name` parsed as `T` (default `std::string`; `std::optional<U>` if it may be absent) | 400 `header.missing` / `header.invalid` |
-| `Auth` | Bearer token verified by the managed `Authenticator` | 401 `auth.missing` / `auth.invalid` / verifier's code |
+| `Auth<>` / `Auth<T>` | Bearer token verified by the managed `Authenticator` ([Authentication](#authentication)) | 401 `auth.missing` / `auth.invalid` / `auth.expired` / `auth.not_yet_valid` / `auth.unknown_key` / `auth.claims`, 403 `auth.forbidden` |
 | `State<T>` | The managed `T` | (checked at ignite, never at request time) |
 | `Deadline` | Absolute deadline plus a `std::stop_token` | (none) |
 | `RequestId` | The request's id | (none) |
@@ -375,7 +375,7 @@ struct NewUser { std::string email; std::optional<std::string> name; };
 struct Page    { int page = 1; std::optional<std::string> q; };
 
 [[= http::post("/users")]]
-auto create(Json<NewUser> body, Auth auth) -> Result<Created<User>, ApiError>;
+auto create(Json<NewUser> body, Auth<> auth) -> Result<Created<User>, ApiError>;
 
 [[= http::get("/search")]]
 auto search(Query<Page> p) -> std::string {           // /search?page=2&q=rust
@@ -687,6 +687,113 @@ auto get_user(std::uint64_t id, State<Pool<Conn>> db, Deadline d) -> Result<std:
 }
 ```
 
+### Authentication
+
+Link `crocket::auth` (`target_link_libraries(app PRIVATE crocket::crocket crocket::auth)`)
+and manage one `auth::Jwt`. It is the `Authenticator` the `Auth<>` extractor already
+calls. `#include <crocket/auth.hpp>` is not pulled in by `crocket.hpp`, and a program
+that does not link `crocket::auth` does not get the JWT code. CMake builds it when
+OpenSSL 3 is found (`-DCROCKET_AUTH=AUTO`, the default). `ON` fails configure without
+OpenSSL; `OFF` skips it.
+
+```cpp
+#include <crocket/auth.hpp>
+
+return crocket::build(Config::from_env())
+    .manage(auth::Jwt{
+        .issuer = "https://login.example.com/",
+        .audience = "orders-api",
+        .jwks = "https://login.example.com/.well-known/jwks.json",
+    })
+    .mount("/", reflect_routes<^^api>())
+    .launch();
+```
+
+`auth::Jwt::oidc(issuer, audience)` leaves `jwks` empty and loads
+`{issuer}/.well-known/openid-configuration` instead. The document's `issuer` must
+match the string you configured, character for character, and its `jwks_uri` is what
+gets fetched. `auth::Jwt::from_env()` (or `auth::Jwt::from(cfg.auth)`) reads the
+variables below.
+
+If the issuer or the JWKS URL is down at startup, the process still starts.
+`GET /readyz` stays not ready until the first JWKS document has loaded (for OIDC,
+discovery has to succeed too). A later failed refresh keeps the keys already in
+memory. An unknown `kid` does not wait: the request fails at once with 401
+`auth.unknown_key`, and at most one refresh is started per 30 seconds.
+
+Algorithms are RS256, ES256 and EdDSA (Ed25519 and Ed448). That is the default
+`.algorithms`. `none` and anything HMAC, including HS256, is rejected. `.leeway`
+defaults to 60 seconds, `.roles_claim` to `"roles"`, `.refresh` to 10 minutes,
+`.subject_claim` to `"sub"`.
+
+`Auth<>` is the untyped principal: `subject` and `scopes` (the space-separated
+`scope` claim, or an array of strings). `Auth<T>` adds `T claims`, filled from the
+verified payload the same way `Json<T>` reads a body, including `[[= json::rename]]`.
+A missing or mistyped required field is 401 `auth.claims`: the token is valid, but
+it is not the token this route expects. The payload is verified once per request.
+
+Roles come from `.roles_claim`: a string array, a space-separated string, or a
+dotted path such as `"realm_access.roles"`. On the route, a second annotation needs
+the leading `=` C++ uses for another annotation in the same list. `requires` is a
+keyword, so the AND form is `auth::require`:
+
+```cpp
+struct OrderClaims {
+  std::string tenant;
+  std::vector<std::string> roles;
+  std::optional<std::string> email;
+};
+
+[[= http::get("/orders")]]
+auto list(Auth<OrderClaims> auth) -> Json<std::vector<Order>>;
+
+[[= http::get("/admin/users"), = auth::require("admin")]]
+auto admin_users() -> Json<std::vector<User>>;          // no Auth<> parameter needed
+
+[[= http::get("/staff"), = auth::any_of("admin", "ops")]]
+auto staff() -> std::string;                            // one of these roles
+```
+
+`auth::require("a", "b")` means both roles. `auth::any_of(...)` means one of them.
+A missing or invalid token is 401. A valid token without the role is 403
+`auth.forbidden`. OpenAPI records the bearer scheme, an `x-required-roles` list,
+`x-required-roles-match` of `"all"` or `"any"`, and a 403 response. gRPC maps the
+same errors to `UNAUTHENTICATED` and `PERMISSION_DENIED`.
+
+401 responses for a rejected token carry `WWW-Authenticate: Bearer error="invalid_token"`
+(RFC 6750). A missing token is just `Bearer`. 403 carries `error="insufficient_scope"`.
+The body says what failed in one stable code. Why a signature failed stays in the
+log line's `detail`.
+
+Verified tokens are cached on each worker until `exp` (1,024 entries; `.cache_entries = 0`
+turns that off). There is no introspection, so a token revoked at the issuer stays
+accepted until it expires. `Authorization`, `Proxy-Authorization` and `Cookie` are
+removed from log lines and from error text.
+
+| Env | Config | Default |
+|---|---|---|
+| `CROCKET_AUTH_ISSUER` | `auth.issuer` | unset |
+| `CROCKET_AUTH_AUDIENCE` | `auth.audience` | unset (the `aud` check is skipped) |
+| `CROCKET_AUTH_JWKS` | `auth.jwks` | discovered from the issuer |
+| `CROCKET_AUTH_LEEWAY` | `auth.leeway` | `60s` |
+| `CROCKET_AUTH_ROLES_CLAIM` | `auth.roles_claim` | `roles` |
+| `CROCKET_AUTH_JWKS_REFRESH` | `auth.jwks_refresh` | `10min` |
+
+A failed refresh is counted in `crocket_auth_jwks_refresh_failures_total`.
+
+**Custom verifiers** still work, and they are the only choice when the token is not
+a JWT. Manage one `Authenticator`; managing it and `auth::Jwt` both fails at ignite.
+
+```cpp
+app.manage(Authenticator{[](std::string_view token) -> std::expected<Auth<>, ApiError> {
+  if (token == "alice") return Auth<>{"alice", {"users:write"}};
+  return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
+}});
+```
+
+The function may set `roles` on the `Auth<>` it returns; `auth::require` reads those.
+It does not run a JWKS fetch. Client certificates are not part of this.
+
 ### Controllers
 
 A class can be a route scope. Static members are ordinary handlers. Non-static members
@@ -795,7 +902,7 @@ loaded from cdn.jsdelivr.net) to read and try it. Nothing is written twice:
 | `Query<T>` | One query parameter per member; required unless optional or defaulted |
 | `Header<"x-tenant">`, `Header<"x-page-size", std::optional<int>>` | Header parameters, required unless optional |
 | `Json<T>` | A required `application/json` body; 415 and 422 responses |
-| `Auth` | A bearer security requirement; a 401 response |
+| `Auth<>` | A bearer security requirement; a 401 response |
 | `T`, `Json<T>`, `std::string`, `NoContent`, `Created<T>`, `std::optional<T>`, `Result<T>`, `Cacheable<T>`, `Task<T>` | The success response: status, media type and schema; 404 for an optional, 304 for a cacheable |
 | Any failure | `default`: `application/problem+json` with the shared `Problem` schema |
 
@@ -838,7 +945,7 @@ struct HelloReply { std::string message; };
 namespace greeter {
 
 [[= grpc::rpc]]
-auto say_hello(HelloRequest req, Auth auth) -> Result<HelloReply> {
+auto say_hello(HelloRequest req, Auth<> auth) -> Result<HelloReply> {
   if (req.name.empty()) return std::unexpected(ApiError::bad_request("hello.name", "name is required"));
   return HelloReply{"Hello, " + req.name};
 }
@@ -864,7 +971,7 @@ crocket::build()
   enums, nested structs, and `std::optional`, `std::vector` and `std::map` of those.
   Unknown fields are skipped when decoding.
 - **Parameters:** at most one request message (none means `google.protobuf.Empty`), plus
-  any extractor that does not read the body: `Auth`, `State<T>`, `Deadline`, `Header<...>`
+  any extractor that does not read the body: `Auth<>`, `State<T>`, `Deadline`, `Header<...>`
   and so on.
 - **Returns:** a message, `Result<T>`, `std::optional<T>` (empty is `NOT_FOUND`), `void`
   (`Empty`), or a `Task` of one of those. Only unary calls are supported: no streaming.
@@ -1105,6 +1212,12 @@ booleans are `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`; lists are comma-
 | `CROCKET_LOG_SAMPLE` | `log.sample`: the share of successful requests Logger writes a line for (errors and slow requests are always written) | `1` (every request) |
 | `CROCKET_LOG_SLOW` | `log.slow`: with a sample below 1, requests at least this long are written anyway; `0` turns that off | `500ms` |
 | `CROCKET_LOG_BUFFER` | `log.buffer`: lines waiting for the log writer before new ones are dropped (or wait, with `when_full = block`) | `10000` |
+| `CROCKET_AUTH_ISSUER` | `auth.issuer`, for [`crocket::auth`](#authentication) | unset |
+| `CROCKET_AUTH_AUDIENCE` | `auth.audience` | unset (no `aud` check) |
+| `CROCKET_AUTH_JWKS` | `auth.jwks` | discovered from the issuer |
+| `CROCKET_AUTH_LEEWAY` | `auth.leeway` | `60s` |
+| `CROCKET_AUTH_ROLES_CLAIM` | `auth.roles_claim` | `roles` |
+| `CROCKET_AUTH_JWKS_REFRESH` | `auth.jwks_refresh` | `10min` |
 | `CROCKET_DATABASE_URL` | `database.url`, for [`crocket::db`](#databases-crocketdb) | unset (libpq's `PG*` variables) |
 | `CROCKET_DATABASE_POOL_SIZE` | `database.pool_size` | `8` |
 | `CROCKET_DATABASE_POOL_WAIT` | `database.pool_wait` | `5s` |
@@ -1498,7 +1611,7 @@ code it calls, in a fairing, or outside any request.
 
 ```cpp
 [[= http::post("/users")]]
-auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>> {
+auto create(Json<NewUser> body, Auth<> auth, State<Db> db) -> Result<Created<User>> {
   auto user = db->insert(*body);
   log::info("created user {user_id} on plan {plan}", user.id, body->plan);
   return Created<User>{user, std::format("/users/{}", user.id)};

@@ -61,6 +61,10 @@ struct Options {
   std::function<void(std::string_view line)> sink = {};
 };
 
+/// `text` with this request's Authorization, Proxy-Authorization and Cookie
+/// values removed. Credentials never belong in a log line or an error body.
+std::string without_credentials(const crocket::Request* rq, std::string text);
+
 namespace detail {
 
 class Hub;

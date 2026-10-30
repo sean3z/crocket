@@ -788,6 +788,29 @@ removed from log lines and from error text.
 
 A failed refresh is counted in `crocket_auth_jwks_refresh_failures_total`.
 
+**Try it.** `examples/auth.cpp` builds as `crocket_auth_example` when `crocket::auth`
+is on. `GET /me` takes `Auth<>`, `GET /profile` takes `Auth<UserClaims>`, `GET /admin`
+requires the `admin` role, and `GET /staff` accepts `admin` or `ops`.
+
+```bash
+CROCKET_AUTH_ISSUER=https://login.example/ \
+CROCKET_AUTH_AUDIENCE=orders-api \
+CROCKET_AUTH_JWKS=https://login.example/jwks.json \
+./build/crocket_auth_example
+curl -s localhost:8000/me -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8000/admin -H "Authorization: Bearer $TOKEN"   # role admin
+curl -s localhost:8000/staff -H "Authorization: Bearer $TOKEN"   # admin or ops
+```
+
+Leave `CROCKET_AUTH_JWKS` unset and the issuer is used for OIDC discovery. The
+process still starts if that fetch fails; `GET /readyz` stays not ready until the
+keys load. HS256 stays off unless you also set `CROCKET_AUTH_SECRET`.
+
+`./dev bench auth` (or `./build/crocket_bench_auth`) times `me(Auth<>)` in process:
+no `Auth` parameter, a cache hit, and a cache miss (`cache_entries = 0`), for
+RS256, ES256 and EdDSA. Keys are generated in the process, so nothing waits on
+the network.
+
 **Custom verifiers** still work, and they are the only choice when the token is not
 a JWT. Manage one `Authenticator`; managing it and `auth::Jwt` both fails at ignite.
 
@@ -1863,7 +1886,7 @@ see [docs/ENGINE.md](docs/ENGINE.md#updating-h2o). An application that links wit
 
 Options:
 
-- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello` and `crocket_serve`.
+- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, and `crocket_auth_example` when `crocket::auth` is on.
 - `CROCKET_BUILD_TESTS` builds the tests.
 
 Both are ON when crocket is the top-level project and OFF when it is a dependency.
@@ -1906,6 +1929,7 @@ curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
 ./dev bench load router wait     # chosen load scenarios
 ./dev bench --vs-rocket load     # the same scenarios against Rocket 0.5 too (needs cargo)
 ./dev bench --vs-h2o load        # and against h2o alone: what crocket adds per request
+./dev bench auth                 # me(Auth<>): off, cache hit, cache miss
 ```
 
 `load` runs [h2load](https://nghttp2.org/documentation/h2load-howto.html) against
@@ -1924,10 +1948,12 @@ request (`server_us_per_req`: user plus kernel, all threads):
 | `plaintext_async`, `json_async`, `orders_async`, `router_async` | the same under `/async` | The same handlers as `Task<T>`, which run on the event loop with no handoff |
 
 `micro` ([bench/micro.cpp](bench/micro.cpp)) times routing, the in-process request
-pipeline and JSON, and counts heap allocations per operation. Results are saved in
-`bench/results/`, which git ignores: numbers compare only on the same machine, with the
-same load on it. The load generator shares the machine with the server, so treat
-differences of a few percent as noise.
+pipeline and JSON, and counts heap allocations per operation. `./dev bench auth`
+([bench/auth.cpp](bench/auth.cpp)) is separate: it times `me(Auth<>)` with no auth
+parameter, a verified-token cache hit, and a cache miss, for RS256, ES256 and
+EdDSA. Results are saved in `bench/results/`, which git ignores: numbers compare
+only on the same machine, with the same load on it. The load generator shares the
+machine with the server, so treat differences of a few percent as noise.
 
 When h2load itself runs out of CPU, requests per second measures the client, not the
 server, and `./dev bench` warns: `h2load's threads were 98% busy, so req/s is the client's

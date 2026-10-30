@@ -18,7 +18,9 @@ from outside the project, for example
   `auth::any_of`). Defaults are RS256, ES256 and EdDSA. HS256 (and HS384/HS512)
   verify only with an explicit `.secret` / `CROCKET_AUTH_SECRET`, and are not in
   the default algorithm list. JWKS refresh does not block a request; `/readyz`
-  stays not ready until the first key set loads. See the README
+  stays not ready until the first key set loads. `examples/auth.cpp` is
+  `crocket_auth_example` when auth is on, and `./dev bench auth` times
+  `me(Auth<>)`. See the README
   ([#45](https://github.com/sean3z/crocket/pull/45))
 
 ### Security

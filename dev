@@ -33,10 +33,12 @@ ${B}./dev${R} <command> [args]
   check                     Release tree (build/, -O2) plus the full ctest: run
                             this before calling a change done
   clean [dev|release|all]   Delete build trees (default: dev)
-  bench [options] [load|micro] [scenario...]
+  bench [options] [load|micro|auth] [scenario...]
                             Benchmarks on the release tree: load (h2load against
                             crocket_bench over http/1.1 and h2c) and micro (in-process
-                            timings and allocations). Both by default. Options:
+                            timings and allocations). Both by default. `auth` is
+                            separate: me(Auth<>) with auth off, a cache hit, and a
+                            cache miss (needs crocket::auth). Options:
                               --save NAME     keep the results as bench/results/NAME.tsv
                               --compare NAME  show the change from NAME; exits 1 if
                                               anything is more than 10% worse
@@ -402,7 +404,7 @@ cmd_bench() {
       --vs-h2o) BENCH_VS_H2O=1; shift ;;
       --realistic) BENCH_REALISTIC=1; shift ;;
       --threads) BENCH_THREADS=$2; shift 2 ;;
-      load|micro) kinds+=("$1"); shift ;;
+      load|micro|auth) kinds+=("$1"); shift ;;
       -*) die "unknown option $1" ;;
       *) scenarios+=("$1"); shift ;;
     esac
@@ -411,13 +413,18 @@ cmd_bench() {
   if [[ -n $compare && ! -f $ROOT/bench/results/$compare.tsv ]]; then die "no bench/results/$compare.tsv; make one with --save $compare"; fi
   [[ -n $BENCH_VS_ROCKET && " ${kinds[*]} " != *" load "* ]] && die "--vs-rocket compares load runs; drop 'micro'"
   [[ -n $BENCH_VS_H2O && " ${kinds[*]} " != *" load "* ]] && die "--vs-h2o compares load runs; drop 'micro'"
-  build release crocket_bench crocket_microbench ${BENCH_VS_H2O:+crocket_bench_h2o}
+  local targets=()
+  [[ " ${kinds[*]} " == *" load "* || " ${kinds[*]} " == *" micro "* ]] && targets+=(crocket_bench crocket_microbench)
+  [[ -n $BENCH_VS_H2O && " ${kinds[*]} " == *" load "* ]] && targets+=(crocket_bench_h2o)
+  [[ " ${kinds[*]} " == *" auth "* ]] && targets+=(crocket_bench_auth)
+  build release "${targets[@]}"
   [[ -n $BENCH_VS_ROCKET ]] && bench_build_rocket
   local out; out=$(mktemp)
   local k; for k in "${kinds[@]}"; do
     case $k in
       micro) say "micro: in-process timings and allocations"; "$(tree release)/crocket_microbench" >>"$out" ;;
       load) bench_load "${scenarios[@]}" >>"$out" ;;
+      auth) say "auth: me(Auth<>), off / cache hit / cache miss"; "$(tree release)/crocket_bench_auth" >>"$out" ;;
     esac
   done
   local rc=0

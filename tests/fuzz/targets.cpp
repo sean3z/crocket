@@ -6,6 +6,9 @@
 #include "fuzz.hpp"
 
 #include <crocket/crocket.hpp>
+#ifdef CROCKET_HAS_AUTH
+#include <crocket/auth.hpp>
+#endif
 
 #include "router.hpp"
 
@@ -255,7 +258,7 @@ auto put(std::int64_t id, Header<"x-tenant"> tenant, Header<"x-page-size", std::
   return std::to_string(id) + std::string(tenant.value) + std::to_string(size.value.value_or(0));
 }
 [[= http::get("/me")]]
-auto me(Auth a) -> std::string { return a.subject; }
+auto me(Auth<> a) -> std::string { return a.subject; }
 [[= http::get("/doc")]]
 auto doc() -> Cacheable<std::string> {
   return {std::string(1000, 'x'), {.last_modified = std::chrono::system_clock::time_point(std::chrono::seconds(1'700'000'000)),
@@ -281,8 +284,8 @@ void setup() {
   cfg.proxy.allowed_hosts = {"example.com", "*.example.org", "localhost"};
   cfg.limits.max_body_bytes = 64 << 10;
   g_app = std::make_unique<Crocket>(cfg);
-  g_app->manage(Authenticator{[](std::string_view token) -> std::expected<Auth, ApiError> {
-    if (token == "alice") return Auth{"alice", {}};
+  g_app->manage(Authenticator{[](std::string_view token) -> std::expected<Auth<>, ApiError> {
+    if (token == "alice") return Auth<>{"alice", {}};
     return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
   }});
   g_app->attach(Logger{})
@@ -363,3 +366,37 @@ fuzz::Register request_target{{
 }};
 
 }  // namespace fuzzapp
+
+#ifdef CROCKET_HAS_AUTH
+namespace {
+void jwt_fuzz(std::string_view in) {
+  // An empty key set: every input is rejected, and the rejection must not echo it.
+  static const auth::Jwt spec = [] {
+    auth::Jwt j;
+    j.issuer = "https://issuer.example/";
+    j.audience = "api";
+    j.jwks_json = R"({"keys":[]})";
+    return j;
+  }();
+  static const Authenticator verifier{spec};
+  std::string leaked;
+  try {
+    auto r = verifier.verify(in);
+    if (!r) leaked = std::string(r.error().message) + "\n" + r.error().detail;
+    else leaked = r->subject;
+  } catch (const std::exception& e) {
+    fuzz::fail(std::string("jwt verifier threw: ") + e.what());
+  }
+  if (in.size() >= 8 && leaked.find(in) != std::string::npos)
+    fuzz::fail("the verifier echoed the token");
+  constexpr std::string_view sentinel = "SENTINELcrocketauth9f3a7c";
+  if (in.find(sentinel) != std::string_view::npos && leaked.find(sentinel) != std::string::npos)
+    fuzz::fail("the verifier echoed a token sentinel");
+}
+fuzz::Register jwt_target{{
+    .name = "jwt",
+    .dict = {"eyJ", ".", "alg", "none", "HS256", "RS256", "ES256", "EdDSA", "{\"keys\":[]}"},
+    .run = jwt_fuzz,
+}};
+}  // namespace
+#endif

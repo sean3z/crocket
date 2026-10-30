@@ -198,10 +198,19 @@ Outcome invoke_impl(Request& rq, Response& rs, type_list<A...>, std::index_seque
   return out;
 }
 
-template <auto Fn, const Binding* B>
+template <std::meta::info Fn, const Binding* B>
 Outcome invoke(Request& rq, Response& rs) {
-  using Traits = fn_traits<decltype(Fn)>;
-  return invoke_impl<Fn, B>(rq, rs, typename Traits::args{}, std::make_index_sequence<Traits::arity>{});
+  if constexpr (std::meta::annotations_of_with_type(Fn, ^^auth::RoleCheck).size() > 0) {
+    if (auto err = role_gate<Fn>(rq)) {
+      Outcome out;
+      out.kind = Outcome::Failed;
+      out.failure_kind = "auth";
+      out.error = std::move(*err);
+      return out;
+    }
+  }
+  using Traits = fn_traits<decltype(&[:Fn:])>;
+  return invoke_impl<&[:Fn:], B>(rq, rs, typename Traits::args{}, std::make_index_sequence<Traits::arity>{});
 }
 
 }  // namespace crocket::detail

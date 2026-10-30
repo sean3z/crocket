@@ -82,7 +82,7 @@ auto hello(std::string_view name, std::uint8_t age) -> std::string {
 auto scale(double f) -> std::string { return std::format("{}", f * 2); }
 
 [[= http::post("/users")]]
-auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>, ApiError> {
+auto create(Json<NewUser> body, Auth<> auth, State<Db> db) -> Result<Created<User>, ApiError> {
   ++g_create_calls;
   if (body->email.find('@') == std::string::npos)
     return std::unexpected(ApiError::unprocessable("user.email", "email must contain '@'"));
@@ -91,7 +91,7 @@ auto create(Json<NewUser> body, Auth auth, State<Db> db) -> Result<Created<User>
 }
 
 [[= http::get("/me")]]
-auto me(Auth auth) -> Json<User> {
+auto me(Auth<> auth) -> Json<User> {
   return Json<User>{{0, auth.subject + "@example.com", auth.subject}};
 }
 
@@ -173,7 +173,7 @@ auto framed(Response& rs) -> std::string {
 auto whoami(Client client) -> std::string { return client.addr + " " + std::string(client.scheme); }
 
 [[= http::del("/users/{id}")]]
-auto remove(std::uint64_t id, Auth auth) -> Result<void> {
+auto remove(std::uint64_t id, Auth<> auth) -> Result<void> {
   if (!auth.has_scope("admin")) return std::unexpected(ApiError::forbidden("auth.scope", "admin scope required"));
   (void)id;
   return {};
@@ -241,9 +241,9 @@ auto b(int b) -> std::string { return std::to_string(b); }
 // ---- helpers -------------------------------------------------------------------
 
 Authenticator test_auth() {
-  return Authenticator{[](std::string_view token) -> std::expected<Auth, ApiError> {
-    if (token == "alice") return Auth{"alice", {}};
-    if (token == "root") return Auth{"root", {"admin"}};
+  return Authenticator{[](std::string_view token) -> std::expected<Auth<>, ApiError> {
+    if (token == "alice") return Auth<>{"alice", {}};
+    if (token == "root") return Auth<>{"root", {"admin"}};
     if (token == "old") return std::unexpected(ApiError::unauthorized("auth.expired", "token expired"));
     return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
   }};
@@ -347,7 +347,7 @@ int main() {
     CHECK_EQ(pct.body, std::string("Hello, 36 year old named Ada L!"));
   }
 
-  section("2. create(Json<NewUser>, Auth, State<Db>)");
+  section("2. create(Json<NewUser>, Auth<>, State<Db>)");
   {
     int before = g_create_calls;
     auto missing_body = client.post("/users").bearer("alice").dispatch();
@@ -384,7 +384,7 @@ int main() {
     CHECK_EQ(domain_err.error_code, std::string_view("user.email"));
   }
 
-  section("3. me(Auth): no body extractor");
+  section("3. me(Auth<>): no body extractor");
   {
     auto r = client.get("/me").bearer("alice").body("ignored body").dispatch();
     CHECK_EQ(r.status, 200);
@@ -415,7 +415,7 @@ int main() {
     Crocket fixed;
     fixed.manage(Db{}).mount("/", reflect_routes<^^other>());
     CHECK(fixed.ignite().has_value());
-    // Auth needs a managed Authenticator, checked the same way.
+    // Auth<> needs a managed Authenticator, checked the same way.
     Crocket no_auth;
     no_auth.manage(Db{}).manage(Greeter{"x"}).mount("/", reflect_routes<^^api>());
     auto ig2 = no_auth.ignite();

@@ -174,6 +174,19 @@ struct Request {
     return std::nullopt;
   }
 
+  /// Verified bearer material for this request. The first Auth extractor fills
+  /// it; later Auth parameters reuse it instead of verifying again. Handlers
+  /// read subject, scopes and claims from Auth, not from here.
+  struct BearerMaterial {
+    std::uint64_t fingerprint = 0;  // 0: not verified
+    std::size_t token_size = 0;
+    std::string claims_json;  // verified payload object; empty for a custom verifier
+    std::string subject;
+    std::vector<std::string> scopes;
+    std::vector<std::string> roles;
+  };
+  BearerMaterial bearer_material;
+
   // Framework-internal: managed state lookup for State<T>.
   const detail::StateRegistry* state_registry = nullptr;
   detail::Exchange* exchange = nullptr;  // set while the pipeline runs

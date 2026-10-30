@@ -79,7 +79,7 @@ auto list_orders(Query<Page> p) -> Json<std::vector<Order>> { return Json{std::v
 auto get_order(std::uint64_t id) -> std::optional<Json<Order>> { return std::nullopt; }
 
 [[= http::post("/orders")]]
-auto create_order(Json<Order> o, Auth who) -> Created<Order> { return {o.value}; }
+auto create_order(Json<Order> o, Auth<> who) -> Created<Order> { return {o.value}; }
 
 [[= http::put("/orders/{id}")]]
 auto replace_order(std::uint64_t id, Json<Order> o) -> Result<Json<Order>> { return Json{o.value}; }
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
   Config cfg;
   cfg.log.sink = [](std::string_view) {};
   Crocket app{cfg};
-  app.manage(Authenticator{[](std::string_view) -> std::expected<Auth, ApiError> { return Auth{"x", {}}; }})
+  app.manage(Authenticator{[](std::string_view) -> std::expected<Auth<>, ApiError> { return Auth<>{"x", {}}; }})
       .mount("/api", reflect_routes<^^shop>())
       .mount("/billing", reflect_routes<^^billing>())
       .mount("demo", reflect_routes<^^greeter>(), Mode::Grpc)

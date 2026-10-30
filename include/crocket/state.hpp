@@ -35,6 +35,15 @@ struct StateDep {
 template <class T>
 constexpr StateDep state_dep() { return {type_key<T>(), type_display_name<std::remove_cvref_t<T>>()}; }
 
+/// What manage() stores. A specialization may name another type, so one value
+/// can also satisfy an existing state dependency (auth::Jwt is an Authenticator).
+template <class T>
+struct manage_as {
+  using type = std::remove_cvref_t<T>;
+};
+template <class T>
+using manage_as_t = typename manage_as<std::remove_cvref_t<T>>::type;
+
 class StateRegistry {
  public:
   StateRegistry() = default;

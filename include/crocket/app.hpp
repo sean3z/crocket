@@ -97,6 +97,22 @@ struct ProxyConfig {
   std::vector<std::string> allowed_hosts = {};
 };
 
+/// JWT / OIDC settings for the optional crocket::auth component.
+/// Core crocket never reads them; auth::Jwt::from(cfg.auth) does.
+/// mTLS client certificates are not part of this (a later change).
+struct AuthConfig {
+  std::string issuer;     // CROCKET_AUTH_ISSUER; exact `iss` match
+  std::string audience;   // CROCKET_AUTH_AUDIENCE; empty skips the aud check
+  std::string jwks;       // CROCKET_AUTH_JWKS; empty: discover from the issuer
+  /// Shared secret for HMAC. Empty rejects every HS* algorithm. `Jwt::from`
+  /// adds HS256 to `.algorithms` when this is set; the struct's default list
+  /// does not include it.
+  std::string secret;  // CROCKET_AUTH_SECRET
+  std::chrono::milliseconds leeway{60'000};
+  std::string roles_claim = "roles";
+  std::chrono::milliseconds jwks_refresh{600'000};
+};
+
 /// The database crocket::db connects to (the optional crocket::db component).
 /// Core crocket never reads it; db::Pool(cfg.database) does.
 struct DatabaseConfig {
@@ -116,6 +132,7 @@ struct Config {
   LimitsConfig limits = {};
   TimeoutsConfig timeouts = {};
   ProxyConfig proxy = {};
+  AuthConfig auth = {};
   DatabaseConfig database = {};
   bool debug_routes = false;  // expose GET /__routes
   json::ReadOptions json = {};  // limits for Json<T> bodies
@@ -455,8 +472,29 @@ class Crocket {
   /// If T has `bool ready() const`, GET /readyz calls it.
   template <class T>
   Crocket& manage(T value) & {
-    auto name = detail::type_display_name<T>();
-    if (!core_->state.put<T>(std::move(value)))
+    using Raw = std::remove_cvref_t<T>;
+    using Stored = detail::manage_as_t<Raw>;
+    auto name = detail::type_display_name<Raw>();
+    // A type that is managed as another (auth::Jwt as Authenticator) is stored
+    // under both keys, so the existing Auth extractor and the new type's ready()
+    // both see it. Managing either one twice, or both, fails at ignite.
+    if constexpr (!std::is_same_v<Stored, Raw>) {
+      auto stored_name = detail::type_display_name<Stored>();
+      if (core_->state.template get<Raw>())
+        core_->build_errors.push_back(std::string("manage<") + name + ">() called twice");
+      else if (core_->state.template get<Stored>())
+        core_->build_errors.push_back(std::string("manage<") + name + ">() conflicts with an already managed " +
+                                      stored_name);
+      else {
+        core_->state.template put<Stored>(Stored(value));
+        core_->state.template put<Raw>(std::move(value));
+        if constexpr (requires(const Raw& t) { { t.ready() } -> std::convertible_to<bool>; })
+          core_->ready_checks.push_back({name, detail::type_key<Raw>(),
+                                         [](void* p) -> bool { return static_cast<const Raw*>(p)->ready(); }});
+      }
+      return *this;
+    }
+    if (!core_->state.put<Raw>(std::move(value)))
       core_->build_errors.push_back(std::string("manage<") + name + ">() called twice");
     else {
       if constexpr (requires(const T& t) { { t.ready() } -> std::convertible_to<bool>; })

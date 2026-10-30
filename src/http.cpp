@@ -11,7 +11,12 @@
 
 namespace crocket {
 
-void write_error(const ApiError& e, const Request& rq, Response& rs) {
+void write_error(const ApiError& in, const Request& rq, Response& rs) {
+  // A token or cookie that a verifier or a thrown exception copied into the
+  // message must not reach the client, even in the dev profile's debug field.
+  ApiError e = in;
+  e.message = log::without_credentials(&rq, std::move(e.message));
+  e.detail = log::without_credentials(&rq, std::move(e.detail));
   if (grpc::is_grpc_request(rq)) {
     grpc::detail::write_status(e, rq, rs);
     return;
@@ -20,8 +25,15 @@ void write_error(const ApiError& e, const Request& rq, Response& rs) {
   rs.error_code = e.code;
   rs.error_detail = e.detail;
   rs.set_content_type("application/problem+json");
-  if (e.status == 401 && !rs.headers.contains("www-authenticate"))
-    rs.headers.set("www-authenticate", "Bearer");
+  if (e.status == 401 && !rs.headers.contains("www-authenticate")) {
+    // RFC 6750: a missing token is a challenge; a rejected one names invalid_token.
+    // auth.cert_missing is a client certificate, not a bearer token.
+    bool invalid = e.code.size() >= 5 && e.code.substr(0, 5) == "auth." && e.code != "auth.missing" &&
+                   e.code != "auth.cert_missing";
+    rs.headers.set("www-authenticate", invalid ? "Bearer error=\"invalid_token\"" : "Bearer");
+  } else if (e.status == 403 && e.code == "auth.forbidden" && !rs.headers.contains("www-authenticate")) {
+    rs.headers.set("www-authenticate", "Bearer error=\"insufficient_scope\"");
+  }
   // RFC 9457. "detail" is the client message; ApiError::detail, which is for
   // logs, appears as "debug" in the dev profile only.
   auto& b = rs.body;

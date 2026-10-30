@@ -84,7 +84,7 @@ auto say_hello(HelloRequest req) -> HelloReply {
 }
 
 [[= grpc::rpc]]
-auto whoami(Auth auth) -> HelloReply { return {auth.subject}; }
+auto whoami(Auth<> auth) -> HelloReply { return {auth.subject}; }
 
 [[= grpc::rpc]]
 auto find(HelloRequest req) -> std::optional<HelloReply> {
@@ -120,8 +120,8 @@ auto page() -> std::string { return "web"; }
 }  // namespace web
 
 static Authenticator test_auth() {
-  return Authenticator{[](std::string_view token) -> std::expected<Auth, ApiError> {
-    if (token == "alice") return Auth{"alice"};
+  return Authenticator{[](std::string_view token) -> std::expected<Auth<>, ApiError> {
+    if (token == "alice") return Auth<>{"alice"};
     return std::unexpected(ApiError::unauthorized("auth.invalid", "unknown token"));
   }};
 }

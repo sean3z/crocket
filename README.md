@@ -719,10 +719,9 @@ If the issuer or the JWKS URL is down at startup, the process still starts.
 `GET /readyz` stays not ready until the first JWKS document has loaded (for OIDC,
 discovery has to succeed too). A later failed refresh keeps the keys already in
 memory. An unknown `kid` does not wait: the request fails at once with 401
-`auth.unknown_key`, and at most one refresh is started per 30 seconds. The JWKS
-and discovery GET is a hand-rolled HTTPS client in `crocket_auth` until
-`crocket::client` lands (Roadmap #37 / RESILIENCE, on `h2o_httpclient`; auth
-should not call h2o directly).
+`auth.unknown_key`, and at most one refresh is started per 30 seconds. The JWKS and discovery GET is still a hand-rolled HTTPS client inside
+`crocket_auth`. Pointing that fetch at [`crocket::client`](#outbound-http-crocketclient)
+is a follow-up; auth does not call h2o itself.
 
 Algorithms are RS256, ES256 and EdDSA (Ed25519 and Ed448). That is the default
 `.algorithms`. `none` is rejected. HS256, HS384 and HS512 stay off that list:
@@ -1372,6 +1371,135 @@ Each query is timed with two `steady_clock` reads and three relaxed atomic adds,
 about 70 ns, against a database round trip of tens of microseconds. Routes that never
 take `Db&` pay nothing. See `examples/heroes.cpp` for a full CRUD API.
 
+## Outbound HTTP: `crocket::client`
+
+Link `crocket::client` (`target_link_libraries(app PRIVATE crocket::client)`).
+`#include <crocket/client.hpp>` is not pulled in by `crocket.hpp`, and a program
+that does not link `crocket::client` does not get the client. CMake builds it when
+OpenSSL 3 is found (`-DCROCKET_CLIENT=AUTO`, the default). `ON` fails configure
+without OpenSSL; `OFF` skips it. `crocket_hello` does not link it. The engine has a null check for the
+client's loop hooks; in a stripped build that check fits in the existing
+padding, so the hello binary is the same size.
+
+The transport is h2o's HTTP client, on one of the server's event loops (the same
+threads that read and write connections). There is no second network stack and no
+blocking call: every method returns `Task`. A process that calls out before the
+server is listening, or with no server at all, gets one loop of its own.
+
+```cpp
+#include <crocket/client.hpp>
+
+using namespace std::chrono_literals;
+
+return crocket::build(cfg)
+    .manage(http::Client{{
+        .base = "https://billing.internal",
+        .timeout = 2s,
+        .pool = 64,                              // connections to that host
+        .retry = retry::idempotent(3),           // default
+        .breaker = breaker::consecutive(5, 30s), // default
+    }})
+    .mount("/", reflect_routes<^^api>())
+    .launch();
+```
+
+`base` is an absolute `http` or `https` URL. A path on it is a prefix:
+`get("invoices/3")` joins it, `get("/invoices/3")` replaces it. `name` is the
+Prometheus label (`upstream`). Leave it empty and the host is used, never the URL.
+`pool` defaults to 64. `timeout` defaults to 2 seconds and `connect_timeout` to
+500 ms. TLS verifies the peer against the default trust store unless
+`verify_tls` is false; `ca_file` replaces that store. Response bodies are kept
+up to `max_body` (1 MiB).
+
+```cpp
+[[= http::get("/heroes/{id}/invoice")]]
+auto invoice(std::string id, State<http::Client> billing) -> Task<std::expected<Json<Invoice>, ApiError>> {
+  auto r = co_await billing->get("/invoices/" + id);
+  if (!r) co_return std::unexpected(r.error());          // timeout, connect, or open circuit
+  if (r->status != 200)
+    co_return std::unexpected(ApiError{502, "upstream.status", "billing rejected the invoice", {}});
+  auto parsed = http::json<Invoice>(*r);
+  if (!parsed) co_return std::unexpected(parsed.error());
+  co_return Json<Invoice>{std::move(*parsed)};
+}
+```
+
+`co_await` yields `std::expected<Response, ApiError>`. An HTTP response, including
+a 4xx or 5xx, is the success side: you still have the status and the body.
+`http::json<T>` decodes that body the same way `Json<T>` reads a request, and
+does not look at the status. Transport failures are the error side:
+
+| Code | Status | When |
+|---|---|---|
+| `upstream.timeout` | 504 | The call's budget ran out, or the inbound request was canceled |
+| `upstream.unavailable` | 503 | Connect, DNS, or a response body over `max_body` |
+| `upstream.circuit_open` | 503 | The breaker is open; the call was not sent |
+
+Returning that error from a handler sends it as-is.
+
+**Deadline.** Inside a request the budget is `min(client timeout, Deadline.remaining() - 25ms)`.
+The margin is so the handler can still write its response. A per-call `.timeout`
+can only shorten that. The call stops when the request's `stop_token` fires
+(the client went away, or the deadline did).
+
+**Request id.** If the inbound request carried `x-request-id`, the upstream call
+sends that same value. An id crocket generated itself is not sent, and
+`traceparent` is not sent either. Set `propagate_request_id = false` on the
+client to send neither.
+
+**Retries** are on. `retry::idempotent(3)` is three more tries after the first
+(four in all). Only GET, HEAD, PUT, DELETE, and OPTIONS are retried, plus any
+call that sets `Idempotency-Key` (the `.idempotency_key` field, or the header).
+POST and PATCH are not retried otherwise. The retry happens on a connect
+failure, on 502, 503, or 504, or on 429. A 429 or 503 with `Retry-After` waits
+that long instead of the backoff; the wait is full-jitter exponential otherwise
+(20 ms, doubling, capped at 1 second) via `sleep_for`, so the worker is free and
+cancellation still wins. Nothing sleeps past the deadline.
+
+A **retry budget** keeps retries from multiplying. Over the last 10 seconds,
+retries stay under 20% of calls to that upstream (`retry::Policy::budget`), with
+at least 3 retries allowed so a quiet upstream can still retry
+(`budget_min`). Past the budget, the call returns what it already has.
+
+**Circuit breaker**, one per client, is on. `breaker::consecutive(5, 30s)` opens
+after 5 failures in a row (connect errors, timeouts, 500, 502, 503, 504 — not
+429, which means the upstream is up). While it is open, calls fail immediately
+with `upstream.circuit_open`. After 30 seconds one probe goes through. Success
+closes it. Another failure opens it again for twice as long, up to 5 minutes.
+`breaker::rate(0.5, 20, 30s)` opens when half of the last 20 calls failed,
+once 10 of them have been seen.
+
+Turn either off for one call. These are aggregates, so designated initializers
+are the opt-out:
+
+```cpp
+auto r = co_await billing->post("/charges", {.body = "{}", .retry = retry::none});
+auto raw = co_await billing->get("/once", {.retry = retry::none, .breaker = breaker::none});
+```
+
+`retry::none` is a single try. `breaker::none` neither checks nor updates the
+breaker. Any other per-call breaker value still uses the client's thresholds.
+
+500 does not retry (it is the upstream's answer) but it does count toward the
+breaker. 502, 503, and 504 do both.
+
+**Metrics**, on the `Metrics` fairing, labeled by the client's `name`:
+
+- `crocket_client_requests_total{upstream,method,status}` — one sample per call,
+  after retries. `status` is the HTTP code, or `timeout`, `error`, `circuit_open`.
+- `crocket_client_request_duration_seconds{upstream,method}` — the whole call.
+- `crocket_client_breaker_state{upstream}` — 0 closed, 1 half-open, 2 open.
+
+**Try it.** `examples/client.cpp` builds as `crocket_client_example`. It reads
+`CROCKET_UPSTREAM` (default `http://127.0.0.1:9`, which refuses the connection).
+
+```bash
+CROCKET_UPSTREAM=http://127.0.0.1:9 ./build/crocket_client_example
+```
+
+`./dev bench client` times one localhost GET. gRPC outbound is not in this
+client; that waits for 1.x.
+
 ## Production features
 
 The pieces you turn on to run crocket in production: fairings (including `Shield` security headers and CORS), health checks, metrics, deadlines, and how errors are reported and logged.
@@ -1525,6 +1653,9 @@ The `Metrics` fairing serves Prometheus text at `GET /metrics`, labeled by route
   - `crocket_saturation`, one 0..1 gauge combining the above, for HPA or KEDA.
   - With `crocket::db`: `crocket_db_pool_size` and `crocket_db_pool_wait_seconds` (see
     [Databases](#databases-crocketdb)).
+  - With `crocket::client`: `crocket_client_requests_total`,
+    `crocket_client_request_duration_seconds`, and `crocket_client_breaker_state`
+    (see [Outbound HTTP](#outbound-http-crocketclient)).
 
   Each worker job adds two `steady_clock` reads and a few relaxed stores to memory only
   that worker writes; each request handed to a worker adds one more clock read. No new
@@ -1889,7 +2020,8 @@ see [docs/ENGINE.md](docs/ENGINE.md#updating-h2o). An application that links wit
 
 Options:
 
-- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, and `crocket_auth_example` when `crocket::auth` is on.
+- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, `crocket_auth_example` when `crocket::auth` is on, and `crocket_client_example` when `crocket::client` is on.
+- `CROCKET_CLIENT` is `AUTO` (build the outbound HTTP client when OpenSSL 3 is present), `ON`, or `OFF`. `CROCKET_AUTH` is the same idea for JWT.
 - `CROCKET_BUILD_TESTS` builds the tests.
 
 Both are ON when crocket is the top-level project and OFF when it is a dependency.
@@ -1933,6 +2065,7 @@ curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
 ./dev bench --vs-rocket load     # the same scenarios against Rocket 0.5 too (needs cargo)
 ./dev bench --vs-h2o load        # and against h2o alone: what crocket adds per request
 ./dev bench auth                 # me(Auth<>): off, cache hit, cache miss
+./dev bench client               # one localhost GET through http::Client
 ```
 
 `load` runs [h2load](https://nghttp2.org/documentation/h2load-howto.html) against
@@ -2028,6 +2161,7 @@ vulnerability: report it as [SECURITY.md](SECURITY.md) describes.
 | `grpc` | Protobuf encoding byte for byte, decode errors, unary calls, status mapping, the generated `.proto` and mount validation, in-process. |
 | `openapi` | The OpenAPI document for an API using every parameter, body and return type, checked piece by piece (schemas for every member kind and annotation, variants, recursion, name clashes, every `$ref` resolving), and served by the `OpenApi` fairing with its docs page. |
 | `db` | `crocket::db` against a real Postgres: table names, the generated SQL, insert, find, update, erase, every filter, the escape hatch, 409 on a unique violation, a `table_name` override, and `Db&` in handlers with its log fields, metrics and `/readyz`. Needs `CROCKET_TEST_DATABASE_URL`; skipped without it. |
+| `client` | `crocket::client`: retry and breaker decisions, designated-initializer call shapes, a localhost GET/POST (retries, `Idempotency-Key`, `Retry-After`, budget, circuit open, timeout), deadline and `x-request-id` propagation from a handler, and the client metrics. `client_not_in_core` checks those strings are absent from `crocket_hello`. |
 | `fuzz.*` | Each [fuzz target](#fuzzing): its corpus, then two seconds of mutations. |
 | `grpc_h2` | `crocket_grpc` over real sockets, driven by curl: h2 with prior knowledge and over TLS, trailers, trailers-only errors, custom metadata, HTTP/1.1 on the h2 port, and 300 KB requests and replies with and without `Content-Length`. Uses ports 18551 and 18552. |
 

@@ -14,6 +14,16 @@ from outside the project, for example
 ## [Unreleased]
 
 ### Added
+- **`crocket::client`:** opt-in outbound HTTP on h2o's client, same event loop.
+  `http::Client` carries a base URL, timeout, per-host pool, retries, and a
+  circuit breaker. Retries and the breaker are on unless a call opts out
+  (`{.retry = retry::none}`, `{.breaker = breaker::none}`). Only idempotent
+  methods are retried, plus any call that sets `Idempotency-Key`, and a retry
+  budget caps retries at 20% of recent calls (at least 3). Failures are
+  `upstream.timeout` (504), `upstream.unavailable` (503), and
+  `upstream.circuit_open` (503). An inbound `x-request-id` is forwarded;
+  `traceparent` is not. `examples/client.cpp` is `crocket_client_example`.
+  `./dev bench client` times one localhost GET.
 - **`crocket::auth`:** opt-in JWT and OIDC (`auth::Jwt`, `Auth<T>`, `auth::require` /
   `auth::any_of`). Defaults are RS256, ES256 and EdDSA. HS256 (and HS384/HS512)
   verify only with an explicit `.secret` / `CROCKET_AUTH_SECRET`, and are not in

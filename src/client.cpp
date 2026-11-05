@@ -11,6 +11,7 @@
 #include <h2o/httpclient.h>
 
 #include <openssl/ssl.h>
+#include <openssl/x509_vfy.h>
 
 #include <algorithm>
 #include <atomic>
@@ -553,6 +554,20 @@ struct detail::ClientState : std::enable_shared_from_this<detail::ClientState> {
         SSL_CTX_set_default_verify_paths(ssl);
       }
       SSL_CTX_set_verify(ssl, options.verify_tls ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr);
+      if (options.verify_tls) {
+        // The certificate must chain to the trust store and name this host.
+        // SNI alone does not check the name.
+        std::string host(parsed.host.base, parsed.host.len);
+        auto* param = SSL_CTX_get0_param(ssl);
+        if (!param || X509_VERIFY_PARAM_set1_host(param, host.c_str(), host.size()) != 1) {
+          SSL_CTX_free(ssl);
+          h2o_socketpool_dispose(sockpool.get());
+          sockpool.reset();
+          target = nullptr;
+          h2o_mem_clear_pool(&pool);
+          throw std::invalid_argument("crocket::http::Client: TLS hostname check failed");
+        }
+      }
       h2o_socketpool_set_ssl_ctx(sockpool.get(), ssl);
       SSL_CTX_free(ssl);
     }

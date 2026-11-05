@@ -155,8 +155,9 @@ endif()
 
 # ---- crocket::auth (optional): JWT / OIDC ---------------------------------------------------------------------
 # A resource-server verifier. Built when OpenSSL 3 is found (CROCKET_AUTH=AUTO,
-# the default); ON makes a missing OpenSSL an error, OFF skips it. Core crocket
-# never links it, and crocket.hpp does not include the header.
+# the default) and crocket::client is on. ON makes a missing OpenSSL or a
+# disabled client an error. OFF skips it. Core crocket never links it, and
+# crocket.hpp does not include the header.
 set(CROCKET_AUTH AUTO CACHE STRING "Build crocket::auth (JWT/OIDC) (AUTO, ON or OFF)")
 set_property(CACHE CROCKET_AUTH PROPERTY STRINGS AUTO ON OFF)
 set(CROCKET_HAS_AUTH OFF)
@@ -166,20 +167,14 @@ if(NOT CROCKET_AUTH STREQUAL "OFF")
     set(CROCKET_HAS_AUTH ON)
   elseif(CROCKET_AUTH STREQUAL "ON")
     message(FATAL_ERROR "crocket: CROCKET_AUTH=ON but OpenSSL 3 was not found")
+  else()
+    message(STATUS "crocket: crocket::auth disabled (OpenSSL 3 was not found)")
   endif()
-endif()
-if(CROCKET_HAS_AUTH)
-  add_library(crocket_auth STATIC src/auth/jwt.cpp src/auth/jwks.cpp src/auth/oidc.cpp)
-  add_library(crocket::auth ALIAS crocket_auth)
-  # libssl as well as libcrypto: the JWKS fetch is a hand-rolled HTTPS GET.
-  # TODO: replace it with crocket::client (Roadmap #37 / RESILIENCE, on
-  # h2o_httpclient). Do not call h2o directly from crocket_auth.
-  target_link_libraries(crocket_auth PUBLIC crocket PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-  target_compile_options(crocket_auth PRIVATE -Wall -Wextra)
-  message(STATUS "crocket: crocket::auth enabled (OpenSSL; JWT/OIDC)")
-else()
+elseif(CROCKET_AUTH STREQUAL "OFF")
   message(STATUS "crocket: crocket::auth disabled")
 endif()
+# crocket::auth is created after crocket::client: the JWKS fetch uses that client.
+# The flag is decided here; the library is added once the client is known.
 
 # ---- crocket::client (optional): outbound HTTP -------------------------------------------------
 # h2o_httpclient on the server's event loop, with retries and a circuit breaker.
@@ -207,6 +202,23 @@ if(CROCKET_HAS_CLIENT)
   message(STATUS "crocket: crocket::client enabled (h2o_httpclient)")
 else()
   message(STATUS "crocket: crocket::client disabled")
+endif()
+
+if(CROCKET_HAS_AUTH AND NOT CROCKET_HAS_CLIENT)
+  if(CROCKET_AUTH STREQUAL "ON")
+    message(FATAL_ERROR "crocket: CROCKET_AUTH=ON needs crocket::client (set CROCKET_CLIENT=ON)")
+  endif()
+  set(CROCKET_HAS_AUTH OFF)
+  message(STATUS "crocket: crocket::auth disabled (crocket::client is off)")
+endif()
+if(CROCKET_HAS_AUTH)
+  add_library(crocket_auth STATIC src/auth/jwt.cpp src/auth/jwks.cpp src/auth/oidc.cpp)
+  add_library(crocket::auth ALIAS crocket_auth)
+  # JWKS and discovery go through crocket::client. Crypto stays for JWT verification.
+  # PUBLIC so an app that links only crocket::auth still links the client.
+  target_link_libraries(crocket_auth PUBLIC crocket crocket::client PRIVATE OpenSSL::Crypto)
+  target_compile_options(crocket_auth PRIVATE -Wall -Wextra)
+  message(STATUS "crocket: crocket::auth enabled (JWT/OIDC; JWKS via crocket::client)")
 endif()
 
 if(CROCKET_BUILD_EXAMPLES)

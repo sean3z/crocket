@@ -1,11 +1,11 @@
 // Outbound HTTP. Built when crocket::client is on.
 //
-//   CROCKET_UPSTREAM=http://127.0.0.1:9 ./build/crocket_client_example
+//   UPSTREAM_BASE=http://127.0.0.1:9 ./build/crocket_client_example
 //
-// GET /invoices/{id} calls GET {CROCKET_UPSTREAM}/invoices/{id}.
+// GET /invoices/{id} calls GET {UPSTREAM_BASE}/invoices/{id}.
 // POST /charges sends "{}" and does not retry (retry::none).
 // The default upstream refuses connections, so those routes answer 503
-// upstream.unavailable until CROCKET_UPSTREAM points at something.
+// upstream.unavailable until UPSTREAM_BASE points at something.
 
 #include <crocket/client.hpp>
 #include <crocket/crocket.hpp>
@@ -44,7 +44,7 @@ auto charge(State<http::Client> billing) -> Task<std::expected<std::string, ApiE
 }  // namespace api
 
 int main() {
-  const char* base = std::getenv("CROCKET_UPSTREAM");
+  const char* base = std::getenv("UPSTREAM_BASE");
   if (!base || !*base) base = "http://127.0.0.1:9";
   return build(Config::from_env())
       .manage(http::Client{{

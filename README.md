@@ -1491,9 +1491,10 @@ breaker. 502, 503, and 504 do both.
 - `crocket_client_breaker_state{upstream}` — 0 closed, 1 half-open, 2 open.
 
 **Two services are two clients.** Managed state is one value per type, so a
-second `.manage(http::Client)` fails at ignite. `.with_state<Tag>()` moves the
-client into `State<http::Client::For<Tag>>`, which is a different type. The
-metric label is still `.name`, not the tag.
+second `.manage(http::Client)` fails at ignite. `.with_state<Tag>()` only
+moves the client into `State<http::Client::For<Tag>>`. `Tag` is a compile-time
+type and has no runtime string. `.name` is the Prometheus `upstream` label;
+leave it empty and the host from `.base` is used.
 
 ```cpp
 struct Billing;
@@ -1507,14 +1508,14 @@ auto checkout(State<http::Client::For<Billing>> billing, State<http::Client::For
 ```
 
 `examples/client_multi.cpp` builds as `crocket_client_multi_example`.
-`CROCKET_BILLING` and `CROCKET_PAYMENTS` default to `http://127.0.0.1:9` and
+`BILLING_BASE` and `PAYMENTS_BASE` default to `http://127.0.0.1:9` and
 `http://127.0.0.1:8`.
 
 **Try it.** `examples/client.cpp` builds as `crocket_client_example`. It reads
-`CROCKET_UPSTREAM` (default `http://127.0.0.1:9`, which refuses the connection).
+`UPSTREAM_BASE` (default `http://127.0.0.1:9`, which refuses the connection).
 
 ```bash
-CROCKET_UPSTREAM=http://127.0.0.1:9 ./build/crocket_client_example
+UPSTREAM_BASE=http://127.0.0.1:9 ./build/crocket_client_example
 ```
 
 `./dev bench client` times one localhost GET. gRPC outbound is not in this

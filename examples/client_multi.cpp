@@ -1,11 +1,14 @@
 // Two upstreams, two clients. Built when crocket::client is on.
 //
-//   CROCKET_BILLING=http://127.0.0.1:9 CROCKET_PAYMENTS=http://127.0.0.1:8 \
+//   BILLING_BASE=http://127.0.0.1:9 PAYMENTS_BASE=http://127.0.0.1:8 \
 //     ./build/crocket_client_multi_example
 //
 // Managed state is one value per type. State<http::Client> is one upstream;
 // a second .manage(http::Client) fails at ignite. .with_state<Tag>() moves
-// that client into State<http::Client::For<Tag>>, a different type.
+// that client into State<http::Client::For<Tag>>. Tag is a compile-time type
+// only: it has no runtime string and does not set the metric label. .name is
+// the Prometheus upstream= label. Empty .name uses the host from .base, so
+// these clients set .name ("billing", "payments") instead of 127.0.0.1.
 //
 // GET /checkout calls billing GET /invoices/1, then payments POST /charges
 // with retries off. Both defaults refuse the connection.
@@ -37,14 +40,14 @@ auto checkout(State<http::Client::For<Billing>> billing, State<http::Client::For
 }  // namespace api
 
 int main() {
-  const char* billing = std::getenv("CROCKET_BILLING");
-  const char* payments = std::getenv("CROCKET_PAYMENTS");
+  const char* billing = std::getenv("BILLING_BASE");
+  const char* payments = std::getenv("PAYMENTS_BASE");
   if (!billing || !*billing) billing = "http://127.0.0.1:9";
   if (!payments || !*payments) payments = "http://127.0.0.1:8";
   return build(Config::from_env())
       .manage(http::Client{{
           .base = billing,
-          .name = "billing",
+          .name = "billing",  // upstream= label; .with_state<Billing> does not set this
           .timeout = 2s,
           .pool = 32,
           .retry = retry::idempotent(3),
@@ -52,7 +55,7 @@ int main() {
       }}.with_state<Billing>())
       .manage(http::Client{{
           .base = payments,
-          .name = "payments",
+          .name = "payments",  // upstream= label; .with_state<Payments> does not set this
           .timeout = 2s,
           .pool = 32,
           .retry = retry::idempotent(3),

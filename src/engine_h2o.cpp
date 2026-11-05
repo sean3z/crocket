@@ -1,6 +1,9 @@
 // The wire engine: h2o (libh2o-evloop) on several event-loop threads, each with
 // its own listening socket on the port, and handlers on a shared worker pool.
-// This is the only translation unit that includes h2o.
+// This is the only translation unit in libcrocket that includes h2o.
+// crocket::client (src/client.cpp) includes it too, and only when that
+// library is linked. The two crocket_client_loop_* hooks below are weak so a
+// binary that does not link the client pays for a null check and nothing else.
 //
 // Flow per HTTP transaction (an h1 request or an h2 stream; h2o gives each its
 // own h2o_req_t):
@@ -976,7 +979,15 @@ void Loop::on_lag_tick() {
   link_lag_tick();
 }
 
+// Defined by crocket::client when that library is linked. Weak and absent
+// otherwise, so the check is a no-op in binaries that don't make outbound calls.
+extern "C" {
+void crocket_client_loop_enter(void* evloop, void* queue) __attribute__((weak));
+void crocket_client_loop_leave(void* evloop) __attribute__((weak));
+}
+
 void Loop::serve() {
+  if (crocket_client_loop_enter) crocket_client_loop_enter(ctx_.loop, ctx_.queue);
   t_loop = this;
   lag_.loop = this;
   h2o_timer_init(&lag_.timer, on_lag_tick_cb);
@@ -1009,6 +1020,7 @@ void Loop::serve() {
   h2o_socket_close(wake_);
   wake_ = nullptr;
   cleaned_up_ = open_connections() == 0 && live_.empty();
+  if (crocket_client_loop_leave) crocket_client_loop_leave(ctx_.loop);
   t_loop = nullptr;
   h2o_buffer_clear_recycle(1);  // h2o keeps freed buffers per thread, for reuse; this thread is ending
 }

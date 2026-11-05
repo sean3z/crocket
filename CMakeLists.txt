@@ -3,7 +3,7 @@ project(crocket VERSION 0.4.0 LANGUAGES C CXX)
 
 # Examples and tests are for working on crocket; a project that pulls crocket
 # in with FetchContent or add_subdirectory doesn't build them.
-option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve, crocket_grpc, and crocket_auth_example when auth is on" ${PROJECT_IS_TOP_LEVEL})
+option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve, crocket_grpc, and crocket_auth_example / crocket_client_example / crocket_client_multi_example when those libraries are on" ${PROJECT_IS_TOP_LEVEL})
 option(CROCKET_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 # ./dev fuzz: crocket and the fuzz targets report coverage to tests/fuzz, so
 # inputs that reach new code are kept and mutated further.
@@ -181,6 +181,34 @@ else()
   message(STATUS "crocket: crocket::auth disabled")
 endif()
 
+# ---- crocket::client (optional): outbound HTTP -------------------------------------------------
+# h2o_httpclient on the server's event loop, with retries and a circuit breaker.
+# Core crocket never links it. OFF skips it; ON requires OpenSSL 3 (h2o's TLS).
+set(CROCKET_CLIENT AUTO CACHE STRING "Build crocket::client, the outbound HTTP client (AUTO, ON or OFF)")
+set_property(CACHE CROCKET_CLIENT PROPERTY STRINGS AUTO ON OFF)
+set(CROCKET_HAS_CLIENT OFF)
+if(NOT CROCKET_CLIENT STREQUAL "OFF")
+  if(NOT OpenSSL_FOUND)
+    find_package(OpenSSL 3.0)
+  endif()
+  if(OpenSSL_FOUND)
+    set(CROCKET_HAS_CLIENT ON)
+  elseif(CROCKET_CLIENT STREQUAL "ON")
+    message(FATAL_ERROR "crocket: CROCKET_CLIENT=ON but OpenSSL 3 was not found")
+  endif()
+endif()
+if(CROCKET_HAS_CLIENT)
+  add_library(crocket_client STATIC src/client.cpp)
+  add_library(crocket::client ALIAS crocket_client)
+  target_link_libraries(crocket_client PUBLIC crocket PRIVATE libh2o-evloop OpenSSL::SSL)
+  target_include_directories(crocket_client SYSTEM PRIVATE ${CROCKET_H2O_INCLUDE_DIRS})
+  target_compile_definitions(crocket_client PRIVATE ${CROCKET_H2O_DEFINITIONS})
+  target_compile_options(crocket_client PRIVATE -Wall -Wextra)
+  message(STATUS "crocket: crocket::client enabled (h2o_httpclient)")
+else()
+  message(STATUS "crocket: crocket::client disabled")
+endif()
+
 if(CROCKET_BUILD_EXAMPLES)
   if(CROCKET_HAS_PG)
     add_executable(crocket_heroes examples/heroes.cpp)
@@ -195,6 +223,12 @@ if(CROCKET_BUILD_EXAMPLES)
   if(CROCKET_HAS_AUTH)
     add_executable(crocket_auth_example examples/auth.cpp)
     target_link_libraries(crocket_auth_example PRIVATE crocket::auth)
+  endif()
+  if(CROCKET_HAS_CLIENT)
+    add_executable(crocket_client_example examples/client.cpp)
+    target_link_libraries(crocket_client_example PRIVATE crocket::client)
+    add_executable(crocket_client_multi_example examples/client_multi.cpp)
+    target_link_libraries(crocket_client_multi_example PRIVATE crocket::client)
   endif()
 endif()
 
@@ -221,6 +255,12 @@ if(CROCKET_HAS_AUTH)
   # me(Auth<>): no auth, cache hit, cache miss (./dev bench auth).
   add_executable(crocket_bench_auth EXCLUDE_FROM_ALL bench/auth.cpp)
   target_link_libraries(crocket_bench_auth PRIVATE crocket::auth OpenSSL::Crypto)
+endif()
+
+if(CROCKET_HAS_CLIENT)
+  # One localhost GET through http::Client (./dev bench client).
+  add_executable(crocket_bench_client EXCLUDE_FROM_ALL bench/client.cpp)
+  target_link_libraries(crocket_bench_client PRIVATE crocket::client)
 endif()
 
 if(CROCKET_BUILD_TESTS)

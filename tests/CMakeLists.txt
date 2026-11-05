@@ -135,6 +135,28 @@ if(CROCKET_HAS_AUTH AND CROCKET_BUILD_EXAMPLES)
                    -P ${CMAKE_CURRENT_SOURCE_DIR}/auth_not_in_core.cmake)
 endif()
 
+if(CROCKET_HAS_CLIENT)
+  add_executable(crocket_client_test client.cpp)
+  target_link_libraries(crocket_client_test PRIVATE crocket::client)
+  target_include_directories(crocket_client_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(crocket_client_test PRIVATE -Wall -Wextra)
+  add_test(NAME client COMMAND crocket_client_test)
+  set_tests_properties(client PROPERTIES TIMEOUT 60)
+
+  # A real server, so the call runs on its event loop rather than the fallback.
+  add_executable(crocket_client_loop_test client_loop.cpp)
+  target_link_libraries(crocket_client_loop_test PRIVATE crocket::client)
+  target_compile_options(crocket_client_loop_test PRIVATE -Wall -Wextra)
+  add_test(NAME client_loop COMMAND crocket_client_loop_test)
+  set_tests_properties(client_loop PROPERTIES TIMEOUT 30)
+endif()
+
+if(CROCKET_HAS_CLIENT AND CROCKET_BUILD_EXAMPLES)
+  add_test(NAME client_not_in_core
+           COMMAND ${CMAKE_COMMAND} -DBIN=$<TARGET_FILE:crocket_hello>
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/client_not_in_core.cmake)
+endif()
+
 # crocket::db against a real Postgres: CROCKET_TEST_DATABASE_URL, else skipped (exit 77).
 if(CROCKET_HAS_PG)
   add_executable(crocket_db_test db.cpp)

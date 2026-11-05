@@ -3,7 +3,7 @@ project(crocket VERSION 0.4.0 LANGUAGES C CXX)
 
 # Examples and tests are for working on crocket; a project that pulls crocket
 # in with FetchContent or add_subdirectory doesn't build them.
-option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve, crocket_grpc, and crocket_auth_example when auth is on" ${PROJECT_IS_TOP_LEVEL})
+option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve, crocket_grpc, and crocket_auth_example / crocket_client_example / crocket_client_multi_example when those libraries are on" ${PROJECT_IS_TOP_LEVEL})
 option(CROCKET_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 # ./dev fuzz: crocket and the fuzz targets report coverage to tests/fuzz, so
 # inputs that reach new code are kept and mutated further.
@@ -227,6 +227,8 @@ if(CROCKET_BUILD_EXAMPLES)
   if(CROCKET_HAS_CLIENT)
     add_executable(crocket_client_example examples/client.cpp)
     target_link_libraries(crocket_client_example PRIVATE crocket::client)
+    add_executable(crocket_client_multi_example examples/client_multi.cpp)
+    target_link_libraries(crocket_client_multi_example PRIVATE crocket::client)
   endif()
 endif()
 

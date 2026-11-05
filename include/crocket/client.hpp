@@ -149,21 +149,36 @@ struct CallOptions {
   std::string idempotency_key{};
 };
 
-class Client {
- public:
-  using Options = ClientOptions;
+namespace detail {
+struct ClientState;
+/// Owns the client state. The destructor is out of line so callers can hold a
+/// client without seeing the state type.
+struct ClientHandle {
+  std::shared_ptr<ClientState> p;
+  ClientHandle() noexcept = default;
+  explicit ClientHandle(std::shared_ptr<ClientState> s) noexcept : p(std::move(s)) {}
+  ClientHandle(ClientHandle&&) noexcept = default;
+  ClientHandle& operator=(ClientHandle&&) noexcept = default;
+  ClientHandle(const ClientHandle&) = delete;
+  ClientHandle& operator=(const ClientHandle&) = delete;
+  ~ClientHandle();
+};
+ClientHandle make_client(ClientOptions options);
+void shutdown_client(ClientHandle& handle);
+Task<std::expected<Response, ApiError>> client_request(const ClientHandle& handle, Method method, std::string_view path,
+                                                       CallOptions options);
 
-  /// Throws std::invalid_argument when `base` is not an absolute http or https URL.
-  explicit Client(ClientOptions options);
-  Client(Client&&) noexcept;
-  Client(const Client&) = delete;
-  Client& operator=(const Client&) = delete;
-  Client& operator=(Client&&) = delete;
-  ~Client();
+/// Shared by `Client` and `Client::For<Tag>`. Not a state type.
+class ClientBase {
+ public:
+  ClientBase(const ClientBase&) = delete;
+  ClientBase& operator=(const ClientBase&) = delete;
+  ClientBase& operator=(ClientBase&&) = delete;
 
   [[nodiscard]] Task<std::expected<Response, ApiError>> request(Method method, std::string_view path,
-                                                                CallOptions options = {}) const;
-
+                                                                CallOptions options = {}) const {
+    return client_request(impl_, method, path, std::move(options));
+  }
   [[nodiscard]] Task<std::expected<Response, ApiError>> get(std::string_view path, CallOptions options = {}) const {
     return request(Method::Get, path, std::move(options));
   }
@@ -183,13 +198,50 @@ class Client {
     return request(Method::Delete, path, std::move(options));
   }
 
-  // Defined in src/client.cpp. Public so that translation unit can name it;
-  // the type is incomplete here.
-  struct Impl;
+ protected:
+  explicit ClientBase(ClientOptions options) : impl_(make_client(std::move(options))) {}
+  explicit ClientBase(ClientHandle handle) : impl_(std::move(handle)) {}
+  ClientBase(ClientBase&&) noexcept = default;
+  ~ClientBase() { shutdown_client(impl_); }
 
- private:
-  std::shared_ptr<Impl> impl_;
+  ClientHandle impl_;
 };
+
+}  // namespace detail
+
+/// One managed client. `State<http::Client>` is one upstream: a second
+/// `.manage(http::Client)` fails at ignite. Another service is
+/// `State<http::Client::For<Payments>>`, from `.with_state<Payments>()`.
+/// `Tag` is only a name. The base URL and the metric label stay on the options.
+class Client : public detail::ClientBase {
+ public:
+  using Options = ClientOptions;
+
+  /// Throws std::invalid_argument when `base` is not an absolute http or https URL.
+  explicit Client(ClientOptions options) : detail::ClientBase(std::move(options)) {}
+  Client(Client&&) noexcept = default;
+
+  template <class Tag>
+  class For;
+
+  /// Another managed slot. `Tag` does not change this client's options.
+  template <class Tag>
+  [[nodiscard]] For<Tag> with_state() &&;
+};
+
+template <class Tag>
+class Client::For : public detail::ClientBase {
+  friend class Client;
+  explicit For(detail::ClientHandle handle) : ClientBase(std::move(handle)) {}
+
+ public:
+  For(For&&) noexcept = default;
+};
+
+template <class Tag>
+Client::For<Tag> Client::with_state() && {
+  return For<Tag>(std::move(impl_));
+}
 
 /// Decodes a response body the same way `Json<T>` reads a request. The HTTP
 /// status is not checked: a 404 body is still parsed when it is JSON.

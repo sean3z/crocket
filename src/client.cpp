@@ -27,6 +27,9 @@
 #include <vector>
 
 namespace crocket::http {
+namespace detail {
+struct ClientState;
+}
 namespace {
 
 using client_detail::Circuit;
@@ -46,11 +49,11 @@ using client_detail::upstream_unavailable;
 struct Pin;
 
 void post_async(Pin* pin, std::move_only_function<void()> fn);
-void ensure_loop(Client::Impl* impl);
+void ensure_loop(detail::ClientState* impl);
 
 std::mutex g_mu;
 std::condition_variable g_idle;
-std::vector<Client::Impl*> g_clients;
+std::vector<detail::ClientState*> g_clients;
 Pin* g_pin = nullptr;
 thread_local Pin* t_pin = nullptr;
 
@@ -189,7 +192,7 @@ void render_metrics(std::string& o);
 
 void observe(const std::string& upstream, std::string_view method, std::string_view status, std::int64_t ns) {
   static std::once_flag once;
-  std::call_once(once, [] { detail::add_metrics_renderer(&render_metrics); });
+  std::call_once(once, [] { crocket::detail::add_metrics_renderer(&render_metrics); });
   auto& m = metrics();
   Counter* counter = nullptr;
   Hist* hist = nullptr;
@@ -243,7 +246,7 @@ struct Attempt : std::enable_shared_from_this<Attempt> {
     Attempt* self = nullptr;
   };
 
-  Client::Impl* impl = nullptr;  // the caller's shared_ptr keeps it alive across the await
+  detail::ClientState* impl = nullptr;  // the caller's shared_ptr keeps it alive across the await
   std::string url;
   http::Method method = http::Method::Get;
   std::string body;
@@ -266,7 +269,7 @@ struct Attempt : std::enable_shared_from_this<Attempt> {
   Outcome outcome;
   Response response;
   std::coroutine_handle<> handle;
-  detail::Exchange* exchange = nullptr;
+  crocket::detail::Exchange* exchange = nullptr;
   std::optional<std::stop_callback<std::function<void()>>> stop_cb;
 
   Attempt() { hook.self = this; }
@@ -309,7 +312,7 @@ struct Attempt : std::enable_shared_from_this<Attempt> {
       std::free(pool);
       pool = nullptr;
     }
-    if (suspended.load(std::memory_order_acquire) && handle) detail::resume_on_worker(exchange, handle);
+    if (suspended.load(std::memory_order_acquire) && handle) crocket::detail::resume_on_worker(exchange, handle);
   }
 
   void start();
@@ -455,7 +458,7 @@ h2o_httpclient_head_cb on_connect(h2o_httpclient_t* client, const char* errstr, 
 
 }  // namespace
 
-struct Client::Impl : std::enable_shared_from_this<Client::Impl> {
+struct detail::ClientState : std::enable_shared_from_this<detail::ClientState> {
   std::string upstream;
   std::string origin;
   std::string path_prefix;
@@ -487,9 +490,9 @@ struct Client::Impl : std::enable_shared_from_this<Client::Impl> {
     return options;
   }
 
-  explicit Impl(ClientOptions options) : Impl(normalized(std::move(options)), 0) {}
+  explicit ClientState(ClientOptions options) : ClientState(normalized(std::move(options)), 0) {}
 
-  Impl(ClientOptions options, int)
+  ClientState(ClientOptions options, int)
       : timeout(options.timeout),
         connect_timeout(options.connect_timeout),
         retry(options.retry),
@@ -556,7 +559,7 @@ struct Client::Impl : std::enable_shared_from_this<Client::Impl> {
     h2o_mem_clear_pool(&pool);
   }
 
-  ~Impl() { dispose_pool_here(); }
+  ~ClientState() { dispose_pool_here(); }
 
   int breaker_state() { return circuit.state(); }
 
@@ -638,7 +641,7 @@ struct Client::Impl : std::enable_shared_from_this<Client::Impl> {
                                         const std::string& request_id, Clock::time_point deadline, const std::stop_token& stop,
                                         std::chrono::milliseconds budget) {
     auto attempt = std::make_shared<Attempt>();
-    Client::Impl* self = this;
+    detail::ClientState* self = this;
     attempt->impl = self;
     attempt->url = url;
     attempt->method = method;
@@ -723,7 +726,7 @@ void loop_enter(void* evloop, void* queue) {
 
 void loop_leave(void* evloop) {
   Pin* pin = nullptr;
-  std::vector<Client::Impl*> clients;
+  std::vector<detail::ClientState*> clients;
   {
     std::lock_guard lk(g_mu);
     if (!g_pin || g_pin->evloop != evloop) return;
@@ -772,8 +775,8 @@ void Attempt::start() {
 }
 
 struct Busy {
-  Client::Impl* impl;
-  explicit Busy(Client::Impl* i) : impl(i) { impl->busy.fetch_add(1, std::memory_order_relaxed); }
+  detail::ClientState* impl;
+  explicit Busy(detail::ClientState* i) : impl(i) { impl->busy.fetch_add(1, std::memory_order_relaxed); }
   void release() {
     if (!impl) return;
     if (impl->busy.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -792,7 +795,7 @@ class Perform {
   bool await_ready() const noexcept { return false; }
   bool await_suspend(std::coroutine_handle<> handle) {
     attempt_->handle = handle;
-    attempt_->exchange = detail::current_exchange();
+    attempt_->exchange = crocket::detail::current_exchange();
     attempt_->arm_stop();
     attempt_->suspended.store(true, std::memory_order_release);
     std::lock_guard lk(g_mu);
@@ -809,7 +812,7 @@ class Perform {
   std::shared_ptr<Attempt> attempt_;
 };
 
-void ensure_loop(Client::Impl*) {
+void ensure_loop(detail::ClientState*) {
   std::lock_guard lk(g_mu);
   if (!g_pin) start_private();
 }
@@ -824,19 +827,23 @@ std::string status_label(const Outcome& outcome) {
 
 }  // namespace
 
-Client::Client(ClientOptions options) : impl_(std::make_shared<Impl>(std::move(options))) { impl_->enroll(); }
-
-Client::Client(Client&& other) noexcept : impl_(std::move(other.impl_)) {}
-
-Client::~Client() {
-  if (!impl_) return;
-  impl_->shutdown();
-  impl_->unenroll();
-  impl_.reset();
+detail::ClientHandle detail::make_client(ClientOptions options) {
+  auto* raw = new ClientState(std::move(options));
+  raw->enroll();
+  return ClientHandle(std::shared_ptr<ClientState>(raw, [](ClientState* p) { delete p; }));
 }
 
-Task<std::expected<Response, ApiError>> Client::request(Method method, std::string_view path, CallOptions options) const {
-  auto impl = impl_;
+void detail::shutdown_client(ClientHandle& handle) {
+  if (!handle.p) return;
+  handle.p->shutdown();
+  handle.p->unenroll();
+}
+
+detail::ClientHandle::~ClientHandle() = default;
+
+Task<std::expected<Response, ApiError>> detail::client_request(const ClientHandle& handle, Method method, std::string_view path,
+                                                              CallOptions options) {
+  auto impl = handle.p;
   if (!impl) co_return std::unexpected(upstream_unavailable("client is empty"));
   Busy busy(impl.get());
   if (path.find("://") != std::string_view::npos)
@@ -858,7 +865,7 @@ Task<std::expected<Response, ApiError>> Client::request(Method method, std::stri
   Clock::time_point deadline = Clock::time_point::max();
   std::stop_token stop;
   std::string request_id;
-  if (auto* exchange = detail::current_exchange()) {
+  if (auto* exchange = crocket::detail::current_exchange()) {
     deadline = exchange->req.deadline.at;
     stop = exchange->req.deadline.stop;
     if (impl->propagate_request_id)

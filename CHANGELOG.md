@@ -22,8 +22,10 @@ from outside the project, for example
   budget caps retries at 20% of recent calls (at least 3). Failures are
   `upstream.timeout` (504), `upstream.unavailable` (503), and
   `upstream.circuit_open` (503). An inbound `x-request-id` is forwarded;
-  `traceparent` is not.   `examples/client.cpp` is `crocket_client_example`.
-  `./dev bench client` times one localhost GET
+  `traceparent` is not. `examples/client.cpp` is `crocket_client_example`.
+  Two services are two clients: `.with_state<Tag>()` and
+  `State<http::Client::For<Tag>>` (`examples/client_multi.cpp`,
+  `crocket_client_multi_example`). `./dev bench client` times one localhost GET
   ([#46](https://github.com/sean3z/crocket/pull/46)).
 - **`crocket::auth`:** opt-in JWT and OIDC (`auth::Jwt`, `Auth<T>`, `auth::require` /
   `auth::any_of`). Defaults are RS256, ES256 and EdDSA. HS256 (and HS384/HS512)

@@ -1490,6 +1490,26 @@ breaker. 502, 503, and 504 do both.
 - `crocket_client_request_duration_seconds{upstream,method}` — the whole call.
 - `crocket_client_breaker_state{upstream}` — 0 closed, 1 half-open, 2 open.
 
+**Two services are two clients.** Managed state is one value per type, so a
+second `.manage(http::Client)` fails at ignite. `.with_state<Tag>()` moves the
+client into `State<http::Client::For<Tag>>`, which is a different type. The
+metric label is still `.name`, not the tag.
+
+```cpp
+struct Billing;
+struct Payments;
+
+.manage(http::Client{{.base = "http://billing.internal", .name = "billing"}}.with_state<Billing>())
+.manage(http::Client{{.base = "http://payments.internal", .name = "payments"}}.with_state<Payments>());
+
+auto checkout(State<http::Client::For<Billing>> billing, State<http::Client::For<Payments>> payments)
+    -> Task<std::expected<std::string, ApiError>>;
+```
+
+`examples/client_multi.cpp` builds as `crocket_client_multi_example`.
+`CROCKET_BILLING` and `CROCKET_PAYMENTS` default to `http://127.0.0.1:9` and
+`http://127.0.0.1:8`.
+
 **Try it.** `examples/client.cpp` builds as `crocket_client_example`. It reads
 `CROCKET_UPSTREAM` (default `http://127.0.0.1:9`, which refuses the connection).
 
@@ -2020,7 +2040,7 @@ see [docs/ENGINE.md](docs/ENGINE.md#updating-h2o). An application that links wit
 
 Options:
 
-- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, `crocket_auth_example` when `crocket::auth` is on, and `crocket_client_example` when `crocket::client` is on.
+- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, `crocket_auth_example` when `crocket::auth` is on, and `crocket_client_example` and `crocket_client_multi_example` when `crocket::client` is on.
 - `CROCKET_CLIENT` is `AUTO` (build the outbound HTTP client when OpenSSL 3 is present), `ON`, or `OFF`. `CROCKET_AUTH` is the same idea for JWT.
 - `CROCKET_BUILD_TESTS` builds the tests.
 

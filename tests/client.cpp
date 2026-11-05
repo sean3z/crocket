@@ -171,6 +171,19 @@ auto ready(State<http::Client> billing) -> Task<std::string> {
 
 }  // namespace api
 
+namespace multi {
+struct Billing;
+struct Payments;
+
+[[= http::get("/both")]]
+auto both(State<http::Client::For<Billing>> billing, State<http::Client::For<Payments>> payments) -> Task<std::string> {
+  auto invoice = co_await billing->get("/invoices/1");
+  auto charge = co_await payments->post("/charges", {.body = "pay", .retry = retry::none});
+  if (!invoice || !charge) co_return "err";
+  co_return invoice->body + charge->body;
+}
+}  // namespace multi
+
 int main() {
   std::signal(SIGPIPE, SIG_IGN);
 
@@ -474,6 +487,41 @@ int main() {
     CHECK(contains(metrics.body, "crocket_client_breaker_state"));
     CHECK(contains(metrics.body, "upstream=\"billing\""));
     CHECK(!contains(metrics.body, "127.0.0.1"));
+  }
+
+  section("two clients");
+  {
+    Toy billing_toy([&](const std::string& req) {
+      return contains(req, "GET /invoices/1") ? http_response(200, "bill") : http_response(500, "no");
+    });
+    Toy payments_toy([&](const std::string& req) {
+      return contains(req, "POST /charges") && contains(req, "pay") ? http_response(201, "paid") : http_response(500, "no");
+    });
+    Config cfg;
+    cfg.log.sink = [](std::string_view) {};
+    Crocket app(cfg);
+    app.manage(http::Client{{
+           .base = billing_toy.base(),
+           .name = "billing",
+           .timeout = 1s,
+           .retry = retry::none,
+           .breaker = breaker::none,
+       }}.with_state<multi::Billing>())
+        .manage(http::Client{{
+            .base = payments_toy.base(),
+            .name = "payments",
+            .timeout = 1s,
+            .retry = retry::none,
+            .breaker = breaker::none,
+        }}.with_state<multi::Payments>())
+        .attach(Metrics{})
+        .mount("/", reflect_routes<^^multi>());
+    auto res = LocalClient(app).get("/both").dispatch();
+    CHECK_EQ(res.status, 200);
+    CHECK(res.body == "billpaid");
+    auto metrics = LocalClient(app).get("/metrics").dispatch();
+    CHECK(contains(metrics.body, "upstream=\"billing\""));
+    CHECK(contains(metrics.body, "upstream=\"payments\""));
   }
 
   std::fprintf(stderr, "%d checks, %d failed\n", g_checks, g_failures);

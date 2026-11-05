@@ -212,8 +212,6 @@ class ClientBase {
 /// One managed client. `State<http::Client>` is one upstream: a second
 /// `.manage(http::Client)` fails at ignite. Another service is
 /// `State<http::Client::For<Payments>>`, from `.with_state<Payments>()`.
-/// `Tag` is a compile-time type and has no runtime string. The base URL and
-/// the metric label (`.name`, or the host when `.name` is empty) stay on the options.
 class Client : public detail::ClientBase {
  public:
   using Options = ClientOptions;
@@ -225,7 +223,7 @@ class Client : public detail::ClientBase {
   template <class Tag>
   class For;
 
-  /// Another managed slot. `Tag` does not change this client's options.
+  /// Moves this client into `State<http::Client::For<Tag>>`.
   template <class Tag>
   [[nodiscard]] For<Tag> with_state() &&;
 };

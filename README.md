@@ -1491,10 +1491,9 @@ breaker. 502, 503, and 504 do both.
 - `crocket_client_breaker_state{upstream}` — 0 closed, 1 half-open, 2 open.
 
 **Two services are two clients.** Managed state is one value per type, so a
-second `.manage(http::Client)` fails at ignite. `.with_state<Tag>()` only
-moves the client into `State<http::Client::For<Tag>>`. `Tag` is a compile-time
-type and has no runtime string. `.name` is the Prometheus `upstream` label;
-leave it empty and the host from `.base` is used.
+second `.manage(http::Client)` fails at ignite. `.with_state<Tag>()` moves the
+client into `State<http::Client::For<Tag>>`. `.name` is the Prometheus
+`upstream` label; leave it empty and the host from `.base` is used.
 
 ```cpp
 struct Billing;

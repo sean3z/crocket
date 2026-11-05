@@ -5,10 +5,11 @@
 //
 // Managed state is one value per type. State<http::Client> is one upstream;
 // a second .manage(http::Client) fails at ignite. .with_state<Tag>() moves
-// that client into State<http::Client::For<Tag>>. Tag is a compile-time type
-// only: it has no runtime string and does not set the metric label. .name is
-// the Prometheus upstream= label. Empty .name uses the host from .base, so
-// these clients set .name ("billing", "payments") instead of 127.0.0.1.
+// that client into State<http::Client::For<Tag>>.
+//
+// .name is the Prometheus upstream label. Leave it empty and the host from
+// .base is used, so these clients set "billing" and "payments" rather than
+// 127.0.0.1.
 //
 // GET /checkout calls billing GET /invoices/1, then payments POST /charges
 // with retries off. Both defaults refuse the connection.
@@ -47,7 +48,7 @@ int main() {
   return build(Config::from_env())
       .manage(http::Client{{
           .base = billing,
-          .name = "billing",  // upstream= label; .with_state<Billing> does not set this
+          .name = "billing",  // Prometheus upstream label; empty uses the host from .base
           .timeout = 2s,
           .pool = 32,
           .retry = retry::idempotent(3),
@@ -55,7 +56,7 @@ int main() {
       }}.with_state<Billing>())
       .manage(http::Client{{
           .base = payments,
-          .name = "payments",  // upstream= label; .with_state<Payments> does not set this
+          .name = "payments",  // Prometheus upstream label; empty uses the host from .base
           .timeout = 2s,
           .pool = 32,
           .retry = retry::idempotent(3),

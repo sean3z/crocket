@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -286,5 +287,40 @@ class Headers {
   std::vector<value_type> items_;  // [0, n_) are the fields
   std::size_t n_ = 0;
 };
+
+namespace http {
+
+/// True when a header name should not be printed. Hyphens and underscores
+/// match, and so does case. Names containing password, secret, token,
+/// authorization, cookie, or api_key are sensitive, as is Idempotency-Key.
+/// A custom name that contains none of those is not.
+inline bool sensitive_header(std::string_view name) {
+  std::string norm;
+  norm.resize(name.size());
+  for (std::size_t i = 0; i < name.size(); ++i) {
+    char c = name[i];
+    if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    else if (c == '-') c = '_';
+    norm[i] = c;
+  }
+  static constexpr std::string_view needles[] = {"password", "secret", "token", "authorization", "cookie",
+                                                  "api_key", "idempotency_key"};
+  for (auto n : needles)
+    if (norm.contains(n)) return true;
+  return false;
+}
+
+/// Header names and values safe to pass to `log::info`. Sensitive values are
+/// "[redacted]". The list on the wire is not changed. Duplicate names keep
+/// one entry. A secret placed in a value whose name is not sensitive is kept:
+/// log that string under its own field only if the field name matches.
+inline std::map<std::string, std::string> for_log(const Headers& headers) {
+  std::map<std::string, std::string> out;
+  for (auto& [name, value] : headers)
+    out.insert_or_assign(name, sensitive_header(name) ? std::string("[redacted]") : value);
+  return out;
+}
+
+}  // namespace http
 
 }  // namespace crocket

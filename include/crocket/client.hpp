@@ -25,6 +25,8 @@
 #include "crocket/json.hpp"
 #include "crocket/task.hpp"
 
+#include <map>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -118,6 +120,8 @@ namespace http {
 /// (`upstream`); empty uses the host from `base`, never the URL. `pool` is how
 /// many connections to that host may be open. `timeout` bounds one call.
 /// `connect_timeout` bounds the TCP connect. A call can only shorten `timeout`.
+/// Logging this object prints scheme, host, and port, and whether `ca_file`
+/// is set. It does not print userinfo, path, query, fragment, or the CA path.
 struct ClientOptions {
   std::string base{};
   std::string name{};
@@ -148,6 +152,100 @@ struct CallOptions {
   /// Sent as `Idempotency-Key` when set. A POST or PATCH with this key may be retried.
   std::string idempotency_key{};
 };
+
+/// Scheme, host, and port. Userinfo, path, query, and fragment are left out.
+/// Anything that is not an absolute http(s) URL becomes "[invalid]", so a
+/// secret in a bad string is not printed back.
+inline std::string log_endpoint(std::string_view url) {
+  auto scheme = url.find("://");
+  if (scheme == std::string_view::npos || scheme == 0) return "[invalid]";
+  auto rest = url.substr(scheme + 3);
+  auto cut = rest.find_first_of("/?#");
+  auto authority = cut == std::string_view::npos ? rest : rest.substr(0, cut);
+  if (auto at = authority.rfind('@'); at != std::string_view::npos) authority.remove_prefix(at + 1);
+  if (authority.empty()) return "[invalid]";
+  std::string out;
+  out.reserve(scheme + 3 + authority.size());
+  out.append(url.substr(0, scheme + 3));
+  out.append(authority);
+  return out;
+}
+
+/// Path with query and fragment removed. An absolute URL keeps only
+/// scheme, host, and port.
+inline std::string log_target(std::string_view target) {
+  if (target.find("://") != std::string_view::npos) return log_endpoint(target);
+  auto cut = target.find_first_of("?#");
+  return std::string(cut == std::string_view::npos ? target : target.substr(0, cut));
+}
+
+/// What `log::info("{opts}", options)` prints. The CA path is only a bool.
+struct OptionsLog {
+  std::string base;
+  std::string name;
+  std::chrono::milliseconds timeout{0};
+  std::chrono::milliseconds connect_timeout{0};
+  std::size_t pool = 0;
+  retry::Policy retry{};
+  breaker::Policy breaker{};
+  bool propagate_request_id = false;
+  bool verify_tls = false;
+  bool ca_file = false;
+  std::size_t max_body = 0;
+};
+
+inline OptionsLog for_log(const ClientOptions& options) {
+  OptionsLog out;
+  out.base = log_endpoint(options.base);
+  out.name = options.name;
+  out.timeout = options.timeout;
+  out.connect_timeout = options.connect_timeout;
+  out.pool = options.pool;
+  out.retry = options.retry;
+  out.breaker = options.breaker;
+  out.propagate_request_id = options.propagate_request_id;
+  out.verify_tls = options.verify_tls;
+  out.ca_file = !options.ca_file.empty();
+  out.max_body = options.max_body;
+  return out;
+}
+
+/// Diagnostic form of `ClientOptions`. Logging the options object uses this.
+inline void crocket_json_write(std::string& out, const ClientOptions& options) {
+  json::encode(out, for_log(options));
+}
+
+/// A call as it is safe to log. The body is a byte count. The idempotency
+/// key is only whether one was set.
+struct CallLog {
+  std::string target;
+  std::map<std::string, std::string> headers;
+  std::size_t body_bytes = 0;
+  bool idempotency_key = false;
+};
+
+inline CallLog for_log(std::string_view target, const CallOptions& call) {
+  CallLog out;
+  out.target = log_target(target);
+  Headers headers;
+  for (auto& [name, value] : call.headers) headers.add(name, value);
+  if (!call.idempotency_key.empty()) headers.add("idempotency-key", call.idempotency_key);
+  out.headers = for_log(headers);
+  out.body_bytes = call.body.size();
+  out.idempotency_key = !call.idempotency_key.empty();
+  return out;
+}
+
+/// A response as it is safe to log. The body is a byte count.
+struct ResponseLog {
+  int status = 0;
+  std::map<std::string, std::string> headers;
+  std::size_t body_bytes = 0;
+};
+
+inline ResponseLog for_log(const Response& response) {
+  return ResponseLog{response.status, for_log(response.headers), response.body.size()};
+}
 
 namespace detail {
 struct ClientState;

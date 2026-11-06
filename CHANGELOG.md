@@ -19,7 +19,8 @@ from outside the project, for example
   response, or `ClientOptions` without userinfo, query, fragment, CA paths, or
   header values whose names look like credentials. Bodies are a byte count.
   Logging a raw string under an unrelated field name is still printed as
-  itself. The bytes on the wire are unchanged.
+  itself. The bytes on the wire are unchanged
+  ([#48](https://github.com/sean3z/crocket/pull/48)).
 - **`crocket::auth` JWKS fetch** uses `crocket::client` instead of its own HTTPS
   client. A fetch times out at 5 seconds, keeps at most 1 MiB, checks the TLS
   hostname, and does not retry; the refresh loop tries again. `crocket::auth`

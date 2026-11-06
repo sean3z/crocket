@@ -13,6 +13,14 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Changed
+- **`crocket::auth` JWKS fetch** uses `crocket::client` instead of its own HTTPS
+  client. A fetch times out at 5 seconds, keeps at most 1 MiB, checks the TLS
+  hostname, and does not retry; the refresh loop tries again. `crocket::auth`
+  links `crocket::client`. `CROCKET_AUTH=ON` with the client off fails configure.
+  With both on `AUTO`, turning the client off turns auth off
+  ([#47](https://github.com/sean3z/crocket/pull/47)).
+
 ### Added
 - **`crocket::client`:** opt-in outbound HTTP on h2o's client, same event loop.
   `http::Client` carries a base URL, timeout, per-host pool, retries, and a

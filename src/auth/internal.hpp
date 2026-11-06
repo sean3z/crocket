@@ -20,10 +20,10 @@ struct Fetched {
   std::chrono::seconds max_age{0};  // 0: Cache-Control did not say
 };
 
-/// One HTTPS (or loopback HTTP) GET. Times out. Does not follow more than
-/// three redirects. `ca_file` empty: the default trust store.
-/// Stopgap: replace with crocket::client (Roadmap #37 / RESILIENCE, on
-/// h2o_httpclient). Do not call h2o directly from crocket_auth.
+/// One HTTPS (or loopback HTTP) GET through `crocket::client`. Times out at
+/// 5 seconds, keeps at most 1 MiB, and follows at most three redirects.
+/// `ca_file` empty: the default trust store. The peer certificate must name
+/// the host.
 std::expected<Fetched, std::string> http_get(std::string_view url, std::string_view ca_file);
 
 struct Key {

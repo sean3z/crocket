@@ -719,9 +719,17 @@ If the issuer or the JWKS URL is down at startup, the process still starts.
 `GET /readyz` stays not ready until the first JWKS document has loaded (for OIDC,
 discovery has to succeed too). A later failed refresh keeps the keys already in
 memory. An unknown `kid` does not wait: the request fails at once with 401
-`auth.unknown_key`, and at most one refresh is started per 30 seconds. The JWKS and discovery GET is still a hand-rolled HTTPS client inside
-`crocket_auth`. Pointing that fetch at [`crocket::client`](#outbound-http-crocketclient)
-is a follow-up; auth does not call h2o itself.
+`auth.unknown_key`, and at most one refresh is started per 30 seconds.
+
+JWKS and discovery are GETs through [`crocket::client`](#outbound-http-crocketclient).
+Each call times out at 5 seconds, keeps at most 1 MiB, and does not retry; the
+refresh loop is what tries again. TLS is 1.2 or newer. The certificate must
+chain to the default trust store, or to `.tls_ca_file`, and it must name the
+host. `crocket::auth` links `crocket::client`. A program that does not link
+auth does not link the client for this. The fetch does not run on a server
+thread. It starts when the verifier is managed, which is before `launch` enters
+its event loop, so that first call uses the client's own loop when no server
+loop is up yet. Later client calls in the process share that loop.
 
 Algorithms are RS256, ES256 and EdDSA (Ed25519 and Ed448). That is the default
 `.algorithms`. `none` is rejected. HS256, HS384 and HS512 stay off that list:

@@ -10,10 +10,15 @@
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/params.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <mutex>
@@ -319,6 +324,7 @@ struct JwksServer {
   std::string oidc;
   int status = 200;
   std::string cache_control;
+  std::string redirect;  // when set, GET /redirect answers 302 to this Location
   std::atomic<bool> hang{false};
   std::atomic<bool> stop{false};
   int port = 0;
@@ -379,19 +385,156 @@ struct JwksServer {
       std::string body;
       int st = 200;
       std::string cc;
+      std::string redir;
       {
         std::lock_guard lk(mu);
         st = status;
         cc = cache_control;
+        redir = redirect;
         if (target == "/.well-known/openid-configuration") body = oidc.empty() ? "{}" : oidc;
         else body = jwks;
         if (oidc.empty() && target == "/.well-known/openid-configuration") st = 404;
+      }
+      if (!redir.empty() && target == "/redirect") {
+        auto resp = "HTTP/1.1 302 X\r\nLocation: " + redir + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        ::close(fd);
+        continue;
       }
       auto resp = "HTTP/1.1 " + std::to_string(st) + " X\r\nContent-Type: application/json\r\nContent-Length: " +
                   std::to_string(body.size()) + "\r\nConnection: close\r\n";
       if (!cc.empty()) resp += "Cache-Control: " + cc + "\r\n";
       resp += "\r\n" + body;
       (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+      ::close(fd);
+    }
+  }
+};
+
+// One-shot HTTPS JWKS. The PEM file is the trust anchor passed as tls_ca_file.
+struct TlsJwks {
+  std::string dns;
+  bool ip_san = false;
+  std::string body = R"({"keys":[]})";
+  std::string ca_path;
+  std::atomic<bool> stop{false};
+  int port = 0;
+  int listen_fd = -1;
+  std::thread thr;
+  SSL_CTX* ctx = nullptr;
+  EVP_PKEY* key = nullptr;
+  X509* cert = nullptr;
+
+  TlsJwks(std::string name, bool ip) : dns(std::move(name)), ip_san(ip) {}
+  TlsJwks(const TlsJwks&) = delete;
+  ~TlsJwks() {
+    stop.store(true);
+    if (listen_fd >= 0) {
+      ::shutdown(listen_fd, SHUT_RDWR);
+      ::close(listen_fd);
+    }
+    if (thr.joinable()) thr.join();
+    if (ctx) SSL_CTX_free(ctx);
+    if (cert) X509_free(cert);
+    if (key) EVP_PKEY_free(key);
+    if (!ca_path.empty()) ::unlink(ca_path.c_str());
+  }
+
+  bool start() {
+    EVP_PKEY_CTX* kctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    if (!kctx || EVP_PKEY_keygen_init(kctx) != 1) return false;
+    char group[] = "P-256";
+    OSSL_PARAM kp[] = {OSSL_PARAM_construct_utf8_string("group", group, 0), OSSL_PARAM_construct_end()};
+    if (EVP_PKEY_CTX_set_params(kctx, kp) != 1 || EVP_PKEY_generate(kctx, &key) != 1) {
+      EVP_PKEY_CTX_free(kctx);
+      return false;
+    }
+    EVP_PKEY_CTX_free(kctx);
+    cert = X509_new();
+    if (!cert) return false;
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+    X509_gmtime_adj(X509_getm_notBefore(cert), -60);
+    X509_gmtime_adj(X509_getm_notAfter(cert), 60 * 60);
+    X509_set_pubkey(cert, key);
+    X509_NAME* name = X509_get_subject_name(cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(dns.data()), -1, -1, 0);
+    X509_set_issuer_name(cert, name);
+    auto* sans = sk_GENERAL_NAME_new_null();
+    auto* gn = GENERAL_NAME_new();
+    auto* ia5 = ASN1_IA5STRING_new();
+    ASN1_STRING_set(ia5, dns.data(), static_cast<int>(dns.size()));
+    GENERAL_NAME_set0_value(gn, GEN_DNS, ia5);
+    sk_GENERAL_NAME_push(sans, gn);
+    if (ip_san) {
+      auto* ipn = GENERAL_NAME_new();
+      unsigned char addr[4] = {127, 0, 0, 1};
+      auto* oct = ASN1_OCTET_STRING_new();
+      ASN1_OCTET_STRING_set(oct, addr, 4);
+      GENERAL_NAME_set0_value(ipn, GEN_IPADD, oct);
+      sk_GENERAL_NAME_push(sans, ipn);
+    }
+    X509_add1_ext_i2d(cert, NID_subject_alt_name, sans, 0, 0);
+    sk_GENERAL_NAME_pop_free(sans, GENERAL_NAME_free);
+    if (X509_sign(cert, key, EVP_sha256()) == 0) return false;
+
+    char tmpl[] = "/tmp/crocket-auth-ca-XXXXXX";
+    int fd = ::mkstemp(tmpl);
+    if (fd < 0) return false;
+    FILE* out = ::fdopen(fd, "w");
+    if (!out || PEM_write_X509(out, cert) != 1) {
+      if (out) std::fclose(out);
+      else ::close(fd);
+      return false;
+    }
+    std::fclose(out);
+    ca_path = tmpl;
+
+    ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) return false;
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    if (SSL_CTX_use_certificate(ctx, cert) != 1 || SSL_CTX_use_PrivateKey(ctx, key) != 1) return false;
+
+    listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    int yes = 1;
+    ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) return false;
+    ::listen(listen_fd, 8);
+    socklen_t len = sizeof addr;
+    ::getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &len);
+    port = ntohs(addr.sin_port);
+    thr = std::thread([this] { loop(); });
+    return port != 0;
+  }
+
+  std::string url(std::string_view path) const {
+    return "https://127.0.0.1:" + std::to_string(port) + std::string(path);
+  }
+
+  void loop() {
+    while (!stop.load()) {
+      int fd = ::accept(listen_fd, nullptr, nullptr);
+      if (fd < 0) continue;
+      SSL* ssl = SSL_new(ctx);
+      SSL_set_fd(ssl, fd);
+      if (SSL_accept(ssl) == 1) {
+        std::string req;
+        char buf[1024];
+        while (req.find("\r\n\r\n") == std::string::npos) {
+          int n = SSL_read(ssl, buf, sizeof buf);
+          if (n <= 0) break;
+          req.append(buf, static_cast<std::size_t>(n));
+          if (req.size() > 8192) break;
+        }
+        auto resp = "HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
+                    "\r\nConnection: close\r\n\r\n" + body;
+        SSL_write(ssl, resp.data(), static_cast<int>(resp.size()));
+      }
+      SSL_shutdown(ssl);
+      SSL_free(ssl);
       ::close(fd);
     }
   }
@@ -775,6 +918,139 @@ int main() {
     Harness bare(std::move(hmac_only));
     CHECK(bare.app.core().state.get<auth::Jwt>()->ready());
     CHECK_EQ(bare.get("/me").bearer(hs).dispatch().status, 200);
+  }
+
+  section("invalid JWKS, recovery, bounds, redirect, cache-control");
+  {
+    JwksServer server;
+    server.start();
+    {
+      std::lock_guard lk(server.mu);
+      server.jwks = "not-json";
+    }
+    auth::Jwt j;
+    j.issuer = std::string(kIssuer);
+    j.audience = std::string(kAudience);
+    j.jwks = server.url("/jwks");
+    j.refresh = 1s;
+    Crocket bad(Config{});
+    bad.manage(std::move(j)).attach(Metrics{}).mount("/", reflect_routes<^^api>());
+    LocalClient local(bad);
+    CHECK(!wait_ready(bad, 400ms));
+    CHECK_EQ(local.get("/readyz").dispatch().status, 503);
+    {
+      std::lock_guard lk(server.mu);
+      server.jwks = rsa_doc;
+    }
+    CHECK(wait_ready(bad));
+    auto tok = mint(rsa, "RS256", "rsa-1", payload(exp));
+    CHECK_EQ(local.get("/me").bearer(tok).dispatch().status, 200);
+
+    {
+      std::lock_guard lk(server.mu);
+      server.jwks = std::string((std::size_t{1} << 20) + 64, 'x');
+    }
+    std::this_thread::sleep_for(1500ms);
+    CHECK_EQ(local.get("/me").bearer(tok).dispatch().status, 200);  // oversized refresh keeps the keys
+  }
+  {
+    JwksServer server;
+    server.start();
+    {
+      std::lock_guard lk(server.mu);
+      server.jwks = rsa_doc;
+      server.redirect = "/jwks";
+    }
+    auth::Jwt j;
+    j.issuer = std::string(kIssuer);
+    j.audience = std::string(kAudience);
+    j.jwks = server.url("/redirect");
+    j.refresh = 30s;
+    Crocket app(Config{});
+    app.manage(std::move(j)).mount("/", reflect_routes<^^api>());
+    CHECK(wait_ready(app));
+  }
+  {
+    JwksServer server;
+    server.start();
+    {
+      std::lock_guard lk(server.mu);
+      server.jwks = rsa_doc;
+      server.cache_control = "max-age=1";
+    }
+    auth::Jwt j;
+    j.issuer = std::string(kIssuer);
+    j.audience = std::string(kAudience);
+    j.jwks = server.url("/jwks");
+    j.refresh = 60s;
+    j.cache_entries = 0;
+    Harness h(std::move(j), Config{});
+    CHECK(wait_ready(h.app));
+    {
+      std::lock_guard lk(server.mu);
+      server.jwks = jwks_doc(jwk_of(ec, "ec-1", "ES256"));
+    }
+    auto tok = mint(ec, "ES256", "ec-1", payload(exp));
+    bool rotated = false;
+    for (int i = 0; i < 40 && !rotated; ++i) {
+      std::this_thread::sleep_for(100ms);
+      rotated = h.get("/me").bearer(tok).dispatch().status == 200;
+    }
+    CHECK(rotated);
+  }
+
+  section("JWKS over TLS");
+  {
+    TlsJwks good("127.0.0.1", true);
+    good.body = rsa_doc;
+    CHECK(good.start());
+    auth::Jwt j;
+    j.issuer = std::string(kIssuer);
+    j.audience = std::string(kAudience);
+    j.jwks = good.url("/jwks");
+    j.tls_ca_file = good.ca_path;
+    j.refresh = 30s;
+    Crocket app(Config{});
+    app.manage(std::move(j)).mount("/", reflect_routes<^^api>());
+    CHECK(wait_ready(app));
+    LocalClient local(app);
+    auto tok = mint(rsa, "RS256", "rsa-1", payload(exp));
+    CHECK_EQ(local.get("/me").bearer(tok).dispatch().status, 200);
+
+    TlsJwks wrong("wrong.example", false);
+    wrong.body = rsa_doc;
+    CHECK(wrong.start());
+    auth::Jwt mismatch;
+    mismatch.issuer = std::string(kIssuer);
+    mismatch.audience = std::string(kAudience);
+    mismatch.jwks = wrong.url("/jwks");
+    mismatch.tls_ca_file = wrong.ca_path;
+    mismatch.refresh = 30s;
+    Crocket denied(Config{});
+    denied.manage(std::move(mismatch)).mount("/", reflect_routes<^^api>());
+    CHECK(!wait_ready(denied, 1500ms));
+    CHECK_EQ(LocalClient(denied).get("/readyz").dispatch().status, 503);
+  }
+
+  section("shutdown does not wait past the fetch timeout");
+  {
+    JwksServer server;
+    server.start();
+    server.hang.store(true);
+    auto started = std::chrono::steady_clock::now();
+    {
+      auth::Jwt j;
+      j.issuer = std::string(kIssuer);
+      j.audience = std::string(kAudience);
+      j.jwks = server.url("/jwks");
+      j.refresh = 30s;
+      Crocket app(Config{});
+      app.manage(std::move(j));
+      std::this_thread::sleep_for(200ms);
+    }
+    auto took = std::chrono::steady_clock::now() - started;
+    CHECK(took < 8s);
+    server.hang.store(false);
   }
 
   section("from_env and one authenticator");

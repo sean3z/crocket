@@ -1432,6 +1432,14 @@ auto invoice(std::string id, State<http::Client> billing) -> Task<std::expected<
 }
 ```
 
+`http::for_log` is the form to log. Header values whose names contain
+`password`, `secret`, `token`, `authorization`, `cookie`, or `api_key` (and
+`Idempotency-Key`) are `[redacted]`. `-` and `_` match. A call or a response
+log counts the body and does not include it. `ClientOptions` logs as scheme,
+host, and port; a set `ca_file` is `true` rather than a path. The headers and
+body actually sent are unchanged. Logging a raw header string under a field
+name that does not match the list above still prints it.
+
 `co_await` yields `std::expected<Response, ApiError>`. An HTTP response, including
 a 4xx or 5xx, is the success side: you still have the status and the body.
 `http::json<T>` decodes that body the same way `Json<T>` reads a request, and
@@ -1853,7 +1861,7 @@ cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
 | `level` | `info` | Lines below it are skipped, request lines included (successes are `info`, 4xx `warn`, 5xx `error`). |
 | `sample` | `1.0` | Share of request lines kept for responses below 400, chosen by request id, so the same request is kept on every instance. Errors are always kept, and so are requests slower than `slow`. Env: `CROCKET_LOG_SAMPLE`. |
 | `slow` | `500ms` | With `sample` below 1, a request taking at least this long is logged whatever the sample decides; `0` turns that off. Env: `CROCKET_LOG_SLOW`. |
-| `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these, ignoring case, is written as `"[redacted]"`, in the message too and inside structs. |
+| `redact` | `password`, `secret`, `token`, `authorization`, `cookie`, `api_key` | A field whose name contains one of these is written as `"[redacted]"`, in the message too and inside structs. Case does not matter, and `-` and `_` are the same character, so `X-Api-Key` matches `api_key`. A string logged under some other name, such as `{value}`, is not scanned. |
 | `buffer` | `10'000` | Lines waiting for the writer. Env: `CROCKET_LOG_BUFFER`. |
 | `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
 | `sink` | stderr | Called on the writer thread with each line. |

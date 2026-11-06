@@ -273,6 +273,9 @@ if(CROCKET_HAS_CLIENT)
   # One localhost GET through http::Client (./dev bench client).
   add_executable(crocket_bench_client EXCLUDE_FROM_ALL bench/client.cpp)
   target_link_libraries(crocket_bench_client PRIVATE crocket::client)
+  # Cost of log redaction and http::for_log (./dev bench log).
+  add_executable(crocket_bench_log EXCLUDE_FROM_ALL bench/log_redact.cpp)
+  target_link_libraries(crocket_bench_log PRIVATE crocket::client)
 endif()
 
 if(CROCKET_BUILD_TESTS)

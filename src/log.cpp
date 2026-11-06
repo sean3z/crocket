@@ -40,10 +40,12 @@ Hub& fallback() {
   return hub;
 }
 
-std::string lower(std::string_view s) {
+std::string normalize_field(std::string_view s) {
   std::string out(s);
-  for (auto& c : out)
+  for (auto& c : out) {
     if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    else if (c == '-') c = '_';
+  }
   return out;
 }
 
@@ -82,7 +84,7 @@ std::atomic<std::uint64_t> g_next_hub_id{1};
 
 Hub::Hub(Options opts, bool text, std::atomic<std::uint64_t>* dropped)
     : opts_(std::move(opts)), text_(text), dropped_(dropped), id_(g_next_hub_id.fetch_add(1)) {
-  for (auto& r : opts_.redact) redact_.push_back(lower(r));
+  for (auto& r : opts_.redact) redact_.push_back(normalize_field(r));
   if (opts_.buffer == 0) opts_.buffer = 1;
   if (text_ && !opts_.sink) {
     const char* no_color = std::getenv("NO_COLOR");
@@ -109,7 +111,8 @@ bool Hub::sampled(std::string_view request_id) const {
 
 bool Hub::redacted(std::string_view field) const {
   if (redact_.empty()) return false;
-  auto name = lower(field);
+  // Hyphen and underscore are the same name: "x-api-key" matches "api_key".
+  auto name = normalize_field(field);
   for (auto& r : redact_)
     if (!r.empty() && name.contains(r)) return true;
   return false;

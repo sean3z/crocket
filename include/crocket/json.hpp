@@ -1359,6 +1359,9 @@ void write(std::string& out, const T& v) {
     } else {
       std::visit([&]<class A>(const A& alt) { write<A, O>(out, alt); }, v);
     }
+  } else if constexpr (requires(std::string& sink, const U& value) { crocket_json_write(sink, value); }) {
+    // A type may print a diagnostic form instead of its raw members.
+    crocket_json_write(out, v);
   } else if constexpr (ReflectableStruct<U>) {
     write_struct(out, v);
   } else {

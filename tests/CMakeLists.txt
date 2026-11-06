@@ -143,6 +143,12 @@ if(CROCKET_HAS_CLIENT)
   add_test(NAME client COMMAND crocket_client_test)
   set_tests_properties(client PROPERTIES TIMEOUT 60)
 
+  add_executable(crocket_log_redact_test log_redact.cpp)
+  target_link_libraries(crocket_log_redact_test PRIVATE crocket::client)
+  target_compile_options(crocket_log_redact_test PRIVATE -Wall -Wextra)
+  add_test(NAME log_redact COMMAND crocket_log_redact_test)
+  set_tests_properties(log_redact PROPERTIES TIMEOUT 30)
+
   # A real server, so the call runs on its event loop rather than the fallback.
   add_executable(crocket_client_loop_test client_loop.cpp)
   target_link_libraries(crocket_client_loop_test PRIVATE crocket::client)

@@ -49,8 +49,10 @@ struct Options {
   /// Share of request lines (Logger) kept for responses below 400, decided per
   /// request id. Errors are always kept, and so are requests slower than `slow`.
   double sample = 1.0;
-  /// Fields whose name contains one of these (ignoring case) are written as
-  /// "[redacted]", in the message too, and inside structs.
+  /// Fields whose name contains one of these are written as "[redacted]", in
+  /// the message too, and inside structs. Case, hyphens, and underscores do
+  /// not matter: "X-Api-Key" matches "api_key". A string passed under some
+  /// other name is not scanned.
   std::vector<std::string> redact = {"password", "secret", "token", "authorization", "cookie", "api_key"};
   std::size_t buffer = 10'000;  // lines waiting for the writer
   WhenFull when_full = WhenFull::drop;

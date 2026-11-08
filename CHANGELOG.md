@@ -29,6 +29,13 @@ from outside the project, for example
   ([#47](https://github.com/sean3z/crocket/pull/47)).
 
 ### Added
+- **Continuous fuzzing.** [`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)
+  runs `./dev fuzz` with AddressSanitizer once a day and on demand, apart from
+  pull-request CI (which still runs each corpus and two seconds of mutations).
+  Each target is capped at 90 seconds and the job at 30 minutes. A crash or hang
+  fails the job and uploads the input, seed, and log. Nothing is committed back
+  into `tests/fuzz/corpus`; copy a crash there by hand so it stays a regression
+  ([#49](https://github.com/sean3z/crocket/pull/49)).
 - **`crocket::client`:** opt-in outbound HTTP on h2o's client, same event loop.
   `http::Client` carries a base URL, timeout, per-host pool, retries, and a
   circuit breaker. Retries and the breaker are on unless a call opts out

@@ -1,0 +1,62 @@
+# Bounded continuous fuzzing. Pull-request CI is unchanged: ctest still runs
+# each corpus plus two seconds of mutations. This job is the longer run.
+name: Fuzz
+
+on:
+  schedule:
+    # Once a day. Not on pull requests, so untrusted code is not fuzzed here.
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target (all, json, json_typed, proto, query, route, request, h2, jwt)"
+        default: all
+        type: string
+      seconds:
+        description: "Seconds per target (1-90). all is about eight targets, plus jwt when auth is built."
+        default: "45"
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      CCACHE_DIR: /github/home/.cache/ccache-fuzz
+      FUZZ_TARGET: ${{ inputs.target || 'all' }}
+      FUZZ_SECONDS: ${{ inputs.seconds || '45' }}
+      FUZZ_SEED: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/ccache-fuzz
+          key: ccache-fuzz-${{ github.sha }}
+          restore-keys: ccache-fuzz-
+
+      - name: Fuzz
+        run: .github/fuzz-ci.sh
+
+      - name: Save crash inputs
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-fuzz/crashes/
+          retention-days: 14
+          if-no-files-found: ignore

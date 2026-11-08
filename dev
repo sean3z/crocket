@@ -54,12 +54,14 @@ ${B}./dev${R} <command> [args]
                                               request, over HTTP/1.1 and h2c
                             Numbers compare only on the same machine. h2load comes from
                             nghttp2-client (./dev setup); $H2LOAD overrides the path.
-  fuzz [target|all] [--seconds N] [--save] [--replay FILE...]
+  fuzz [target|all] [--seconds N] [--seed N] [--save] [--replay FILE...]
                             Fuzz the parsers of untrusted input (tests/fuzz: json,
-                            json_typed, proto, query, route, request, h2) with
-                            AddressSanitizer and coverage guidance, N seconds per
-                            target (default 60). --save adds inputs reaching new code
-                            to tests/fuzz/corpus. Crashes go to build-fuzz/crashes/
+                            json_typed, proto, query, route, request, h2, and jwt
+                            when auth is built) with AddressSanitizer and coverage
+                            guidance, N seconds per target (default 60). --save adds
+                            inputs reaching new code to tests/fuzz/corpus. Crashes go
+                            to build-fuzz/crashes/. CI runs this on a schedule
+                            (.github/workflows/fuzz.yml) and does not pass --save.
   h2o-update [ref]          Pin h2o to the newest master commit (or a branch, tag
                             or commit), then run ./dev check
 

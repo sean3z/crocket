@@ -160,6 +160,10 @@ gh attestation verify oci://ghcr.io/sean3z/crocket-hello:0.4.0 \
 
 Parsers that read untrusted bytes have fuzz targets you can run locally
 (`./dev fuzz`; see [Fuzzing](README.md#fuzzing)). Each target also runs its
-corpus in `ctest`. Continuous fuzzing in CI is planned on the way to 1.0
-([Roadmap to 1.0](https://github.com/sean3z/crocket/issues/37)) and is not
-running yet. A crash from the fuzzer is a vulnerability: report it as above.
+corpus in `ctest`, which pull-request CI includes. A longer run, with
+AddressSanitizer, is [`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml):
+daily, and by hand. It does not commit new inputs. A failing run uploads the
+input, the seed, and the log as an artifact. Replay it with
+`./dev fuzz <target> --replay <file>`, then copy the file into
+`tests/fuzz/corpus/<target>/` and commit that copy so `ctest` keeps the case.
+A crash from the fuzzer is a vulnerability: report it as above.

@@ -337,6 +337,12 @@ struct Placement {
   std::atomic<std::uint32_t> fast_runs{0};
   std::atomic<std::uint32_t> demotions{0};
   std::atomic<std::int64_t> retry_at{0};  // steady_clock ticks; no promotion before
+
+  /// One plain-function sample, measured by the caller. Logs when the route
+  /// moves. `kFast` / `kPromoteAfter` / `kSlow` / `kStall` / `kStrikes` stay
+  /// the production thresholds.
+  void note_worker(std::string_view handler, std::chrono::steady_clock::duration took);
+  void note_loop(std::string_view handler, std::chrono::steady_clock::duration took);
 };
 
 /// Measures how long a request holds its event loop; warns (once per handler)

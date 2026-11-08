@@ -13,6 +13,15 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Fixed
+- **Adaptive placement in `tls_h2`.** The socket test required 1,000 handler
+  runs in a row under 100 µs of wall time. One preemption on a busy runner
+  resets that streak, so the route stayed on workers and the demotion checks
+  failed with it. The same thresholds are now applied to durations the test
+  supplies (`tests/placement.cpp`). The socket test still checks that a plain
+  route starts on workers and that a `Pool` route stays there
+  ([#51](https://github.com/sean3z/crocket/pull/51)).
+
 ### Changed
 - **Log redaction** treats `-` and `_` as the same character, so a field named
   `X-Api-Key` matches `api_key`. `http::for_log` prints headers, a call, a

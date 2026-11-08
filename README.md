@@ -2155,6 +2155,7 @@ an ETag and `Shield`'s four).
 ./dev fuzz request --seconds 600   # one target, for longer
 ./dev fuzz json --save             # keep inputs that reach new code in tests/fuzz/corpus
 ./dev fuzz h2 --replay build-fuzz/crashes/crash-h2-…   # run one input again
+./dev fuzz json --seconds 30 --seed 1                  # the same mutations again
 ```
 
 A fuzzer feeds generated inputs to code that parses untrusted bytes, looking for
@@ -2175,12 +2176,24 @@ Each target starts from its seed inputs in `tests/fuzz/corpus/<target>/` and mut
 them. `./dev fuzz` builds `build-fuzz/` with AddressSanitizer and coverage
 instrumentation, so an input that reaches new code is kept and mutated further. (crocket
 needs GCC, so libFuzzer, which needs clang, is out; the harness in `tests/fuzz/fuzz.cpp`
-does the same job.) A problem leaves the input in `build-fuzz/crashes/`; fix it, then add
-the input to the target's corpus so it stays fixed. In `ctest`, each target runs its
-corpus and two seconds of mutations, without coverage. Continuous fuzzing in CI
-is planned on the way to 1.0 and is not running yet
-([Roadmap to 1.0](https://github.com/sean3z/crocket/issues/37)). A crash is a
-vulnerability: report it as [SECURITY.md](SECURITY.md) describes.
+does the same job.) A problem leaves the input in `build-fuzz/crashes/` (`crash-<target>-<hash>`
+or `hang-<target>-<hash>`). Replay it with `./dev fuzz <target> --replay` on that file.
+When the fix is in, copy the file into `tests/fuzz/corpus/<target>/` under a name you
+choose and commit that copy. `ctest` runs every file in the corpus before it mutates,
+so the crash stays fixed. `--save` is the only switch that writes new inputs into the
+corpus; leave it off unless you mean to review and commit them.
+
+In `ctest`, each target runs its corpus and two seconds of mutations, without coverage.
+That is what pull-request CI runs. A separate job,
+[`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml), runs `./dev fuzz` with
+AddressSanitizer and coverage once a day and when someone starts it by hand. Each
+target gets at most 90 seconds (45 by default). `all` is that budget per target, about
+eight targets, plus `jwt` when `crocket::auth` was built. The job stops at 30 minutes.
+It does not pass `--save`, and it does not commit. A crash or a hang fails the job
+and uploads `build-fuzz/crashes/` (the input, `run.txt` with the seed, and `fuzz.log`)
+for 14 days. Download that directory and replay the file locally, as above, then
+promote it into the corpus yourself. A crash is a vulnerability: report it as
+[SECURITY.md](SECURITY.md) describes.
 
 ### Tests
 

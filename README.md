@@ -694,7 +694,9 @@ and manage one `auth::Jwt`. It is the `Authenticator` the `Auth<>` extractor alr
 calls. `#include <crocket/auth.hpp>` is not pulled in by `crocket.hpp`, and a program
 that does not link `crocket::auth` does not get the JWT code. CMake builds it when
 OpenSSL 3 is found (`-DCROCKET_AUTH=AUTO`, the default). `ON` fails configure without
-OpenSSL; `OFF` skips it.
+OpenSSL, and it also fails when `crocket::client` is off, because JWKS and discovery
+use that client. With both options left on `AUTO`, turning the client off turns auth
+off. `OFF` skips auth.
 
 ```cpp
 #include <crocket/auth.hpp>
@@ -1276,7 +1278,11 @@ on [libpqxx](https://github.com/jtv/libpqxx). It is built when libpqxx is found
 libpqxx 7.10 and 8.x both work; CI tests each.
 `-DCROCKET_PG=OFF` skips it and `-DCROCKET_PG=ON` makes a missing libpqxx an error.
 Programs that link only `crocket::crocket` are unaffected. Handlers name `Db&`, never
-the backend, so a later backend (`crocket::sqlite`, say) needs no handler changes.
+the backend. Another backend is not in this tree.
+`db::Pool` opens `pool_size` connections when it is constructed and throws if it
+cannot, so a database that is down at startup stops the process. After that,
+`GET /readyz` runs `select 1` and returns 503 while the check fails or while the
+server is draining. A handler that cannot check out a connection gets 503 `db.busy`.
 
 Your structs stay plain: no annotations and no base class.
 
@@ -1866,6 +1872,11 @@ cfg.log.sink = [](std::string_view line) { ship(line); };   // default: stderr
 | `when_full` | `drop` | `drop` discards new lines while the buffer is full, then writes a warning with the count and adds it to `crocket_log_lines_dropped_total`. `block` makes the logging thread wait instead. |
 | `sink` | stderr | Called on the writer thread with each line. |
 
+Two mechanisms, and neither changes the bytes on the wire.
+
+- **Field names.** The table above is what `log::info` and the other levels apply to arguments and to struct fields. `http::for_log` uses the same names and also treats `Idempotency-Key` as sensitive. A secret placed in a value whose name does not match is kept. That is the eager scrub already in place; it is not deferred.
+- **Request header values.** While a request is current, every line passed to the log writer has the raw `Authorization`, `Proxy-Authorization`, and `Cookie` values replaced with `[redacted]` wherever those exact bytes appear. If `Authorization` is `Bearer` plus more than 16 characters, that token is replaced too, so it cannot show up as the subject or inside an error detail. A shorter bearer token is not stripped on its own: a short opaque value is often the subject, and the line is supposed to keep the subject. This does not look at other headers.
+
 In the dev profile, lines are readable text instead of JSON:
 `14:03:07.250 INFO  created user 42 on plan pro [5f0c…]`.
 
@@ -1998,7 +2009,9 @@ spec:
 crocket uses [Semantic Versioning](https://semver.org/). While on 0.x, a minor bump
 (0.1 → 0.2) may break the API, and patch releases are fixes and additions only. Each
 release is in [CHANGELOG.md](CHANGELOG.md) and on
-[GitHub Releases](https://github.com/sean3z/crocket/releases).
+[GitHub Releases](https://github.com/sean3z/crocket/releases). 1.0 is not released.
+There is no compatibility shim: for each minor you cross, read that version's
+Changed section and rebuild. Pin a tag or a commit for a vendored copy. `main` moves.
 
 | Channel | Git ref | Docker tags (`ghcr.io/sean3z/crocket-hello`) | For |
 |---|---|---|---|
@@ -2056,11 +2069,10 @@ see [docs/ENGINE.md](docs/ENGINE.md#updating-h2o). An application that links wit
 
 Options:
 
-- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, `crocket_auth_example` when `crocket::auth` is on, and `crocket_client_example` and `crocket_client_multi_example` when `crocket::client` is on.
-- `CROCKET_CLIENT` is `AUTO` (build the outbound HTTP client when OpenSSL 3 is present), `ON`, or `OFF`. `CROCKET_AUTH` is the same idea for JWT.
-- `CROCKET_BUILD_TESTS` builds the tests.
-
-Both are ON when crocket is the top-level project and OFF when it is a dependency.
+- `CROCKET_BUILD_EXAMPLES` builds `crocket_hello`, `crocket_serve`, `crocket_grpc`, `crocket_auth_example` when `crocket::auth` is on, and `crocket_client_example` and `crocket_client_multi_example` when `crocket::client` is on. `CROCKET_BUILD_TESTS` builds the tests. Both are ON when crocket is the top-level project and OFF when it is a dependency.
+- `CROCKET_CLIENT` is `AUTO` (build the outbound HTTP client when OpenSSL 3 is present), `ON`, or `OFF`.
+- `CROCKET_AUTH` is `AUTO`, `ON`, or `OFF` for JWT. `ON` fails without OpenSSL 3 or without the client. Left on `AUTO`, auth is off when the client is off.
+- `CROCKET_PG` is `AUTO`, `ON`, or `OFF` for `crocket::pg`. `ON` fails when libpqxx is missing. 7.10 and 8.x both work.
 
 ## Working on crocket
 
@@ -2074,9 +2086,11 @@ don't need it.
 ./dev check        # release build plus the full ctest, before calling a change done
 ```
 
-`./dev help` lists every command. CI (`.github/workflows/ci.yml`) runs `./dev setup`,
-`./dev gcc` and `./dev check` in an `ubuntu:26.04` container on every push to `main`
-and every pull request, and caches the GCC build. Builds go to `build-dev/` (Debug), `build/`
+`./dev help` lists every command. CI (`.github/workflows/ci.yml`) runs `./dev check`
+in `ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg` on every push to `main` and every
+pull request. The image already has GCC 16.2 and libpqxx, so the job does not run
+`./dev setup` or `./dev gcc`. It caches ccache, not a compiler build. A second job
+builds libpqxx 8 and runs the database test. Builds go to `build-dev/` (Debug), `build/`
 (release) and `build-fuzz/` (see [Fuzzing](#fuzzing)), configured from `CMakePresets.json`. `./dev` picks the compiler in this
 order: `$CROCKET_CXX`, GCC 16.2 in `~/.local/gcc-16.2`, then `g++-16`.
 

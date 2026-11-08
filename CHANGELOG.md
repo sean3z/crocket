@@ -23,6 +23,14 @@ from outside the project, for example
   ([#51](https://github.com/sean3z/crocket/pull/51)).
 
 ### Changed
+- **Docs.** CI is `./dev check` in the GCC 16.2 toolchain image, not a compiler
+  build in a plain Ubuntu container. The CMake options for the client, auth, and
+  Postgres say `AUTO` / `ON` / `OFF`, including auth failing closed when the
+  client is off. Logging states the request-line credential scrub next to
+  field-name redaction. `db::Pool` throws if it cannot open its connections at
+  startup. Versions note that 1.0 is not released and that 0.x minors have no
+  compatibility shim. The roadmap section points at the 1.0 roadmap issue.
+  ([#50](https://github.com/sean3z/crocket/pull/50)).
 - **Log redaction** treats `-` and `_` as the same character, so a field named
   `X-Api-Key` matches `api_key`. `http::for_log` prints headers, a call, a
   response, or `ClientOptions` without userinfo, query, fragment, CA paths, or

@@ -2217,20 +2217,8 @@ vulnerability: report it as [SECURITY.md](SECURITY.md) describes.
 
 ## Roadmap
 
-1.0 work in this tree is stability, documentation, and validation. The tracker is
-still [Roadmap to 1.0](https://github.com/sean3z/crocket/issues/37). This list is
-the split used here. It does not edit that issue, and it is not a release.
-
-Not part of 1.0, and not scheduled in this tree:
-
-- OpenTelemetry export (opt-in)
-- Streaming request or response bodies
-- Further database backends
-- Rate limiting
-- Helm charts, and reloading configuration without a process restart. TLS
-  certificate reload, on SIGHUP or when the cert files change, is already in.
-- Native mTLS. No target version.
-- A gRPC client. The server side is in. A client is 1.x.
+What's planned on the way to 1.0, including features not in crocket yet, is tracked in
+[Roadmap to 1.0](https://github.com/sean3z/crocket/issues/37).
 
 ## Contributing
 

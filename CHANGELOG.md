@@ -20,7 +20,7 @@ from outside the project, for example
   client is off. Logging states the request-line credential scrub next to
   field-name redaction. `db::Pool` throws if it cannot open its connections at
   startup. Versions note that 1.0 is not released and that 0.x minors have no
-  compatibility shim. The roadmap section lists what is beyond 1.0
+  compatibility shim. The roadmap section points at the 1.0 roadmap issue.
   ([#50](https://github.com/sean3z/crocket/pull/50)).
 - **Log redaction** treats `-` and `_` as the same character, so a field named
   `X-Api-Key` matches `api_key`. `http::for_log` prints headers, a call, a

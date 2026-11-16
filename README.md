@@ -2237,7 +2237,7 @@ What's planned on the way to 1.0, including features not in crocket yet, is trac
 ## Contributing
 
 Issues and pull requests are welcome. Report a vulnerability in private, as
-[SECURITY.md](SECURITY.md) describes, not in a public issue. To get a working tree, follow
+[SECURITY.md](SECURITY.md) describes, not in a public issue. Style for new and touched code is [docs/style.md](docs/style.md). To get a working tree, follow
 [Building from source](#building-from-source): `./dev setup`, `./dev gcc`, then
 `./dev check` runs the release build and the full test suite. [Working on crocket](#working-on-crocket)
 covers the rest of `./dev`, [Benchmarks](#benchmarks) (`./dev bench --compare main`

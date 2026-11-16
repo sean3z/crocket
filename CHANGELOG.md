@@ -13,6 +13,10 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Added
+- **Style guide** for new and touched code: [docs/style.md](docs/style.md). It records the conventions already in the tree. clang-format stays off
+  ([#52](https://github.com/sean3z/crocket/pull/52)).
+
 ### Fixed
 - **Adaptive placement in `tls_h2`.** The socket test required 1,000 handler
   runs in a row under 100 µs of wall time. One preemption on a busy runner

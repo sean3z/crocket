@@ -85,7 +85,7 @@ signing key.
 
 The signed subject is the image digest the tags point at. Buildx also attaches
 its own provenance manifest, so that digest is an image index. Verify the tag
-you pull. A moved tag (`:stable`, `:latest`, `:experimental`, `:0.4`) verifies
+you pull. A moved tag (`:stable`, `:latest`, `:experimental`, `:0.5`) verifies
 as whatever digest it points at now, which was signed when that image was
 pushed.
 
@@ -115,21 +115,21 @@ installs that major version) and run:
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github.com/sean3z/crocket/\.github/workflows/release\.yml@refs/(heads/main|tags/[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$' \
-  ghcr.io/sean3z/crocket-hello:0.4.0
+  ghcr.io/sean3z/crocket-hello:0.5.0
 ```
 
-The same command works for `:stable`, `:0.4`, `:latest`, `:sha-<short>`, and an
+The same command works for `:stable`, `:0.5`, `:latest`, `:sha-<short>`, and an
 experimental tag. The identity is this repository's `release.yml`, on `main` or
 on a version tag.
 
 ### Check the software bill of materials
 
-The release asset is the file Syft wrote. For the 0.4.0 release:
+The release asset is the file Syft wrote. For the 0.5.0 release:
 
 ```bash
-gh release download 0.4.0 --repo sean3z/crocket \
-  --pattern 'crocket-hello-0.4.0.cdx.json' \
-  --pattern 'crocket-hello-0.4.0.spdx.json'
+gh release download 0.5.0 --repo sean3z/crocket \
+  --pattern 'crocket-hello-0.5.0.cdx.json' \
+  --pattern 'crocket-hello-0.5.0.spdx.json'
 ```
 
 The attestation is what binds that bill of materials to the image. `--type cyclonedx`
@@ -141,7 +141,7 @@ cosign verify-attestation \
   --type cyclonedx \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github.com/sean3z/crocket/\.github/workflows/release\.yml@refs/(heads/main|tags/[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$' \
-  ghcr.io/sean3z/crocket-hello:0.4.0
+  ghcr.io/sean3z/crocket-hello:0.5.0
 ```
 
 Use `--type spdxjson` for the SPDX document. `cosign download attestation` with
@@ -151,7 +151,7 @@ release asset is the raw document.
 ### Check the build provenance
 
 ```bash
-gh attestation verify oci://ghcr.io/sean3z/crocket-hello:0.4.0 \
+gh attestation verify oci://ghcr.io/sean3z/crocket-hello:0.5.0 \
   --repo sean3z/crocket \
   --signer-workflow sean3z/crocket/.github/workflows/release.yml
 ```

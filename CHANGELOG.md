@@ -13,43 +13,18 @@ from outside the project, for example
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-16
+
+Optional JWT/OIDC and an outbound HTTP client, credential redaction in logs,
+and continuous fuzzing. Apps must rebuild: `Config` gained `auth` and `Request`
+gained bearer material. `crocket::auth` links `crocket::client`.
+`CROCKET_AUTH=ON` fails configure when the client is off, and with both left
+on `AUTO`, turning the client off turns auth off. Log redaction now treats `-`
+and `_` as the same character, so a field such as `X-Api-Key` matches `api_key`.
+
 ### Added
 - **Style guide** for new and touched code: [docs/style.md](docs/style.md). It records the conventions already in the tree. clang-format stays off
   ([#52](https://github.com/sean3z/crocket/pull/52)).
-
-### Fixed
-- **Adaptive placement in `tls_h2`.** The socket test required 1,000 handler
-  runs in a row under 100 µs of wall time. One preemption on a busy runner
-  resets that streak, so the route stayed on workers and the demotion checks
-  failed with it. The same thresholds are now applied to durations the test
-  supplies (`tests/placement.cpp`). The socket test still checks that a plain
-  route starts on workers and that a `Pool` route stays there
-  ([#51](https://github.com/sean3z/crocket/pull/51)).
-
-### Changed
-- **Docs.** CI is `./dev check` in the GCC 16.2 toolchain image, not a compiler
-  build in a plain Ubuntu container. The CMake options for the client, auth, and
-  Postgres say `AUTO` / `ON` / `OFF`, including auth failing closed when the
-  client is off. Logging states the request-line credential scrub next to
-  field-name redaction. `db::Pool` throws if it cannot open its connections at
-  startup. Versions note that 1.0 is not released and that 0.x minors have no
-  compatibility shim. The roadmap section points at the 1.0 roadmap issue.
-  ([#50](https://github.com/sean3z/crocket/pull/50)).
-- **Log redaction** treats `-` and `_` as the same character, so a field named
-  `X-Api-Key` matches `api_key`. `http::for_log` prints headers, a call, a
-  response, or `ClientOptions` without userinfo, query, fragment, CA paths, or
-  header values whose names look like credentials. Bodies are a byte count.
-  Logging a raw string under an unrelated field name is still printed as
-  itself. The bytes on the wire are unchanged
-  ([#48](https://github.com/sean3z/crocket/pull/48)).
-- **`crocket::auth` JWKS fetch** uses `crocket::client` instead of its own HTTPS
-  client. A fetch times out at 5 seconds, keeps at most 1 MiB, checks the TLS
-  hostname, and does not retry; the refresh loop tries again. `crocket::auth`
-  links `crocket::client`. `CROCKET_AUTH=ON` with the client off fails configure.
-  With both on `AUTO`, turning the client off turns auth off
-  ([#47](https://github.com/sean3z/crocket/pull/47)).
-
-### Added
 - **Continuous fuzzing.** [`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)
   runs `./dev fuzz` with AddressSanitizer once a day and on demand, apart from
   pull-request CI (which still runs each corpus and two seconds of mutations).
@@ -78,6 +53,38 @@ from outside the project, for example
   `crocket_auth_example` when auth is on, and `./dev bench auth` times
   `me(Auth<>)`. See the README
   ([#45](https://github.com/sean3z/crocket/pull/45))
+
+### Changed
+- **Docs.** CI is `./dev check` in the GCC 16.2 toolchain image, not a compiler
+  build in a plain Ubuntu container. The CMake options for the client, auth, and
+  Postgres say `AUTO` / `ON` / `OFF`, including auth failing closed when the
+  client is off. Logging states the request-line credential scrub next to
+  field-name redaction. `db::Pool` throws if it cannot open its connections at
+  startup. Versions note that 1.0 is not released and that 0.x minors have no
+  compatibility shim. The roadmap section points at the 1.0 roadmap issue.
+  ([#50](https://github.com/sean3z/crocket/pull/50)).
+- **Log redaction** treats `-` and `_` as the same character, so a field named
+  `X-Api-Key` matches `api_key`. `http::for_log` prints headers, a call, a
+  response, or `ClientOptions` without userinfo, query, fragment, CA paths, or
+  header values whose names look like credentials. Bodies are a byte count.
+  Logging a raw string under an unrelated field name is still printed as
+  itself. The bytes on the wire are unchanged
+  ([#48](https://github.com/sean3z/crocket/pull/48)).
+- **`crocket::auth` JWKS fetch** uses `crocket::client` instead of its own HTTPS
+  client. A fetch times out at 5 seconds, keeps at most 1 MiB, checks the TLS
+  hostname, and does not retry; the refresh loop tries again. `crocket::auth`
+  links `crocket::client`. `CROCKET_AUTH=ON` with the client off fails configure.
+  With both on `AUTO`, turning the client off turns auth off
+  ([#47](https://github.com/sean3z/crocket/pull/47)).
+
+### Fixed
+- **Adaptive placement in `tls_h2`.** The socket test required 1,000 handler
+  runs in a row under 100 µs of wall time. One preemption on a busy runner
+  resets that streak, so the route stayed on workers and the demotion checks
+  failed with it. The same thresholds are now applied to durations the test
+  supplies (`tests/placement.cpp`). The socket test still checks that a plain
+  route starts on workers and that a `Pool` route stays there
+  ([#51](https://github.com/sean3z/crocket/pull/51)).
 
 ### Security
 - **Vulnerability reports:** [SECURITY.md](SECURITY.md) is the security policy.
@@ -244,7 +251,8 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labeled with their matched route instead of
   `<unmatched>` ([#30](https://github.com/sean3z/crocket/pull/30)).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/sean3z/crocket/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/sean3z/crocket/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/sean3z/crocket/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/sean3z/crocket/compare/0.1.1...0.2.0

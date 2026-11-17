@@ -13,7 +13,9 @@ from outside the project, for example
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-11-16
+## [0.5.1] - 2026-11-17
+
+`0.5.0` was tagged by mistake and then removed, so `0.5.1` is the first 0.5 release. There is no `0.5.0` to use.
 
 Optional JWT/OIDC and an outbound HTTP client, credential redaction in logs,
 and continuous fuzzing. Apps must rebuild: `Config` gained `auth` and `Request`
@@ -251,8 +253,8 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labeled with their matched route instead of
   `<unmatched>` ([#30](https://github.com/sean3z/crocket/pull/30)).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.0...HEAD
-[0.5.0]: https://github.com/sean3z/crocket/compare/0.4.0...0.5.0
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.1...HEAD
+[0.5.1]: https://github.com/sean3z/crocket/compare/0.4.0...0.5.1
 [0.4.0]: https://github.com/sean3z/crocket/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/sean3z/crocket/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/sean3z/crocket/compare/0.1.1...0.2.0

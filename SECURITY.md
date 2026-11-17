@@ -115,7 +115,7 @@ installs that major version) and run:
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github.com/sean3z/crocket/\.github/workflows/release\.yml@refs/(heads/main|tags/[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$' \
-  ghcr.io/sean3z/crocket-hello:0.5.0
+  ghcr.io/sean3z/crocket-hello:0.5.1
 ```
 
 The same command works for `:stable`, `:0.5`, `:latest`, `:sha-<short>`, and an
@@ -124,12 +124,12 @@ on a version tag.
 
 ### Check the software bill of materials
 
-The release asset is the file Syft wrote. For the 0.5.0 release:
+The release asset is the file Syft wrote. For the 0.5.1 release:
 
 ```bash
-gh release download 0.5.0 --repo sean3z/crocket \
-  --pattern 'crocket-hello-0.5.0.cdx.json' \
-  --pattern 'crocket-hello-0.5.0.spdx.json'
+gh release download 0.5.1 --repo sean3z/crocket \
+  --pattern 'crocket-hello-0.5.1.cdx.json' \
+  --pattern 'crocket-hello-0.5.1.spdx.json'
 ```
 
 The attestation is what binds that bill of materials to the image. `--type cyclonedx`
@@ -141,7 +141,7 @@ cosign verify-attestation \
   --type cyclonedx \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github.com/sean3z/crocket/\.github/workflows/release\.yml@refs/(heads/main|tags/[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$' \
-  ghcr.io/sean3z/crocket-hello:0.5.0
+  ghcr.io/sean3z/crocket-hello:0.5.1
 ```
 
 Use `--type spdxjson` for the SPDX document. `cosign download attestation` with
@@ -151,7 +151,7 @@ release asset is the raw document.
 ### Check the build provenance
 
 ```bash
-gh attestation verify oci://ghcr.io/sean3z/crocket-hello:0.5.0 \
+gh attestation verify oci://ghcr.io/sean3z/crocket-hello:0.5.1 \
   --repo sean3z/crocket \
   --signer-workflow sean3z/crocket/.github/workflows/release.yml
 ```

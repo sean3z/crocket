@@ -3,7 +3,7 @@ project(crocket VERSION 0.5.1 LANGUAGES C CXX)
 
 # Examples and tests are for working on crocket; a project that pulls crocket
 # in with FetchContent or add_subdirectory doesn't build them.
-option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve, crocket_grpc, and crocket_auth_example / crocket_client_example / crocket_client_multi_example when those libraries are on" ${PROJECT_IS_TOP_LEVEL})
+option(CROCKET_BUILD_EXAMPLES "Build crocket_hello, crocket_serve, crocket_files, crocket_grpc, and crocket_auth_example / crocket_client_example / crocket_client_multi_example when those libraries are on" ${PROJECT_IS_TOP_LEVEL})
 option(CROCKET_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 # ./dev fuzz: crocket and the fuzz targets report coverage to tests/fuzz, so
 # inputs that reach new code are kept and mutated further.
@@ -69,6 +69,7 @@ add_library(crocket STATIC
   src/conditional.cpp
   src/identity.cpp
   src/router.cpp
+  src/static.cpp
   src/json.cpp
   src/http.cpp
   src/fairings.cpp
@@ -228,6 +229,8 @@ if(CROCKET_BUILD_EXAMPLES)
   endif()
   add_executable(crocket_hello examples/hello.cpp)
   target_link_libraries(crocket_hello PRIVATE crocket)
+  add_executable(crocket_files examples/files.cpp)
+  target_link_libraries(crocket_files PRIVATE crocket)
   add_executable(crocket_serve examples/serve.cpp)
   target_link_libraries(crocket_serve PRIVATE crocket)
   add_executable(crocket_grpc examples/grpc.cpp)

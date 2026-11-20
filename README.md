@@ -654,6 +654,98 @@ auto report(std::uint64_t id, State<Store> store) -> Cacheable<std::string> {
   and a request for several ranges gets the whole body. `If-Range` makes the range
   conditional on the client still having the current version.
 
+### Static files
+
+`.files()` serves a directory, or bytes embedded in the binary, under a URL prefix.
+Routes are matched first, so a handler never waits on the filesystem. A path no route
+claims and no file covers is the ordinary 404 (`not_found`), which is how `/` can serve
+a frontend next to an API without swallowing `/api/...` or `/healthz`.
+
+```cpp
+crocket::build()
+    .attach(Shield{}.set("content-security-policy", "default-src 'self'"))
+    .files({.prefix = "/", .root = "web"})
+    .mount("/api", reflect_routes<^^api>())
+    .launch();
+```
+
+The same struct serves `#embed` bytes. `asset()` points at the array. The path and the
+bytes have to outlive the process, which a constexpr array does. A string literal's
+trailing NUL would be part of the file, so embed the file rather than quoting it.
+
+```cpp
+static constexpr unsigned char index_html[] = {
+#embed "web/index.html"
+};
+static constexpr unsigned char app_js[] = {
+#embed "web/app.js"
+};
+
+.files({.assets = {
+    asset("index.html", index_html),
+    asset("app.js", app_js),
+}})
+```
+
+`examples/files.cpp` (`crocket_files`) does both: embedded by default, or the directory
+in `WEB_ROOT` when that is set.
+
+- **`prefix`** defaults to `/`. `/static` matches `/static` and `/static/...`, not
+  `/staticfile`. The longest matching prefix owns the path. A miss there is a 404, not
+  a search of a shorter mount.
+- **`root`** is a directory, opened at ignite and held for the life of the process.
+  Files added inside it show up on the next request. Replacing the directory inode
+  (remove it and create another at the same path) doesn't retarget the server.
+  **`assets`** is the embedded list. Set one of them.
+- **`index`** defaults to `index.html`. A directory URL that ends in `/` serves it.
+  Without the slash the response is `308` to the path with a slash appended. An empty
+  `index` means a directory isn't a file.
+- **`dotfiles`** is off. A segment that starts with `.` is a miss, same as a missing file.
+- **`spa`** serves the mount's index for a GET or HEAD that missed and whose last
+  segment has no `.`, which is a client-side route. A missing `app.js` stays a 404.
+  Routes, including `/healthz`, still win. `spa` requires the index to exist at ignite.
+- **`cache_control`** defaults to `no-cache` (revalidate, don't keep a stale copy).
+  Hashed asset names can use `public, max-age=31536000, immutable`.
+- **`max_bytes`** defaults to 32 MiB. A larger file on disk is `500 static.too_large`.
+  A larger embedded asset fails ignite.
+- **`types`** adds or replaces a content type by extension (`{{"weba", "audio/webm"}}`).
+  No leading dot. The built-in list covers the usual web types, and text types include
+  `charset=utf-8`. `application/json` doesn't, matching crocket's other JSON responses.
+  Unknown extensions are `application/octet-stream`.
+
+The request path is normalized before this runs. Each segment is then percent-decoded
+once, which is the same text a path capture would see, and that name has to be one
+component. `%2e%2e%2f` decodes to `../`, so it is a miss. The decoded text is never
+concatenated onto the root: a name that is empty, `.`, `..`, or that contains `/`,
+`\`, or NUL doesn't reach `openat`. A symlink is followed only when the file it names
+stays inside the root. An absolute link, a `..` that climbs out, and a link to
+somewhere like `/etc/passwd` are misses. Paths are case-sensitive, like the filesystem.
+Only GET and HEAD are served. Anything else falls through, so it's a 404 when no route
+matches, or a 405 when some other method has one.
+
+Disk files send a strong `ETag` of size and mtime (with nanoseconds) and a
+`Last-Modified`. Embedded files send a strong `ETag`, the same hash crocket generates
+for other bodies, and no `Last-Modified`, because an embed has no mtime. `If-None-Match`
+and `If-Modified-Since` answer `304` through the same conditional handling as any other
+response. One `Range` is `206` once the file fits in `max_bytes`, since the body is
+already a buffer. Several ranges in one request get the whole file, as they do for
+`Cacheable`. `HEAD` carries the same headers as `GET`. An `ETag` built from size and
+mtime doesn't change if the bytes change without either of those changing.
+
+Disk reads run on a worker, so a slow disk doesn't stall an event loop. Embedded files
+are already in memory and run on the loop. Logs and metrics use one label per mount,
+`/static/{path}` or `/{path}`, not each file's path.
+
+`Shield`'s default content security policy is `default-src 'none'`, which blocks a
+page from loading its own scripts and styles. Attach a `Shield` with the policy the
+page needs (`default-src 'self'` is the usual start) when these files are a browser
+app. Security headers, CORS, metrics, logging, and allowed hosts apply to the response
+the same way they apply to a handler.
+
+h2o's own file handler isn't used. It answers on `h2o_req_t`, before this pipeline, it
+follows symlinks, and it can't serve embedded bytes. That code stays out of the binary.
+[docs/ENGINE.md](docs/ENGINE.md) has the detail.
+
 ### Managed state and sentinels
 
 `manage` a value once and ask for it with `State<T>` anywhere. As with Rocket's
@@ -2218,6 +2310,7 @@ promote it into the corpus yourself. A crash is a vulnerability: report it as
 | `cpus` | The default number of event loops: physical cores from CPU topology, counting hyperthread siblings once, honoring the affinity mask, and falling back when topology is missing. |
 | `placement` | Adaptive placement with durations handed in, not a live clock: 1,000 fast samples promote and log it, a sample at the 100 µs limit resets the streak, one slow sample on a loop stays, eight inside the window demote and log why, one stall demotes at once, the retry hold blocks the next promotion, and a `Pool` route stays on workers. |
 | `router` | The route tree against a linear scan of every route, over 2,000 random route tables: the same candidates in the same order, the same captures, HEAD falling back to GET, and the same methods for 405. |
+| `static` | Static files in-process: a directory and `#embed` bytes, content types, index files, SPA fallback, routes winning, dotfiles, symlink and path-traversal misses, conditional requests, ranges, and fairings (Shield, CORS, metrics, allowed hosts). |
 | `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |

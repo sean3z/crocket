@@ -13,4 +13,8 @@ namespace crocket::detail {
 /// `accept-ranges: bytes`.
 void conditional(const Request& rq, Response& rs, std::size_t etag_max_bytes);
 
+/// A strong ETag for `body`, the same 16 hex digits conditional() generates
+/// when a handler didn't set one: `"<16 hex>"`.
+std::string strong_etag(std::string_view body);
+
 }  // namespace crocket::detail

@@ -136,6 +136,15 @@ std::optional<std::pair<std::size_t, std::size_t>> parse_range(std::string_view 
 
 }  // namespace
 
+std::string strong_etag(std::string_view body) {
+  static constexpr char hex[] = "0123456789abcdef";
+  char tag[18] = {'"'};
+  std::uint64_t h = body_hash(body);
+  for (int i = 16; i >= 1; --i, h >>= 4) tag[i] = hex[h & 0xF];
+  tag[17] = '"';
+  return std::string(tag, sizeof tag);
+}
+
 void conditional(const Request& rq, Response& rs, std::size_t etag_max_bytes) {
   if (rs.status != 200 || (rq.method != http::Method::Get && rq.method != http::Method::Head)) return;
   if (!rs.headers.contains("etag") && rs.body.size() <= etag_max_bytes && etag_max_bytes > 0) {

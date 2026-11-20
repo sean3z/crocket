@@ -13,6 +13,21 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Added
+- **Static files.** `.files()` serves a directory under a URL prefix, or bytes
+  embedded with `#embed`, through the same `StaticFiles` options. Routes are
+  matched first, and a miss is a normal 404. GET and HEAD send a content type
+  (text types include a charset), a strong ETag, `Cache-Control`, and
+  `Last-Modified` for disk files. `If-None-Match` and `If-Modified-Since`
+  answer 304, and one byte range answers 206, through the same conditional
+  handling as any other response. Dotfiles are hidden unless asked for.
+  Symlinks are followed only when the target stays inside the root. A segment
+  is decoded the way a path capture is, and `%2e%2e%2f` (`../`) is a miss
+  rather than a path joined onto the root. `..`, encoded slashes, empty
+  segments, and NUL never leave the root. An
+  optional `spa` flag serves the index for extension-less misses. Disk reads
+  run on workers. `examples/files.cpp` is `crocket_files`.
+
 ## [0.5.1] - 2026-11-17
 
 `0.5.0` was tagged by mistake and then removed, so `0.5.1` is the first 0.5 release. There is no `0.5.0` to use.

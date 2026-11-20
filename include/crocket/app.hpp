@@ -6,6 +6,7 @@
 #include "crocket/log.hpp"
 #include "crocket/request.hpp"
 #include "crocket/state.hpp"
+#include "crocket/static.hpp"
 
 #include <array>
 #include <atomic>
@@ -423,6 +424,8 @@ struct IpRange {
   int prefix = 0;
 };
 
+struct StaticTable;
+
 struct Core {
   Config config;
   std::vector<IpRange> trusted_proxies;  // parsed at ignite
@@ -445,6 +448,12 @@ struct Core {
   std::shared_ptr<Router> router;         // built at ignite
   Stats stats;
   bool ignited = false;
+  std::vector<StaticFiles> static_files;       // .files(), prepared at ignite
+  std::unique_ptr<StaticTable> static_table;   // directory fds live in static.cpp
+  // Defined in static.cpp, where StaticTable is complete. An inline constructor
+  // would destroy that unique_ptr from every caller.
+  Core();
+  ~Core();
 };
 
 }  // namespace detail
@@ -534,6 +543,11 @@ class Crocket {
   Crocket&& mount(std::string_view base, Routes routes, Mode mode = Mode::Http) && {
     return std::move(mount(base, std::move(routes), mode));
   }
+
+  /// Serve static files. Routes are tried first; a miss is a normal 404.
+  /// See static.hpp. After ignite the call is an error and changes nothing.
+  Crocket& files(StaticFiles spec) &;
+  Crocket&& files(StaticFiles spec) && { return std::move(files(std::move(spec))); }
 
   Crocket& configure(Config cfg) &;
   Crocket&& configure(Config cfg) && { return std::move(configure(std::move(cfg))); }

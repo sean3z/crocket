@@ -832,8 +832,10 @@ void test_fast_path_and_memory() {
     CHECK_EQ(first.body, "one");
     auto head = dc.head("/n.txt").dispatch();
     CHECK_EQ(head.status, 200);
-    CHECK_EQ(head.body, "one");
-    CHECK(hdr(head, "content-length").empty());
+    CHECK(head.body.empty());
+    CHECK_EQ(hdr(head, "content-length"), "3");
+    CHECK_EQ(hdr(head, "etag"), hdr(first, "etag"));
+    CHECK_EQ(hdr(head, "last-modified"), hdr(first, "last-modified"));
     CHECK(!dev.loop_route(http::Method::Get, "/n.txt"));
     auto p = live.write("n.txt", "two");
     set_mtime(p, 1'800'000'000, 9);
@@ -843,9 +845,71 @@ void test_fast_path_and_memory() {
     CHECK_EQ(br.body, "brotli-bytes");
     auto again = dc.get("/app.js").header("accept-encoding", "br").header("if-none-match", hdr(br, "etag")).dispatch();
     CHECK_EQ(again.status, 304);
-    CHECK_EQ(dc.head("/app.js").header("accept-encoding", "br").dispatch().body, "brotli-bytes");
+    auto head_br = dc.head("/app.js").header("accept-encoding", "br").dispatch();
+    CHECK(head_br.body.empty());
+    CHECK_EQ(hdr(head_br, "content-length"), std::to_string(br.body.size()));
+    CHECK_EQ(hdr(head_br, "content-encoding"), "br");
+    CHECK_EQ(hdr(head_br, "etag"), hdr(br, "etag"));
     std::filesystem::remove(p);
     CHECK_EQ(dc.get("/n.txt").dispatch().status, 404);
+  }
+  {
+    // Dev HEAD reads the file, then sends no body. An edit changes the headers.
+    Tmp live;
+    live.write("index.html", "SPA_INDEX");
+    live.write("app.js", "js-bytes");
+    Crocket dev;
+    Config cfg;
+    cfg.profile = Profile::Dev;
+    dev.configure(cfg);
+    static constexpr unsigned char kHi[] = {'h', 'i', '!', '\n'};
+    dev.mount("/e", files{.assets = {asset("hi.txt", kHi), asset("index.html", kHi)}, .spa = true});
+    dev.mount("/", files{.root = live.dir.string(), .spa = true});
+    LocalClient dc(dev);
+
+    auto got = dc.get("/app.js").dispatch();
+    auto head = dc.head("/app.js").dispatch();
+    CHECK_EQ(head.status, 200);
+    CHECK(head.body.empty());
+    CHECK_EQ(hdr(head, "content-length"), std::to_string(got.body.size()));
+    CHECK_EQ(hdr(head, "etag"), hdr(got, "etag"));
+    CHECK_EQ(hdr(head, "last-modified"), hdr(got, "last-modified"));
+    CHECK_EQ(hdr(head, "content-type"), hdr(got, "content-type"));
+
+    auto path = live.write("app.js", "js-bytes-v2");
+    set_mtime(path, 1'800'000'100, 3);
+    auto head2 = dc.head("/app.js").dispatch();
+    auto got2 = dc.get("/app.js").dispatch();
+    CHECK_EQ(got2.body, "js-bytes-v2");
+    CHECK(head2.body.empty());
+    CHECK_EQ(hdr(head2, "content-length"), std::to_string(got2.body.size()));
+    CHECK_EQ(hdr(head2, "etag"), hdr(got2, "etag"));
+    CHECK(hdr(head2, "etag") != hdr(head, "etag"));
+    CHECK_EQ(hdr(head2, "last-modified"), hdr(got2, "last-modified"));
+
+    auto spa = dc.get("/users/1").dispatch();
+    auto spa_head = dc.head("/users/1").dispatch();
+    CHECK_EQ(spa.body, "SPA_INDEX");
+    CHECK(spa_head.body.empty());
+    CHECK_EQ(hdr(spa_head, "content-length"), std::to_string(spa.body.size()));
+    CHECK_EQ(hdr(spa_head, "etag"), hdr(spa, "etag"));
+    CHECK_EQ(hdr(spa_head, "content-type"), "text/html; charset=utf-8");
+
+    auto emb = dc.get("/e/hi.txt").dispatch();
+    auto emb_head = dc.head("/e/hi.txt").dispatch();
+    CHECK_EQ(emb.body, "hi!\n");
+    CHECK(emb_head.body.empty());
+    CHECK_EQ(hdr(emb_head, "content-length"), "4");
+    CHECK_EQ(hdr(emb_head, "etag"), hdr(emb, "etag"));
+    CHECK(hdr(emb_head, "last-modified").empty());
+
+    auto espa = dc.get("/e/app").dispatch();
+    auto espa_head = dc.head("/e/app").dispatch();
+    CHECK_EQ(espa.body, "hi!\n");
+    CHECK(espa_head.body.empty());
+    CHECK_EQ(hdr(espa_head, "content-length"), "4");
+    CHECK_EQ(hdr(espa_head, "etag"), hdr(espa, "etag"));
+    CHECK_EQ(hdr(espa_head, "content-type"), "text/html; charset=utf-8");
   }
   {
     // A cached br body stays on the loop. Plain bytes do not answer a br request.

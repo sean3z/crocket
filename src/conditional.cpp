@@ -104,6 +104,7 @@ bool none_match(std::string_view header, std::string_view etag) {
 void not_modified(Response& rs) {
   rs.status = 304;
   rs.body.clear();
+  rs.headers.remove("content-length");
 }
 
 /// A single range "bytes=a-b", "bytes=a-" or "bytes=-n" against `size`, as

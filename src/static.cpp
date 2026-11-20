@@ -526,6 +526,14 @@ void fail(const Mount& m, Request& req, Response& res, ApiError err) {
   write_error(std::move(err), req, res);
 }
 
+/// HEAD carries the GET representation's headers and no body (RFC 9110).
+/// Content-Length is the size of the body that was just built.
+void drop_head_body(Request& req, Response& res) {
+  if (req.method != http::Method::Head) return;
+  res.headers.set("content-length", std::to_string(res.body.size()));
+  res.body.clear();
+}
+
 Hit read_fd(const Mount& m, Request& req, Response& res, int fd, const struct stat& st, std::string_view relpath,
            std::string_view encoding) {
   if (!S_ISREG(st.st_mode)) return Hit::Miss;
@@ -558,6 +566,7 @@ Hit read_fd(const Mount& m, Request& req, Response& res, int fd, const struct st
   finish_headers(m, res, relpath, disk_etag(st), encoding);
   res.body = std::move(body);
   remember(m, relpath, encoding, st, res.body);
+  drop_head_body(req, res);
   return Hit::Served;
 }
 
@@ -679,7 +688,7 @@ Hit serve_plain_or_encoded(const Mount& m, Request& req, Response& res, int dir,
     if (!chose && !follow_variant && gzip) take("gzip", name + ".gz");
   }
   // A symlink sibling has to be opened so the inside-root check still runs.
-  // Dev always opens, and always reads: no 304 and no HEAD shortcut.
+  // Dev always opens and reads, including HEAD. The body is dropped afterwards.
   if (follow_variant || !m.fast) {
     if (auto hit = open_encoded(m, req, res, dir, name, relpath, br, gzip); hit != Hit::Miss) return hit;
     return read_fd(m, req, res, plain_fd, plain_st, relpath, {});
@@ -749,6 +758,7 @@ void serve_embedded(const Mount& m, Request& req, Response& res, const FileBytes
   res.set_content_type(plain.type);
   finish_headers(m, res, plain.path, body->etag, encoding);
   res.body.assign(reinterpret_cast<const char*>(body->bytes.data()), body->bytes.size());
+  drop_head_body(req, res);
 }
 
 std::string join_segs(const std::vector<std::string>& segs) {

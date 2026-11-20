@@ -41,7 +41,11 @@ from outside the project, for example
   deleted. The window is how long a replaced or deleted file can still be
   served. inotify isn't used: it misses an atomic replace and doesn't work on
   NFS. The dev profile ignores the cache and the early 304 and reads the disk
-  on every request. `examples/files.cpp` is `crocket_files`.
+  on every request. `HEAD` never sends a body: outside dev, `Content-Length`
+  comes from the stat, and in dev the file is still read so `Content-Length`,
+  `ETag`, and `Last-Modified` match that read, then the body is dropped.
+  Embedded files and the SPA index do the same. `examples/files.cpp` is
+  `crocket_files`.
 
 ## [0.5.1] - 2026-11-17
 

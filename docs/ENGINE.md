@@ -314,7 +314,9 @@ sends `Content-Length` without a read. A fresh small-file cache hit
 (`.memory`, keyed by relative path and encoding, checked with `fstat` at most
 every `.memory_revalidate`) stays on the loop and does no syscall. The dev
 profile does neither: every request reads the file, so an edit shows up on the
-next one. inotify isn't used. A watch on the inode misses an atomic replace, and
+next one. Dev `HEAD` reads too, then drops the body; `Content-Length` is the
+size of that read. Embedded files and the SPA index send no body on `HEAD`
+either. inotify isn't used. A watch on the inode misses an atomic replace, and
 NFS doesn't deliver the events. The revalidate window is the staleness that
 buys the syscall-free hit. Embedded mounts are a memory lookup and stay on the
 loop. A route that matched never consults a mount, so the router's cost is

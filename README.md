@@ -767,10 +767,12 @@ size and mtime from `fstat`: the body is not read, and a compressed sibling is n
 opened. The dev profile reads the file on every request, then applies the same
 validators, so an edit is in the next response. One `Range` is `206` once the file
 fits in `max_bytes`, since the body is already a buffer. Several ranges in one
-request get the whole file, as they do for `Cacheable`. `HEAD` outside dev sends
-`Content-Length` and no body. In dev, `HEAD` reads the file too. An `ETag` built
-from size and mtime doesn't change if the bytes change without either of those
-changing.
+request get the whole file, as they do for `Cacheable`. `HEAD` never sends a
+body. Outside dev, `Content-Length` comes from the stat and the file is not
+read. In dev, `HEAD` still reads the file, so `Content-Length`, `ETag`, and
+`Last-Modified` match that read, and the body is then dropped. Embedded files
+and the SPA index do the same. An `ETag` built from size and mtime doesn't
+change if the bytes change without either of those changing.
 
 A disk open runs on a worker, so a slow disk doesn't stall an event loop. A fresh
 `memory` hit does not: `loop_route` is true, and the request stays on the loop.

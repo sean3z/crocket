@@ -6,7 +6,7 @@
 #include "crocket/log.hpp"
 #include "crocket/request.hpp"
 #include "crocket/state.hpp"
-#include "crocket/static.hpp"
+#include "crocket/files.hpp"
 
 #include <array>
 #include <atomic>
@@ -448,7 +448,11 @@ struct Core {
   std::shared_ptr<Router> router;         // built at ignite
   Stats stats;
   bool ignited = false;
-  std::vector<StaticFiles> static_files;       // .files(), prepared at ignite
+  struct FileMount {
+    std::string base;
+    crocket::files spec;
+  };
+  std::vector<FileMount> static_files;        // .mount(prefix, files), prepared at ignite
   std::unique_ptr<StaticTable> static_table;   // directory fds live in static.cpp
   // Defined in static.cpp, where StaticTable is complete. An inline constructor
   // would destroy that unique_ptr from every caller.
@@ -544,10 +548,13 @@ class Crocket {
     return std::move(mount(base, std::move(routes), mode));
   }
 
-  /// Serve static files. Routes are tried first; a miss is a normal 404.
-  /// See static.hpp. After ignite the call is an error and changes nothing.
-  Crocket& files(StaticFiles spec) &;
-  Crocket&& files(StaticFiles spec) && { return std::move(files(std::move(spec))); }
+  /// Serve static files under `base`. Routes match first, whether this mount
+  /// comes before or after them. A miss is a normal 404 unless `files::fallthrough`.
+  /// See files.hpp. After ignite the call is an error and changes nothing.
+  Crocket& mount(std::string_view base, files spec) &;
+  Crocket&& mount(std::string_view base, files spec) && {
+    return std::move(mount(base, std::move(spec)));
+  }
 
   Crocket& configure(Config cfg) &;
   Crocket&& configure(Config cfg) && { return std::move(configure(std::move(cfg))); }

@@ -1,4 +1,4 @@
-// A tiny frontend from .files(): embedded in the binary, or a directory.
+// A tiny frontend from .mount(..., files{...}): embedded in the binary, or a directory.
 //
 //   ./build/crocket_files
 //   curl localhost:8000/                 # index.html
@@ -35,15 +35,17 @@ static constexpr unsigned char style_css[] = {
 };
 
 int main() {
-  StaticFiles files{.prefix = "/"};
-  if (const char* root = std::getenv("WEB_ROOT")) files.root = root;
-  else files.assets = {asset("index.html", index_html), asset("app.js", app_js), asset("style.css", style_css)};
-  // Shield's default policy is default-src 'none', which blocks this page's
-  // script and stylesheet. 'self' lets the page load what it serves.
+  files web;
+  if (const char* root = std::getenv("WEB_ROOT")) web.root = root;
+  else web.assets = {asset("index.html", index_html), asset("app.js", app_js), asset("style.css", style_css)};
+  // Shield's default policy is default-src 'none', which would block this page's
+  // script and stylesheet. The html rule replaces that one header. The route
+  // wins whether it's mounted before or after the files.
+  web.cache = {{"*.html", "no-cache"}};
+  web.headers = {{"*.html", {{"content-security-policy", "default-src 'self'"}}}};
   return build(Config::from_env())
       .attach(Logger{})
-      .attach(Shield{}.set("content-security-policy", "default-src 'self'"))
-      .files(std::move(files))
+      .mount("/", std::move(web))
       .mount("/", reflect_routes<^^api>())
       .launch();
 }

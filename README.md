@@ -656,15 +656,16 @@ auto report(std::uint64_t id, State<Store> store) -> Cacheable<std::string> {
 
 ### Static files
 
-`.files()` serves a directory, or bytes embedded in the binary, under a URL prefix.
-Routes are matched first, so a handler never waits on the filesystem. A path no route
-claims and no file covers is the ordinary 404 (`not_found`), which is how `/` can serve
-a frontend next to an API without swallowing `/api/...` or `/healthz`.
+`.mount(prefix, files{...})` serves a directory, or bytes embedded in the binary, under
+that URL prefix. Routes match before files, whether you mount the routes first or the
+files first, so a handler never waits on the filesystem. A path no route claims and no
+file covers is the ordinary 404 (`not_found`), which is how `/` can serve a frontend
+next to an API without swallowing `/api/...` or `/healthz`.
 
 ```cpp
 crocket::build()
     .attach(Shield{}.set("content-security-policy", "default-src 'self'"))
-    .files({.prefix = "/", .root = "web"})
+    .mount("/", files{.root = "web"})
     .mount("/api", reflect_routes<^^api>())
     .launch();
 ```
@@ -681,7 +682,7 @@ static constexpr unsigned char app_js[] = {
 #embed "web/app.js"
 };
 
-.files({.assets = {
+.mount("/", files{.assets = {
     asset("index.html", index_html),
     asset("app.js", app_js),
 }})
@@ -690,9 +691,10 @@ static constexpr unsigned char app_js[] = {
 `examples/files.cpp` (`crocket_files`) does both: embedded by default, or the directory
 in `WEB_ROOT` when that is set.
 
-- **`prefix`** defaults to `/`. `/static` matches `/static` and `/static/...`, not
-  `/staticfile`. The longest matching prefix owns the path. A miss there is a 404, not
-  a search of a shorter mount.
+- The mount's first argument is the URL prefix. `/static` matches `/static` and
+  `/static/...`, not   `/staticfile`. The longest matching prefix is tried first. A miss is a 404
+  unless that mount sets `.fallthrough`. A route at the same path wins even when
+  the files were mounted first.
 - **`root`** is a directory, opened at ignite and held for the life of the process.
   Files added inside it show up on the next request. Replacing the directory inode
   (remove it and create another at the same path) doesn't retarget the server.
@@ -704,8 +706,26 @@ in `WEB_ROOT` when that is set.
 - **`spa`** serves the mount's index for a GET or HEAD that missed and whose last
   segment has no `.`, which is a client-side route. A missing `app.js` stays a 404.
   Routes, including `/healthz`, still win. `spa` requires the index to exist at ignite.
-- **`cache_control`** defaults to `no-cache` (revalidate, don't keep a stale copy).
-  Hashed asset names can use `public, max-age=31536000, immutable`.
+- **`cache_control`** is the `Cache-Control` used when no `.cache` rule matches. Empty
+  means `no-cache` (revalidate, don't keep a stale copy).
+- **`cache`** is an ordered list of `{glob, Cache-Control}`. The first glob that
+  matches the path relative to the mount wins. `*` matches any run of characters
+  except `/`, so `*.html` is `index.html` and not `dir/index.html`.
+- **`precompressed`** (off by default) serves a sibling `name.br`, then `name.gz`,
+  when `Accept-Encoding` allows it (`br` before `gzip`; `q=0` rejects that
+  coding; a missing header stays uncompressed). The response keeps the original
+  file's `Content-Type`, sets `Content-Encoding` and `Vary: Accept-Encoding`, and
+  uses a different `ETag` for each encoding. `Range` is not applied to a
+  compressed response: the encoded bytes are sent whole, and `Accept-Ranges` is
+  left off. An uncompressed response from the same mount still honors one range.
+- **`fallthrough`** (off by default) tries the next files mount whose prefix
+  matches when this one has no file. The longest prefix is still tried first.
+  A dotfile, a `..` segment, or a symlink that leaves the root doesn't continue.
+- **`headers`** is an ordered list of `{glob, headers}`. The first matching rule
+  sets those fields on the file response (not on a directory redirect). Shield
+  leaves a header the response already carries, so a rule can replace Shield's
+  `Content-Security-Policy` for `*.html` and leave every other response on
+  Shield's default.
 - **`max_bytes`** defaults to 32 MiB. A larger file on disk is `500 static.too_large`.
   A larger embedded asset fails ignite.
 - **`types`** adds or replaces a content type by extension (`{{"weba", "audio/webm"}}`).
@@ -715,7 +735,7 @@ in `WEB_ROOT` when that is set.
 
 The request path is normalized before this runs. Each segment is then percent-decoded
 once, which is the same text a path capture would see, and that name has to be one
-component. `%2e%2e%2f` decodes to `../`, so it is a miss. The decoded text is never
+component. `%2e%2e%2f` decodes to `../`, so it's a miss. The decoded text is never
 concatenated onto the root: a name that is empty, `.`, `..`, or that contains `/`,
 `\`, or NUL doesn't reach `openat`. A symlink is followed only when the file it names
 stays inside the root. An absolute link, a `..` that climbs out, and a link to

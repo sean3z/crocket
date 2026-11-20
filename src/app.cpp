@@ -315,9 +315,11 @@ Crocket& Crocket::mount(std::string_view base, Routes routes, Mode mode) & {
   return *this;
 }
 
-Crocket& Crocket::files(StaticFiles spec) & {
-  if (core_->ignited) core_->build_errors.push_back("files() after ignite");
-  else core_->static_files.push_back(std::move(spec));
+Crocket& Crocket::mount(std::string_view base, files spec) & {
+  if (core_->ignited)
+    core_->build_errors.push_back("mount(\"" + std::string(base) + "\") after ignite");
+  else
+    core_->static_files.push_back({std::string(base), std::move(spec)});
   return *this;
 }
 

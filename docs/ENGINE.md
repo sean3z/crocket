@@ -289,7 +289,7 @@ peer closing during a write is an ordinary error.
 
 ## Static files
 
-`.files()` (see the README) reads the file in crocket and sends a normal `Response`, so
+`.mount(prefix, files{...})` (see the README) reads the file in crocket and sends a normal `Response`, so
 Shield, logging, metrics, and conditional requests see it. h2o's file handler
 (`h2o_file_register` in `lib/handler/file.c`) isn't called.
 
@@ -310,6 +310,8 @@ Disk opens happen on a worker. `loop_route` returns false for a GET or HEAD that
 mount might answer, and `run_routes` moves the request off the loop if a fairing
 rewrote the path onto one. Embedded mounts are a memory lookup and stay on the loop.
 A route that matched never consults a mount, so the router's cost is unchanged.
+With `.fallthrough`, a missing file is tried on the next matching files mount
+(longest prefix first). A rejected path is not.
 
 ## Binary size
 

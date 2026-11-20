@@ -107,9 +107,9 @@ void set_mtime(const std::filesystem::path& p, time_t sec, long nsec) {
   CHECK(::utimensat(AT_FDCWD, p.c_str(), ts, 0) == 0);
 }
 
-std::string ignite_msg(StaticFiles spec) {
+std::string ignite_msg(std::string base, files spec) {
   Crocket app;
-  app.files(std::move(spec));
+  app.mount(std::move(base), std::move(spec));
   auto r = app.ignite();
   return r ? std::string() : r.error().message();
 }
@@ -144,7 +144,7 @@ void test_disk() {
   std::filesystem::create_symlink(tmp.outside, tmp.dir / "outlink");
 
   Crocket app;
-  app.files({.prefix = "/static",
+  app.mount("/static", files{
              .root = tmp.dir.string(),
              .types = {{"weba", "audio/webm"}}})
       .mount("/", reflect_routes<^^api>());
@@ -248,10 +248,19 @@ void test_disk() {
   CHECK(health.body.find("NOT_HEALTH") == std::string::npos);
   CHECK_EQ(c.get("/static/owned.txt").dispatch().body, "from-route");
   {
+    // Routes mounted first still win. Mount order doesn't choose.
+    Tmp first;
+    first.write("owned.txt", "FILE_BYTES");
+    Crocket routes_first;
+    routes_first.mount("/", reflect_routes<^^api>()).mount("/static", files{.root = first.dir.string()});
+    LocalClient rc(routes_first);
+    CHECK_EQ(rc.get("/static/owned.txt").dispatch().body, "from-route");
+  }
+  {
     Tmp root;
     root.write("only", "FILE_ONLY");
     Crocket owned;
-    owned.files({.prefix = "/", .root = root.dir.string()}).mount("/", reflect_routes<^^api>());
+    owned.mount("/", files{ .root = root.dir.string()}).mount("/", reflect_routes<^^api>());
     LocalClient oc(owned);
     auto method = oc.get("/only").dispatch();
     CHECK_EQ(method.status, 405);
@@ -351,15 +360,15 @@ void test_dotfiles_cache_and_mounts() {
 
   {
     Crocket app;
-    app.files({.prefix = "/", .root = web.dir.string(), .dotfiles = true, .cache_control = "public, max-age=60"});
+    app.mount("/", files{ .root = web.dir.string(), .dotfiles = true, .cache_control = "public, max-age=60"});
     LocalClient c(app);
     CHECK_EQ(c.get("/.env").dispatch().body, "DOTENV");
     CHECK_EQ(hdr(c.get("/ok.txt").dispatch(), "cache-control"), "public, max-age=60");
   }
   {
     Crocket app;
-    app.files({.prefix = "/", .root = other.dir.string()});
-    app.files({.prefix = "/static", .root = stat.dir.string()});
+    app.mount("/", files{ .root = other.dir.string()});
+    app.mount("/static", files{ .root = stat.dir.string()});
     LocalClient c(app);
     CHECK_EQ(c.get("/static/other.txt").dispatch().body, "from-static");
     CHECK_EQ(c.get("/ok.txt").dispatch().body, "from-root");
@@ -373,7 +382,7 @@ void test_dotfiles_cache_and_mounts() {
     bare.write("sub/a.txt", "a");
     bare.write("note.txt", "note");
     Crocket app;
-    app.files({.prefix = "/", .root = bare.dir.string(), .index = ""});
+    app.mount("/", files{ .root = bare.dir.string(), .index = ""});
     LocalClient c(app);
     CHECK_EQ(c.get("/").dispatch().status, 404);
     CHECK_EQ(c.get("/sub").dispatch().status, 404);
@@ -385,7 +394,7 @@ void test_dotfiles_cache_and_mounts() {
     big.write("tiny.txt", "abcd");
     big.write("big.txt", "abcde");
     Crocket app;
-    app.files({.prefix = "/", .root = big.dir.string(), .max_bytes = 4});
+    app.mount("/", files{ .root = big.dir.string(), .max_bytes = 4});
     LocalClient c(app);
     CHECK_EQ(c.get("/tiny.txt").dispatch().status, 200);
     auto over = c.get("/big.txt").dispatch();
@@ -405,7 +414,7 @@ void test_spa_and_middleware() {
   Crocket app(cfg);
   app.attach(Cors::allow_origins({"https://app.example.com"}))
       .attach(Metrics{"/metrics"})
-      .files({.prefix = "/", .root = tmp.dir.string(), .spa = true})
+      .mount("/", files{ .root = tmp.dir.string(), .spa = true})
       .mount("/", reflect_routes<^^api>());
   LocalClient c(app);
 
@@ -441,7 +450,7 @@ void test_spa_and_middleware() {
 void test_embed() {
   section("embed");
   Crocket app;
-  app.files({.prefix = "/embed",
+  app.mount("/embed", files{
              .assets = {asset("hello.txt", kHello), asset("js/app.js", kNul), asset("index.html", kHello),
                         asset("sub/index.html", kHello)}})
       .mount("/", reflect_routes<^^api>());
@@ -495,7 +504,7 @@ void test_encoded_traversal() {
   Crocket app;
   // Prefix "/" so the whole remainder is the relative path. A handler that
   // took this as a capture and appended it to the root would read the secret.
-  app.files({.prefix = "/", .root = tmp.dir.string()});
+  app.mount("/", files{ .root = tmp.dir.string()});
   LocalClient c(app);
   auto outside_name = tmp.outside.filename().string();
   for (const char* enc : {"%2e%2e%2f", "%2E%2E%2F", "%2e%2e%5c", "%2e%2e%2f%2e%2e%2f", "%252e%252e%252f"}) {
@@ -524,47 +533,157 @@ void test_spa_embed_and_ignite() {
   tmp.write("app.js", "js");
   {
     Crocket app;
-    app.files({.prefix = "/", .assets = {asset("index.html", kHello), asset("app.js", kNul)}, .spa = true});
+    app.mount("/", files{ .assets = {asset("index.html", kHello), asset("app.js", kNul)}, .spa = true});
     LocalClient c(app);
     CHECK_EQ(c.get("/users/1").dispatch().body, std::string(reinterpret_cast<const char*>(kHello), sizeof kHello));
     CHECK_EQ(c.get("/missing.js").dispatch().status, 404);
   }
   {
     Crocket app;
-    app.files({.prefix = "/", .root = tmp.dir.string()});
+    app.mount("/", files{ .root = tmp.dir.string()});
     CHECK(app.ignite().has_value());
-    app.files({.prefix = "/other", .root = tmp.dir.string()});
+    app.mount("/other", files{ .root = tmp.dir.string()});
     LocalClient c(app);
     CHECK_EQ(c.get("/index.html").dispatch().status, 200);
     CHECK_EQ(c.get("/other/index.html").dispatch().status, 404);
   }
 
   Tmp missing;
-  CHECK(ignite_msg({.root = (missing.dir / "nope").string()}).find("not a directory") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = (missing.dir / "nope").string()}).find("not a directory") != std::string::npos);
   auto file_root = tmp.write("notdir", "x");
-  CHECK(ignite_msg({.root = file_root.string()}).find("not a directory") != std::string::npos);
-  CHECK(ignite_msg({.root = tmp.dir.string(), .assets = {asset("a.txt", kHello)}}).find("not both") != std::string::npos);
-  CHECK(ignite_msg({}).find("set root or assets") != std::string::npos);
-  CHECK(ignite_msg({.prefix = "static", .root = tmp.dir.string()}).find("must start with '/'") != std::string::npos);
-  CHECK(ignite_msg({.prefix = "/static/../x", .root = tmp.dir.string()}).find("..") != std::string::npos);
-  CHECK(ignite_msg({.assets = {asset("../x.txt", kHello)}}).find("..") != std::string::npos);
-  CHECK(ignite_msg({.assets = {asset("a.txt", kHello), asset("/a.txt", kHello)}}).find("duplicate") != std::string::npos);
-  CHECK(ignite_msg({.assets = {asset(".env", kHello)}}).find("dotfile") != std::string::npos);
-  CHECK(ignite_msg({.root = tmp.dir.string(), .index = "", .spa = true}).find("spa needs") != std::string::npos);
-  CHECK(ignite_msg({.assets = {asset("app.js", kHello)}, .spa = true}).find("spa index") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = file_root.string()}).find("not a directory") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = tmp.dir.string(), .assets = {asset("a.txt", kHello)}}).find("not both") != std::string::npos);
+  CHECK(ignite_msg("/", files{}).find("set root or assets") != std::string::npos);
+  CHECK(ignite_msg("static", files{.root = tmp.dir.string()}).find("must start with '/'") != std::string::npos);
+  CHECK(ignite_msg("/static/../x", files{.root = tmp.dir.string()}).find("..") != std::string::npos);
+  CHECK(ignite_msg("/", files{.assets = {asset("../x.txt", kHello)}}).find("..") != std::string::npos);
+  CHECK(ignite_msg("/", files{.assets = {asset("a.txt", kHello), asset("/a.txt", kHello)}}).find("duplicate") != std::string::npos);
+  CHECK(ignite_msg("/", files{.assets = {asset(".env", kHello)}}).find("dotfile") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = tmp.dir.string(), .index = "", .spa = true}).find("spa needs") != std::string::npos);
+  CHECK(ignite_msg("/", files{.assets = {asset("app.js", kHello)}, .spa = true}).find("spa index") != std::string::npos);
   Tmp no_index;
   no_index.write("app.js", "js");
-  CHECK(ignite_msg({.root = no_index.dir.string(), .spa = true}).find("spa index") != std::string::npos);
-  CHECK(ignite_msg({.root = tmp.dir.string(), .cache_control = "no-cache\r\nX-Injected: 1"}).find("cache-control") !=
+  CHECK(ignite_msg("/", files{.root = no_index.dir.string(), .spa = true}).find("spa index") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = tmp.dir.string(), .cache_control = "no-cache\r\nX-Injected: 1"}).find("cache-control") !=
         std::string::npos);
-  CHECK(ignite_msg({.root = tmp.dir.string(), .index = "a/b.html"}).find("single file name") != std::string::npos);
-  CHECK(ignite_msg({.assets = {asset("a.txt", kHello)}, .max_bytes = 4}).find("max_bytes") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = tmp.dir.string(), .index = "a/b.html"}).find("single file name") != std::string::npos);
+  CHECK(ignite_msg("/", files{.assets = {asset("a.txt", kHello)}, .max_bytes = 4}).find("max_bytes") != std::string::npos);
   {
     Crocket app;
-    app.files({.prefix = "/", .assets = {asset(".env", kHello)}, .dotfiles = true});
+    app.mount("/", files{ .assets = {asset(".env", kHello)}, .dotfiles = true});
     LocalClient c(app);
     CHECK_EQ(c.get("/.env").dispatch().status, 200);
   }
+}
+
+void test_cache_headers_precompressed_fallthrough() {
+  section("cache headers encoding fallthrough");
+  Tmp web;
+  web.write("index.html", "<h1>home</h1>");
+  web.write("dir/page.html", "nested-html");
+  web.write("assets/app.js", "plain-js");
+  web.write("assets/app.js.br", "brotli-bytes");
+  web.write("assets/app.js.gz", "gzip-bytes");
+  web.write("note.txt", "note");
+  Crocket app;
+  app.mount("/", files{
+                 .root = web.dir.string(),
+                 .cache_control = "public, max-age=60",
+                 .precompressed = true,
+                 .cache = {{"*.html", "no-cache"}, {"index.html", "second-should-lose"},
+                           {"assets/*", "public, max-age=31536000, immutable"}},
+                 .headers = {{"*.html", {{"content-security-policy", "default-src 'self'"}, {"x-page", "html"}}},
+                             {"*.html", {{"x-page", "later"}}}}});
+  LocalClient c(app);
+  auto html = c.get("/index.html").dispatch();
+  CHECK_EQ(hdr(html, "cache-control"), "no-cache");
+  CHECK_EQ(hdr(html, "content-security-policy"), "default-src 'self'");
+  CHECK_EQ(hdr(html, "x-page"), "html");
+  CHECK_EQ(hdr(html, "x-content-type-options"), "nosniff");
+  CHECK_EQ(hdr(c.get("/dir/page.html").dispatch(), "cache-control"), "public, max-age=60");
+  CHECK_EQ(hdr(c.get("/assets/app.js").dispatch(), "cache-control"), "public, max-age=31536000, immutable");
+  CHECK_EQ(hdr(c.get("/note.txt").dispatch(), "cache-control"), "public, max-age=60");
+  CHECK(hdr(c.get("/note.txt").dispatch(), "x-page").empty());
+  CHECK(hdr(c.get("/assets/app.js").dispatch(), "content-security-policy").find("default-src 'none'") != std::string::npos);
+
+  auto plain = c.get("/assets/app.js").dispatch();
+  CHECK_EQ(plain.body, "plain-js");
+  CHECK(hdr(plain, "content-encoding").empty());
+  CHECK_EQ(hdr(plain, "vary"), "accept-encoding");
+  CHECK_EQ(hdr(plain, "content-type"), "text/javascript; charset=utf-8");
+  auto br = c.get("/assets/app.js").header("accept-encoding", "br, gzip").dispatch();
+  CHECK_EQ(br.status, 200);
+  CHECK_EQ(br.body, "brotli-bytes");
+  CHECK_EQ(hdr(br, "content-encoding"), "br");
+  CHECK_EQ(hdr(br, "content-type"), "text/javascript; charset=utf-8");
+  CHECK_EQ(hdr(br, "vary"), "accept-encoding");
+  CHECK(hdr(br, "etag") != hdr(plain, "etag"));
+  CHECK(hdr(br, "etag").find("br") != std::string::npos);
+  CHECK(hdr(br, "accept-ranges").empty());
+  auto ranged = c.get("/assets/app.js").header("accept-encoding", "br").header("range", "bytes=0-2").dispatch();
+  CHECK_EQ(ranged.status, 200);
+  CHECK_EQ(ranged.body, "brotli-bytes");
+  auto gz = c.get("/assets/app.js").header("accept-encoding", "gzip").dispatch();
+  CHECK_EQ(gz.body, "gzip-bytes");
+  CHECK_EQ(hdr(gz, "content-encoding"), "gzip");
+  auto rejected = c.get("/assets/app.js").header("accept-encoding", "br;q=0, gzip;q=0").dispatch();
+  CHECK_EQ(rejected.body, "plain-js");
+  CHECK(hdr(rejected, "content-encoding").empty());
+  auto only_br = c.get("/assets/app.js").header("accept-encoding", "gzip;q=0, br").dispatch();
+  CHECK_EQ(only_br.body, "brotli-bytes");
+  auto plain_range = c.get("/note.txt").header("range", "bytes=0-1").dispatch();
+  CHECK_EQ(plain_range.status, 206);
+  CHECK_EQ(plain_range.body, "no");
+
+  {
+    Tmp specific;
+    Tmp broad;
+    broad.write("static/note.txt", "from-broad");
+    specific.write("keep.txt", "from-specific");
+    Crocket chain;
+    chain.mount("/static", files{.root = specific.dir.string(), .fallthrough = true});
+    chain.mount("/", files{.root = broad.dir.string()});
+    LocalClient lc(chain);
+    CHECK_EQ(lc.get("/static/keep.txt").dispatch().body, "from-specific");
+    CHECK_EQ(lc.get("/static/note.txt").dispatch().body, "from-broad");
+    specific.write(".env", "DOT");
+    broad.write("static/.env", "BROAD_DOT");
+    auto hidden = lc.get("/static/.env").dispatch();
+    CHECK_EQ(hidden.status, 404);
+    CHECK(hidden.body.find("BROAD_DOT") == std::string::npos);
+  }
+  {
+    Tmp specific;
+    Tmp broad;
+    broad.write("static/note.txt", "from-broad");
+    Crocket chain;
+    chain.mount("/static", files{.root = specific.dir.string()});
+    chain.mount("/", files{.root = broad.dir.string()});
+    LocalClient lc(chain);
+    auto miss = lc.get("/static/note.txt").dispatch();
+    CHECK_EQ(miss.status, 404);
+    CHECK(miss.body.find("from-broad") == std::string::npos);
+  }
+
+  static constexpr unsigned char kPlain[] = {'p', 'l', 'a', 'i', 'n'};
+  static constexpr unsigned char kBr[] = {'B', 'R'};
+  Crocket embedded;
+  embedded.mount("/e", files{.assets = {asset("app.js", kPlain), asset("app.js.br", kBr)}, .precompressed = true});
+  LocalClient ec(embedded);
+  CHECK_EQ(ec.get("/e/app.js").dispatch().body, "plain");
+  auto ebr = ec.get("/e/app.js").header("accept-encoding", "br").dispatch();
+  CHECK_EQ(ebr.body, "BR");
+  CHECK_EQ(hdr(ebr, "content-encoding"), "br");
+  CHECK_EQ(hdr(ebr, "content-type"), "text/javascript; charset=utf-8");
+  CHECK(hdr(ebr, "etag") != hdr(ec.get("/e/app.js").dispatch(), "etag"));
+
+  Tmp ok;
+  ok.write("index.html", "hi");
+  CHECK(ignite_msg("/", files{.root = ok.dir.string(), .cache = {{"", "no-cache"}}}).find("empty glob") != std::string::npos);
+  CHECK(ignite_msg("/", files{.root = ok.dir.string(), .cache = {{"*.html", "no-cache\r\nX: 1"}}}).find("cache rule") !=
+        std::string::npos);
+  CHECK(ignite_msg("/", files{.root = ok.dir.string(), .headers = {{"*.html", {{"bad name", "x"}}}}}).find("header rule") !=
+        std::string::npos);
 }
 
 int main() {
@@ -574,6 +693,7 @@ int main() {
   test_embed();
   test_encoded_traversal();
   test_spa_embed_and_ignite();
+  test_cache_headers_precompressed_fallthrough();
   std::fprintf(stderr, "%d checks, %d failed\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

@@ -14,9 +14,13 @@ from outside the project, for example
 ## [Unreleased]
 
 ### Added
-- **Static files.** `.files()` serves a directory under a URL prefix, or bytes
-  embedded with `#embed`, through the same `StaticFiles` options. Routes are
-  matched first, and a miss is a normal 404. GET and HEAD send a content type
+- **Static files.** `.mount(prefix, files{...})` serves a directory under that
+  prefix, or bytes embedded with `#embed`. Routes match before files, whichever
+  was mounted first, and a miss is a normal 404 unless `.fallthrough`. `.cache`
+  and `.headers` pick `Cache-Control` and extra response headers by glob
+  (these headers replace Shield's value for the same name). `.precompressed`
+  serves a sibling `.br` or `.gz` when `Accept-Encoding` allows it. GET and HEAD
+  send a content type
   (text types include a charset), a strong ETag, `Cache-Control`, and
   `Last-Modified` for disk files. `If-None-Match` and `If-Modified-Since`
   answer 304, and one byte range answers 206, through the same conditional

@@ -575,7 +575,9 @@ class Crocket {
   /// Whether every route that can answer method+path runs on the event loop
   /// (an async handler, or a plain function adaptive placement has promoted),
   /// or none does (crocket answers 404 or 405), so the loop can run the request itself.
-  [[nodiscard]] bool loop_route(http::Method method, std::string_view path) const;
+  /// `accept_encoding` lets a cached precompressed file stay on the event loop.
+  [[nodiscard]] bool loop_route(http::Method method, std::string_view path,
+                                std::string_view accept_encoding = {}) const;
   /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);
 

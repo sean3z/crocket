@@ -136,6 +136,17 @@ std::optional<std::pair<std::size_t, std::size_t>> parse_range(std::string_view 
 
 }  // namespace
 
+bool fresh_for(const Request& rq, std::string_view etag, std::string_view last_modified) {
+  if (rq.method != http::Method::Get && rq.method != http::Method::Head) return false;
+  if (auto inm = rq.header("if-none-match")) return none_match(*inm, etag);
+  if (auto ims = rq.header("if-modified-since"); ims && !last_modified.empty()) {
+    auto since = http::parse_date(*ims);
+    auto modified = http::parse_date(last_modified);
+    return since && modified && *modified <= *since;
+  }
+  return false;
+}
+
 std::string strong_etag(std::string_view body) {
   static constexpr char hex[] = "0123456789abcdef";
   char tag[18] = {'"'};

@@ -21,6 +21,7 @@
 // waits on the filesystem. A miss is the ordinary 404 unless `.fallthrough`
 // is set. Only GET and HEAD read files. See the README.
 
+#include <chrono>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -81,6 +82,15 @@ struct files {
   std::vector<CacheRule> cache = {};
   std::vector<HeaderRule> headers = {};
   std::size_t max_bytes = std::size_t(32) << 20;
+  /// Small-file cache, outside the dev profile. Dev reads the disk on every
+  /// request. `memory` holds files up to `memory_file` bytes, `memory_bytes` in
+  /// all. A hit fresher than `memory_revalidate` is served with no syscall;
+  /// after that, one fstat checks size and mtime before the cached bytes are
+  /// reused. A change or a delete shows up on that check.
+  bool memory = true;
+  std::size_t memory_file = 256 * 1024;
+  std::size_t memory_bytes = std::size_t(8) << 20;
+  std::chrono::milliseconds memory_revalidate{1000};
   /// Extra or replacement content types, extension to full header value
   /// (`{{"weba", "audio/webm"}}`). The extension has no dot. Text types in the
   /// built-in table already carry a charset.

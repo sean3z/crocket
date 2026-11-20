@@ -30,7 +30,18 @@ from outside the project, for example
   rather than a path joined onto the root. `..`, encoded slashes, empty
   segments, and NUL never leave the root. An
   optional `spa` flag serves the index for extension-less misses. Disk reads
-  run on workers. `examples/files.cpp` is `crocket_files`.
+  run on workers. Outside the dev profile, `If-None-Match` and
+  `If-Modified-Since` are answered from size and mtime after `fstat`, without
+  reading the body or opening a precompressed sibling, and `HEAD` sends
+  `Content-Length` with no body. `.memory` (on by default; `memory_file` 256
+  KiB, `memory_bytes` 8 MiB, `memory_revalidate` 1s) keeps those small files
+  in memory, keyed by relative path and encoding. A hit inside the revalidate
+  window is served on the event loop with no syscall; after it, one `fstat`
+  compares size and mtime and drops the entry when the file changed or was
+  deleted. The window is how long a replaced or deleted file can still be
+  served. inotify isn't used: it misses an atomic replace and doesn't work on
+  NFS. The dev profile ignores the cache and the early 304 and reads the disk
+  on every request. `examples/files.cpp` is `crocket_files`.
 
 ## [0.5.1] - 2026-11-17
 

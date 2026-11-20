@@ -692,13 +692,13 @@ void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&
   run(new detail::Exchange(*this, std::move(req), std::move(done), loop));
 }
 
-bool Crocket::loop_route(http::Method method, std::string_view path) const {
+bool Crocket::loop_route(http::Method method, std::string_view path, std::string_view accept_encoding) const {
   if (!core_->ignited) return false;
   auto candidates = core_->router->match(method, path);
   if (candidates.empty()) {
-    // A disk file can block in open(); embedded bytes can't. Matched routes
-    // never get here, so a static mount doesn't slow them down.
-    if (detail::static_wants_worker(*core_, method, path)) return false;
+    // A disk file can block in open(); embedded bytes can't. A fresh small-file
+    // cache hit does not. Matched routes never get here.
+    if (detail::static_wants_worker(*core_, method, path, accept_encoding)) return false;
     return true;
   }
   for (const auto* c : candidates)
@@ -1006,7 +1006,8 @@ bool Crocket::run_routes(Request& req, Response& res) {
   if (req.method == http::Method::Get || req.method == http::Method::Head) {
     // On an event loop, a disk mount has to move to a worker before open().
     // loop_route usually did that already; a fairing may have rewritten the path since.
-    if (req.exchange && req.exchange->loop && detail::static_wants_worker(*core_, req.method, req.path)) {
+    if (req.exchange && req.exchange->loop &&
+        detail::static_wants_worker(*core_, req.method, req.path, req.header("accept-encoding").value_or(""))) {
       req.exchange->loop = nullptr;
       req.exchange->reroute = true;
       return true;

@@ -10,13 +10,18 @@
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <list>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -29,6 +34,101 @@ struct FileBytes {
   std::string type;
 };
 
+struct FileMem {
+  struct Entry {
+    std::string body;
+    std::uint64_t size = 0;
+    timespec mtime{};
+    std::chrono::steady_clock::time_point checked{};
+  };
+  std::mutex mu;
+  std::list<std::pair<std::string, Entry>> lru;
+  std::unordered_map<std::string, std::list<std::pair<std::string, Entry>>::iterator> index;
+  std::size_t bytes = 0;
+  std::size_t file_cap = 0;
+  std::size_t total_cap = 0;
+  std::chrono::milliseconds revalidate{1000};
+  bool enabled = false;
+
+  static std::string key(std::string_view path, std::string_view encoding) {
+    std::string k;
+    k.reserve(path.size() + 1 + encoding.size());
+    k.append(path);
+    k.push_back('\n');
+    k.append(encoding);
+    return k;
+  }
+
+  static bool same_file(const Entry& e, const struct stat& st) {
+    return e.size == static_cast<std::uint64_t>(st.st_size) && e.mtime.tv_sec == st.st_mtim.tv_sec &&
+           e.mtime.tv_nsec == st.st_mtim.tv_nsec;
+  }
+
+  std::optional<Entry> fresh(std::string_view path, std::string_view encoding) {
+    if (!enabled) return std::nullopt;
+    std::lock_guard lk(mu);
+    auto it = index.find(key(path, encoding));
+    if (it == index.end()) return std::nullopt;
+    auto& e = it->second->second;
+    if (std::chrono::steady_clock::now() - e.checked >= revalidate) return std::nullopt;
+    lru.splice(lru.begin(), lru, it->second);
+    return e;
+  }
+
+  /// Stat matches a cached file: keep the bytes and mark it fresh. Otherwise drop it.
+  std::optional<Entry> reuse_if_same(std::string_view path, std::string_view encoding, const struct stat& st) {
+    if (!enabled) return std::nullopt;
+    std::lock_guard lk(mu);
+    auto it = index.find(key(path, encoding));
+    if (it == index.end()) return std::nullopt;
+    if (!same_file(it->second->second, st)) {
+      bytes -= it->second->second.body.size();
+      lru.erase(it->second);
+      index.erase(it);
+      return std::nullopt;
+    }
+    it->second->second.checked = std::chrono::steady_clock::now();
+    lru.splice(lru.begin(), lru, it->second);
+    return it->second->second;
+  }
+
+  void drop_path(std::string_view path) {
+    if (!enabled) return;
+    std::lock_guard lk(mu);
+    for (auto enc : {std::string_view{}, std::string_view{"br"}, std::string_view{"gzip"}}) {
+      auto it = index.find(key(path, enc));
+      if (it == index.end()) continue;
+      bytes -= it->second->second.body.size();
+      lru.erase(it->second);
+      index.erase(it);
+    }
+  }
+
+  void store(std::string_view path, std::string_view encoding, const struct stat& st, std::string body) {
+    if (!enabled || body.size() > file_cap || body.size() > total_cap) return;
+    std::lock_guard lk(mu);
+    auto k = key(path, encoding);
+    if (auto it = index.find(k); it != index.end()) {
+      bytes -= it->second->second.body.size();
+      lru.erase(it->second);
+      index.erase(it);
+    }
+    while (!lru.empty() && bytes + body.size() > total_cap) {
+      bytes -= lru.back().second.body.size();
+      index.erase(lru.back().first);
+      lru.pop_back();
+    }
+    Entry e;
+    e.size = static_cast<std::uint64_t>(st.st_size);
+    e.mtime = st.st_mtim;
+    e.checked = std::chrono::steady_clock::now();
+    e.body = std::move(body);
+    bytes += e.body.size();
+    lru.emplace_front(k, std::move(e));
+    index.emplace(std::move(k), lru.begin());
+  }
+};
+
 struct Mount {
   std::string prefix;
   std::string label;
@@ -38,6 +138,8 @@ struct Mount {
   std::string cache_control;
   bool precompressed = false;
   bool fallthrough = false;
+  bool fast = false;  // release profile: early 304, HEAD without a read, small-file cache
+  std::shared_ptr<FileMem> mem;
   std::vector<CacheRule> cache;
   std::vector<HeaderRule> headers;
   std::size_t max_bytes = 0;
@@ -58,6 +160,8 @@ struct Mount {
         cache_control(std::move(o.cache_control)),
         precompressed(o.precompressed),
         fallthrough(o.fallthrough),
+        fast(o.fast),
+        mem(std::move(o.mem)),
         cache(std::move(o.cache)),
         headers(std::move(o.headers)),
         max_bytes(o.max_bytes),
@@ -414,6 +518,9 @@ void finish_headers(const Mount& m, Response& res, std::string_view rel, std::st
 
 enum class Hit { Served, Miss, Blocked };
 
+void remember(const Mount& m, std::string_view relpath, std::string_view encoding, const struct stat& st,
+              const std::string& body);
+
 void fail(const Mount& m, Request& req, Response& res, ApiError err) {
   label(req, m);
   write_error(std::move(err), req, res);
@@ -450,6 +557,7 @@ Hit read_fd(const Mount& m, Request& req, Response& res, int fd, const struct st
   res.headers.set("last-modified", http::date(std::chrono::system_clock::from_time_t(st.st_mtim.tv_sec)));
   finish_headers(m, res, relpath, disk_etag(st), encoding);
   res.body = std::move(body);
+  remember(m, relpath, encoding, st, res.body);
   return Hit::Served;
 }
 
@@ -471,20 +579,122 @@ Hit read_variant(const Mount& m, Request& req, Response& res, int dir, const std
   return read_fd(m, req, res, opened.fd.get(), st, relpath, encoding);
 }
 
+void remember(const Mount& m, std::string_view relpath, std::string_view encoding, const struct stat& st,
+              const std::string& body) {
+  if (m.fast && m.mem) m.mem->store(relpath, encoding, st, body);
+}
+
+/// What fstatat(AT_SYMLINK_NOFOLLOW) says. A symlink is Follow: open_checked
+/// decides whether the target stays inside the root. A fast 304 must not treat
+/// that name as a regular file and skip the check.
+enum class Look { Missing, Regular, Follow };
+
+Look look_at(int dir, const std::string& name, struct stat& st) {
+  if (::fstatat(dir, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) return Look::Missing;
+  if (S_ISREG(st.st_mode)) return Look::Regular;
+  return Look::Follow;
+}
+
+/// 304 or HEAD from size and mtime, or a cached body that still matches `st`.
+/// Miss means the caller still has to read.
+Hit answer_from_meta(const Mount& m, Request& req, Response& res, const struct stat& st, std::string_view relpath,
+                     std::string_view encoding, const std::string* cached_body) {
+  if (!S_ISREG(st.st_mode)) return Hit::Miss;
+  if (st.st_size < 0 || static_cast<std::uint64_t>(st.st_size) > m.max_bytes) {
+    fail(m, req, res, {500, "static.too_large", "file is larger than the static file limit",
+                       std::to_string(static_cast<unsigned long long>(st.st_size)) + " bytes"});
+    return Hit::Served;
+  }
+  auto etag = etag_for(disk_etag(st), encoding);
+  auto modified = http::date(std::chrono::system_clock::from_time_t(st.st_mtim.tv_sec));
+  if (m.fast && fresh_for(req, etag, modified)) {
+    label(req, m);
+    res.status = 304;
+    res.set_content_type(mime_of(m, relpath));
+    res.headers.set("last-modified", modified);
+    finish_headers(m, res, relpath, disk_etag(st), encoding);
+    res.body.clear();
+    return Hit::Served;
+  }
+  if (m.fast && req.method == http::Method::Head) {
+    label(req, m);
+    res.status = 200;
+    res.set_content_type(mime_of(m, relpath));
+    res.headers.set("last-modified", modified);
+    finish_headers(m, res, relpath, disk_etag(st), encoding);
+    res.headers.set("content-length", std::to_string(static_cast<unsigned long long>(st.st_size)));
+    res.body.clear();
+    return Hit::Served;
+  }
+  if (cached_body) {
+    label(req, m);
+    res.status = 200;
+    res.set_content_type(mime_of(m, relpath));
+    res.headers.set("last-modified", modified);
+    finish_headers(m, res, relpath, disk_etag(st), encoding);
+    res.body = *cached_body;
+    return Hit::Served;
+  }
+  return Hit::Miss;
+}
+
+/// Open a compressed sibling. Miss when that name isn't a file we can serve.
+Hit open_encoded(const Mount& m, Request& req, Response& res, int dir, const std::string& name,
+                 std::string_view relpath, bool br, bool gzip) {
+  if (!m.precompressed) return Hit::Miss;
+  if (br) {
+    auto hit = read_variant(m, req, res, dir, name + ".br", relpath, "br");
+    if (hit != Hit::Miss) return hit;
+  }
+  if (gzip) {
+    auto hit = read_variant(m, req, res, dir, name + ".gz", relpath, "gzip");
+    if (hit != Hit::Miss) return hit;
+  }
+  return Hit::Miss;
+}
+
 Hit serve_plain_or_encoded(const Mount& m, Request& req, Response& res, int dir, const std::string& name, int plain_fd,
                            const struct stat& plain_st, std::string_view relpath) {
-  if (m.precompressed) {
-    bool br = false, gzip = false;
-    accept_encodings(req.header("accept-encoding").value_or(""), br, gzip);
-    if (br) {
-      auto hit = read_variant(m, req, res, dir, name + ".br", relpath, "br");
-      if (hit == Hit::Served) return hit;
-    }
-    if (gzip) {
-      auto hit = read_variant(m, req, res, dir, name + ".gz", relpath, "gzip");
-      if (hit == Hit::Served) return hit;
-    }
+  bool br = false, gzip = false;
+  if (m.precompressed) accept_encodings(req.header("accept-encoding").value_or(""), br, gzip);
+
+  std::string_view encoding;
+  const struct stat* meta = &plain_st;
+  struct stat alt{};
+  std::string alt_name;
+  bool follow_variant = false;
+  if (m.fast && (br || gzip)) {
+    auto take = [&](std::string_view enc, const std::string& n) {
+      auto look = look_at(dir, n, alt);
+      if (look == Look::Regular) {
+        encoding = enc;
+        alt_name = n;
+        meta = &alt;
+        return true;
+      }
+      if (look == Look::Follow) follow_variant = true;
+      return false;
+    };
+    bool chose = br && take("br", name + ".br");
+    if (!chose && !follow_variant && gzip) take("gzip", name + ".gz");
   }
+  // A symlink sibling has to be opened so the inside-root check still runs.
+  // Dev always opens, and always reads: no 304 and no HEAD shortcut.
+  if (follow_variant || !m.fast) {
+    if (auto hit = open_encoded(m, req, res, dir, name, relpath, br, gzip); hit != Hit::Miss) return hit;
+    return read_fd(m, req, res, plain_fd, plain_st, relpath, {});
+  }
+
+  const std::string* cached = nullptr;
+  std::optional<FileMem::Entry> held;
+  if (m.mem) {
+    held = m.mem->fresh(relpath, encoding);
+    if (!held) held = m.mem->reuse_if_same(relpath, encoding, *meta);
+    if (held && FileMem::same_file(*held, *meta)) cached = &held->body;
+    else held.reset();
+  }
+  if (auto hit = answer_from_meta(m, req, res, *meta, relpath, encoding, cached); hit == Hit::Served) return hit;
+  if (!encoding.empty()) return read_variant(m, req, res, dir, alt_name, relpath, encoding);
   return read_fd(m, req, res, plain_fd, plain_st, relpath, {});
 }
 
@@ -604,7 +814,10 @@ Hit serve_disk(const Mount& m, const Rel& rel, Request& req, Response& res) {
       fail(m, req, res, {503, "server.busy", "server is at capacity", "too many open files"});
       return Hit::Served;
     }
-    if (opened.kind != Opened::Ok) return Hit::Miss;
+    if (opened.kind != Opened::Ok) {
+      if (last && m.mem) m.mem->drop_path(join_segs(rel.segs));
+      return Hit::Miss;
+    }
     struct stat st {};
     if (::fstat(opened.fd.get(), &st) != 0) {
       fail(m, req, res, {500, "static.io", "could not read file", errno_text(errno)});
@@ -637,7 +850,10 @@ Hit serve_disk(const Mount& m, const Rel& rel, Request& req, Response& res) {
     fail(m, req, res, {503, "server.busy", "server is at capacity", "too many open files"});
     return Hit::Served;
   }
-  if (opened.kind != Opened::Ok) return Hit::Miss;
+  if (opened.kind != Opened::Ok) {
+    if (m.mem) m.mem->drop_path(index_key(walked, m.index));
+    return Hit::Miss;
+  }
   auto mime_path = index_key(walked, m.index);
   return serve_opened(m, req, res, parent, m.index, std::move(opened.fd), mime_path);
 }
@@ -717,7 +933,8 @@ bool valid_index(const std::string& index, bool dotfiles, std::string& why) {
   return true;
 }
 
-void build_mount(std::vector<Mount>& mounts, std::string prefix, const files& spec, std::vector<std::string>& errors) {
+void build_mount(std::vector<Mount>& mounts, std::string prefix, const files& spec, std::vector<std::string>& errors,
+                 bool dev) {
   auto fail_at = [&](std::string msg) { errors.push_back("static files: " + std::move(msg)); };
   bool disk = !spec.root.empty();
   bool embed = !spec.assets.empty();
@@ -744,7 +961,16 @@ void build_mount(std::vector<Mount>& mounts, std::string prefix, const files& sp
   m.cache_control = std::move(cache);
   m.precompressed = spec.precompressed;
   m.fallthrough = spec.fallthrough;
+  m.fast = !dev;
   m.max_bytes = spec.max_bytes;
+  if (m.fast && spec.memory && spec.memory_file > 0 && spec.memory_bytes > 0) {
+    auto mem = std::make_shared<FileMem>();
+    mem->enabled = true;
+    mem->file_cap = spec.memory_file;
+    mem->total_cap = spec.memory_bytes;
+    mem->revalidate = spec.memory_revalidate;
+    m.mem = std::move(mem);
+  }
   for (auto& rule : spec.cache) {
     if (rule.glob.empty()) {
       fail_at("cache rule has an empty glob");
@@ -845,6 +1071,49 @@ void build_mount(std::vector<Mount>& mounts, std::string prefix, const files& sp
   mounts.push_back(std::move(m));
 }
 
+std::string cached_path(const Mount& m, const Rel& rel) {
+  if (rel.segs.empty() || rel.dir) {
+    if (m.index.empty()) return {};
+    return index_key(join_segs(rel.segs), m.index);
+  }
+  return join_segs(rel.segs);
+}
+
+bool fresh_encoding(const Mount& m, std::string_view relpath, std::string_view accept, std::string_view& encoding) {
+  if (!m.fast || !m.mem || relpath.empty()) return false;
+  bool br = false, gzip = false;
+  if (m.precompressed) accept_encodings(accept, br, gzip);
+  if (br && m.mem->fresh(relpath, "br")) {
+    encoding = "br";
+    return true;
+  }
+  if (!br && gzip && m.mem->fresh(relpath, "gzip")) {
+    encoding = "gzip";
+    return true;
+  }
+  if (!br && !gzip && m.mem->fresh(relpath, "")) {
+    encoding = "";
+    return true;
+  }
+  return false;
+}
+
+/// A cache hit with no syscall. A directory URL without a trailing slash is a
+/// redirect, not the index, so it doesn't count.
+bool serve_from_fresh(const Mount& m, Request& req, Response& res, const Rel& rel) {
+  if ((rel.segs.empty() || rel.dir) && !req.path.ends_with('/')) return false;
+  auto relpath = cached_path(m, rel);
+  std::string_view encoding;
+  if (!fresh_encoding(m, relpath, req.header("accept-encoding").value_or(""), encoding)) return false;
+  auto held = m.mem->fresh(relpath, encoding);
+  if (!held) return false;
+  struct stat st{};
+  st.st_mode = S_IFREG;
+  st.st_size = static_cast<off_t>(held->size);
+  st.st_mtim = held->mtime;
+  return answer_from_meta(m, req, res, st, relpath, encoding, &held->body) == Hit::Served;
+}
+
 }  // namespace
 
 struct StaticTable {
@@ -861,7 +1130,8 @@ void prepare_static(Core& core, std::vector<std::string>& errors) {
   }
   auto table = std::make_unique<StaticTable>();
   auto before = errors.size();
-  for (auto& fm : core.static_files) build_mount(table->mounts, fm.base, fm.spec, errors);
+  bool dev = core.config.profile == Profile::Dev;
+  for (auto& fm : core.static_files) build_mount(table->mounts, fm.base, fm.spec, errors, dev);
   if (errors.size() != before) {
     core.static_table.reset();
     return;
@@ -877,12 +1147,24 @@ std::vector<const Mount*> matching_mounts(const std::vector<Mount>& mounts, std:
   return out;
 }
 
-bool static_wants_worker(const Core& core, http::Method method, std::string_view path) {
+bool static_wants_worker(const Core& core, http::Method method, std::string_view path,
+                         std::string_view accept_encoding) {
   if (!core.static_table) return false;
   if (method != http::Method::Get && method != http::Method::Head) return false;
   for (auto* m : matching_mounts(core.static_table->mounts, path)) {
-    if (m->root_fd >= 0) return true;
-    if (!m->fallthrough) return false;
+    if (m->root_fd < 0) {
+      if (!m->fallthrough) return false;
+      continue;
+    }
+    // Dev, a cold cache, and a stale entry open the file on a worker.
+    if (!m->fast || !m->mem) return true;
+    std::string rel;
+    if (!strip_prefix(*m, path, rel)) return true;
+    auto parts = split_rel(rel, m->dotfiles);
+    if (parts.blocked) return true;
+    std::string_view encoding;
+    if (fresh_encoding(*m, cached_path(*m, parts), accept_encoding, encoding)) return false;
+    return true;
   }
   return false;
 }
@@ -896,6 +1178,7 @@ bool serve_static(Core& core, Request& req, Response& res) {
     auto parts = split_rel(rel, m->dotfiles);
     // A bad path (dotfile, "..", a slash in a decoded name) is not a missing file.
     if (parts.blocked) return false;
+    if (m->root_fd >= 0 && serve_from_fresh(*m, req, res, parts)) return true;
     Hit out = m->root_fd >= 0 ? serve_disk(*m, parts, req, res) : serve_embed(*m, parts, req, res);
     if (out == Hit::Served) return true;
     if (out == Hit::Miss && m->spa && spa_eligible(parts) && serve_spa(*m, req, res)) return true;

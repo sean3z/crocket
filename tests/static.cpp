@@ -146,6 +146,7 @@ void test_disk() {
   Crocket app;
   app.mount("/static", files{
              .root = tmp.dir.string(),
+             .memory = false,
              .types = {{"weba", "audio/webm"}}})
       .mount("/", reflect_routes<^^api>());
   LocalClient c(app);
@@ -273,7 +274,9 @@ void test_disk() {
   auto got = c.get("/static/ok.txt").dispatch();
   auto head = c.head("/static/ok.txt").dispatch();
   CHECK_EQ(head.status, 200);
-  CHECK_EQ(head.body, got.body);  // LocalClient keeps it; the engine sends none
+  // Release HEAD sends the length and no body. The file is not read.
+  CHECK(head.body.empty());
+  CHECK_EQ(hdr(head, "content-length"), std::to_string(got.body.size()));
   CHECK_EQ(hdr(head, "etag"), hdr(got, "etag"));
   CHECK_EQ(hdr(head, "content-type"), hdr(got, "content-type"));
   CHECK_EQ(hdr(head, "last-modified"), hdr(got, "last-modified"));
@@ -686,6 +689,186 @@ void test_cache_headers_precompressed_fallthrough() {
         std::string::npos);
 }
 
+void test_fast_path_and_memory() {
+  section("fast path and memory");
+  Tmp web;
+  web.write("ok.txt", "abcdefghijklmnopqrstuvwxyz");
+  web.write("app.js", "plain-js");
+  web.write("app.js.br", "brotli-bytes");
+  web.write("app.js.gz", "gzip-bytes");
+  web.write("via.br", "from-link");
+  std::filesystem::create_symlink("via.br", web.dir / "link.js.br");
+  web.write("link.js", "plain-link");
+
+  Crocket app;
+  app.mount("/", files{.root = web.dir.string(), .precompressed = true, .memory = false});
+  LocalClient c(app);
+  CHECK(!app.loop_route(http::Method::Get, "/ok.txt"));
+
+  auto plain = c.get("/app.js").dispatch();
+  auto br = c.get("/app.js").header("accept-encoding", "br, gzip").dispatch();
+  CHECK_EQ(br.body, "brotli-bytes");
+  CHECK(hdr(br, "etag") != hdr(plain, "etag"));
+  CHECK(hdr(br, "etag").find("-br\"") != std::string::npos);
+  // The plain etag is a different representation. Accept-Encoding: br must not 304.
+  auto wrong = c.get("/app.js").header("accept-encoding", "br").header("if-none-match", hdr(plain, "etag")).dispatch();
+  CHECK_EQ(wrong.status, 200);
+  CHECK_EQ(wrong.body, "brotli-bytes");
+  auto right = c.get("/app.js").header("accept-encoding", "br").header("if-none-match", hdr(br, "etag")).dispatch();
+  CHECK_EQ(right.status, 304);
+  CHECK(right.body.empty());
+  CHECK_EQ(hdr(right, "etag"), hdr(br, "etag"));
+  CHECK_EQ(hdr(right, "content-encoding"), "br");
+  auto gz_tag = c.get("/app.js").header("accept-encoding", "gzip").dispatch();
+  CHECK(hdr(gz_tag, "etag").find("-gzip\"") != std::string::npos);
+  CHECK(hdr(gz_tag, "etag") != hdr(br, "etag"));
+  // A br etag does not match the uncompressed representation.
+  auto as_plain = c.get("/app.js").header("if-none-match", hdr(br, "etag")).dispatch();
+  CHECK_EQ(as_plain.status, 200);
+  CHECK_EQ(as_plain.body, "plain-js");
+
+  auto head_br = c.head("/app.js").header("accept-encoding", "br").dispatch();
+  CHECK_EQ(head_br.status, 200);
+  CHECK(head_br.body.empty());
+  CHECK_EQ(hdr(head_br, "content-encoding"), "br");
+  CHECK_EQ(hdr(head_br, "content-length"), std::to_string(std::string("brotli-bytes").size()));
+  CHECK_EQ(hdr(head_br, "etag"), hdr(br, "etag"));
+  CHECK_EQ(hdr(head_br, "content-type"), "text/javascript; charset=utf-8");
+
+  auto linked = c.get("/link.js").header("accept-encoding", "br").dispatch();
+  CHECK_EQ(linked.status, 200);
+  CHECK_EQ(linked.body, "from-link");
+  CHECK_EQ(hdr(linked, "content-encoding"), "br");
+
+  // Cache off: a repeat hit still wants a worker.
+  CHECK_EQ(c.get("/ok.txt").dispatch().body, "abcdefghijklmnopqrstuvwxyz");
+  CHECK(!app.loop_route(http::Method::Get, "/ok.txt"));
+  CHECK(!app.loop_route(http::Method::Head, "/ok.txt"));
+
+  {
+    Tmp live;
+    live.write("n.txt", "one");
+    Crocket hot;
+    hot.mount("/", files{.root = live.dir.string(), .memory_revalidate = std::chrono::hours{1}});
+    LocalClient hc(hot);
+    CHECK(!hot.loop_route(http::Method::Get, "/n.txt"));
+    CHECK_EQ(hc.get("/n.txt").dispatch().body, "one");
+    CHECK(hot.loop_route(http::Method::Get, "/n.txt"));
+    CHECK(hot.loop_route(http::Method::Head, "/n.txt"));
+    auto p = live.write("n.txt", "two");
+    set_mtime(p, 1'800'000'000, 1);
+    // Inside the revalidate window the cached bytes are served, including after a delete.
+    CHECK_EQ(hc.get("/n.txt").dispatch().body, "one");
+    CHECK(hot.loop_route(http::Method::Get, "/n.txt"));
+    std::filesystem::remove(p);
+    auto gone = hc.get("/n.txt").dispatch();
+    CHECK_EQ(gone.status, 200);
+    CHECK_EQ(gone.body, "one");
+  }
+  {
+    Tmp live;
+    live.write("n.txt", "one");
+    Crocket hot;
+    hot.mount("/", files{.root = live.dir.string(), .memory_revalidate = std::chrono::milliseconds{0}});
+    LocalClient hc(hot);
+    CHECK_EQ(hc.get("/n.txt").dispatch().body, "one");
+    // Every request fstats, so a fresh entry never keeps the request on the loop.
+    CHECK(!hot.loop_route(http::Method::Get, "/n.txt"));
+    auto p = live.write("n.txt", "two-two");
+    set_mtime(p, 1'800'000'000, 2);
+    auto edited = hc.get("/n.txt").dispatch();
+    CHECK_EQ(edited.body, "two-two");
+    CHECK(hdr(edited, "etag") != "");
+    std::filesystem::remove(p);
+    auto gone = hc.get("/n.txt").dispatch();
+    CHECK_EQ(gone.status, 404);
+    CHECK(gone.body.find("two-two") == std::string::npos);
+    // Same size and mtime is the same file, so the cached bytes stay.
+    auto q = live.write("same.txt", "aaaa");
+    set_mtime(q, 1'700'000'000, 5);
+    CHECK_EQ(hc.get("/same.txt").dispatch().body, "aaaa");
+    live.write("same.txt", "bbbb");
+    set_mtime(q, 1'700'000'000, 5);
+    CHECK_EQ(hc.get("/same.txt").dispatch().body, "aaaa");
+    set_mtime(q, 1'700'000'000, 6);
+    CHECK_EQ(hc.get("/same.txt").dispatch().body, "bbbb");
+  }
+  {
+    Tmp live;
+    live.write("a.txt", "aaaa");
+    live.write("b.txt", "bbbb");
+    live.write("big.txt", "12345");
+    Crocket hot;
+    hot.mount("/", files{
+                   .root = live.dir.string(),
+                   .memory_file = 4,
+                   .memory_bytes = 4,
+                   .memory_revalidate = std::chrono::hours{1}});
+    LocalClient hc(hot);
+    CHECK_EQ(hc.get("/a.txt").dispatch().body, "aaaa");
+    CHECK(hot.loop_route(http::Method::Get, "/a.txt"));
+    CHECK_EQ(hc.get("/big.txt").dispatch().body, "12345");
+    CHECK(!hot.loop_route(http::Method::Get, "/big.txt"));
+    CHECK_EQ(hc.get("/b.txt").dispatch().body, "bbbb");
+    CHECK(hot.loop_route(http::Method::Get, "/b.txt"));
+    CHECK(!hot.loop_route(http::Method::Get, "/a.txt"));
+  }
+  {
+    Tmp live;
+    live.write("n.txt", "one");
+    live.write("app.js", "plain-js");
+    live.write("app.js.br", "brotli-bytes");
+    Crocket dev;
+    Config cfg;
+    cfg.profile = Profile::Dev;
+    dev.configure(cfg);
+    dev.mount("/", files{
+                    .root = live.dir.string(),
+                    .precompressed = true,
+                    .memory = true,
+                    .memory_revalidate = std::chrono::hours{1}});
+    LocalClient dc(dev);
+    auto first = dc.get("/n.txt").dispatch();
+    CHECK_EQ(first.body, "one");
+    auto head = dc.head("/n.txt").dispatch();
+    CHECK_EQ(head.status, 200);
+    CHECK_EQ(head.body, "one");
+    CHECK(hdr(head, "content-length").empty());
+    CHECK(!dev.loop_route(http::Method::Get, "/n.txt"));
+    auto p = live.write("n.txt", "two");
+    set_mtime(p, 1'800'000'000, 9);
+    CHECK_EQ(dc.get("/n.txt").dispatch().body, "two");
+    CHECK(!dev.loop_route(http::Method::Get, "/n.txt"));
+    auto br = dc.get("/app.js").header("accept-encoding", "br").dispatch();
+    CHECK_EQ(br.body, "brotli-bytes");
+    auto again = dc.get("/app.js").header("accept-encoding", "br").header("if-none-match", hdr(br, "etag")).dispatch();
+    CHECK_EQ(again.status, 304);
+    CHECK_EQ(dc.head("/app.js").header("accept-encoding", "br").dispatch().body, "brotli-bytes");
+    std::filesystem::remove(p);
+    CHECK_EQ(dc.get("/n.txt").dispatch().status, 404);
+  }
+  {
+    // A cached br body stays on the loop. Plain bytes do not answer a br request.
+    Tmp live;
+    live.write("app.js", "plain-js");
+    live.write("app.js.br", "brotli-bytes");
+    Crocket hot;
+    hot.mount("/", files{.root = live.dir.string(), .precompressed = true,
+                         .memory_revalidate = std::chrono::hours{1}});
+    LocalClient hc(hot);
+    CHECK_EQ(hc.get("/app.js").dispatch().body, "plain-js");
+    CHECK(hot.loop_route(http::Method::Get, "/app.js"));
+    CHECK(!hot.loop_route(http::Method::Get, "/app.js", "br"));
+    CHECK_EQ(hc.get("/app.js").header("accept-encoding", "br").dispatch().body, "brotli-bytes");
+    CHECK(hot.loop_route(http::Method::Get, "/app.js", "br"));
+    auto p = live.dir / "app.js.br";
+    std::filesystem::remove(p);
+    auto still = hc.get("/app.js").header("accept-encoding", "br").dispatch();
+    CHECK_EQ(still.status, 200);
+    CHECK_EQ(still.body, "brotli-bytes");
+  }
+}
+
 int main() {
   test_disk();
   test_dotfiles_cache_and_mounts();
@@ -694,6 +877,7 @@ int main() {
   test_encoded_traversal();
   test_spa_embed_and_ignite();
   test_cache_headers_precompressed_fallthrough();
+  test_fast_path_and_memory();
   std::fprintf(stderr, "%d checks, %d failed\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

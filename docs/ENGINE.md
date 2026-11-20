@@ -308,10 +308,18 @@ is `.` or `..`, is a miss.
 
 Disk opens happen on a worker. `loop_route` returns false for a GET or HEAD that a disk
 mount might answer, and `run_routes` moves the request off the loop if a fairing
-rewrote the path onto one. Embedded mounts are a memory lookup and stay on the loop.
-A route that matched never consults a mount, so the router's cost is unchanged.
-With `.fallthrough`, a missing file is tried on the next matching files mount
-(longest prefix first). A rejected path is not.
+rewrote the path onto one. Outside the dev profile, `If-None-Match` and
+`If-Modified-Since` are decided from size and mtime after `fstat`, and `HEAD`
+sends `Content-Length` without a read. A fresh small-file cache hit
+(`.memory`, keyed by relative path and encoding, checked with `fstat` at most
+every `.memory_revalidate`) stays on the loop and does no syscall. The dev
+profile does neither: every request reads the file, so an edit shows up on the
+next one. inotify isn't used. A watch on the inode misses an atomic replace, and
+NFS doesn't deliver the events. The revalidate window is the staleness that
+buys the syscall-free hit. Embedded mounts are a memory lookup and stay on the
+loop. A route that matched never consults a mount, so the router's cost is
+unchanged. With `.fallthrough`, a missing file is tried on the next matching
+files mount (longest prefix first). A rejected path is not.
 
 ## Binary size
 

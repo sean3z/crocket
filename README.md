@@ -728,6 +728,20 @@ in `WEB_ROOT` when that is set.
   Shield's default.
 - **`max_bytes`** defaults to 32 MiB. A larger file on disk is `500 static.too_large`.
   A larger embedded asset fails ignite.
+- **`memory`** (on by default) keeps small disk files in memory so a repeat hit can
+  run on the event loop. **`memory_file`** is the largest file it holds (256 KiB)
+  and **`memory_bytes`** is the cap for the whole mount (8 MiB). The key is the
+  path relative to the mount plus the encoding, so a `.br` sibling is not the
+  plain file. A hit newer than **`memory_revalidate`** (1 second) is served with
+  no syscall. After that, one `fstat` compares size and mtime: a match refreshes
+  the entry and skips the read, and a mismatch or a missing file drops it.
+  Inside the window a changed or deleted file can still be served. That window
+  is the tradeoff against inotify. inotify is prompt on a local directory, but
+  an editor's temp-file-and-rename leaves a watch on the old inode quiet, and
+  NFS doesn't deliver inotify. `fstat` sees the directory entry the next open
+  would see. `memory_revalidate` of 0 fstats on every request. A write that
+  changes neither size nor mtime is the same file, which is also what the ETag
+  means. The dev profile ignores these fields and reads the disk every time.
 - **`types`** adds or replaces a content type by extension (`{{"weba", "audio/webm"}}`).
   No leading dot. The built-in list covers the usual web types, and text types include
   `charset=utf-8`. `application/json` doesn't, matching crocket's other JSON responses.
@@ -744,17 +758,26 @@ Only GET and HEAD are served. Anything else falls through, so it's a 404 when no
 matches, or a 405 when some other method has one.
 
 Disk files send a strong `ETag` of size and mtime (with nanoseconds) and a
-`Last-Modified`. Embedded files send a strong `ETag`, the same hash crocket generates
+`Last-Modified`. A precompressed sibling uses that tag with `-br` or `-gzip` before
+the closing quote, so `If-None-Match` for the plain file does not match the encoded
+one. Embedded files send a strong `ETag`, the same hash crocket generates
 for other bodies, and no `Last-Modified`, because an embed has no mtime. `If-None-Match`
-and `If-Modified-Since` answer `304` through the same conditional handling as any other
-response. One `Range` is `206` once the file fits in `max_bytes`, since the body is
-already a buffer. Several ranges in one request get the whole file, as they do for
-`Cacheable`. `HEAD` carries the same headers as `GET`. An `ETag` built from size and
-mtime doesn't change if the bytes change without either of those changing.
+and `If-Modified-Since` answer `304`. Outside the dev profile that decision is the
+size and mtime from `fstat`: the body is not read, and a compressed sibling is not
+opened. The dev profile reads the file on every request, then applies the same
+validators, so an edit is in the next response. One `Range` is `206` once the file
+fits in `max_bytes`, since the body is already a buffer. Several ranges in one
+request get the whole file, as they do for `Cacheable`. `HEAD` outside dev sends
+`Content-Length` and no body. In dev, `HEAD` reads the file too. An `ETag` built
+from size and mtime doesn't change if the bytes change without either of those
+changing.
 
-Disk reads run on a worker, so a slow disk doesn't stall an event loop. Embedded files
-are already in memory and run on the loop. Logs and metrics use one label per mount,
-`/static/{path}` or `/{path}`, not each file's path.
+A disk open runs on a worker, so a slow disk doesn't stall an event loop. A fresh
+`memory` hit does not: `loop_route` is true, and the request stays on the loop.
+A request that wants `br` while only the plain file is cached still takes a
+worker, so a `.br` sibling added later is picked up on that request. Embedded
+files are already in memory and run on the loop. Logs and metrics use one label
+per mount, `/static/{path}` or `/{path}`, not each file's path.
 
 `Shield`'s default content security policy is `default-src 'none'`, which blocks a
 page from loading its own scripts and styles. Attach a `Shield` with the policy the

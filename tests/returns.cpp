@@ -46,6 +46,10 @@ std::optional<Hero> maybe(std::int64_t id) {
 std::vector<Hero> list() { return {flash(), {2, "Dick Grayson", "Robin"}}; }
 [[= http::post("/created")]]
 Created<Hero> created() { return {{3, "Tim Drake", "Robin"}, "/heroes/3"}; }
+[[= http::get("/teapot")]]
+Teapot<std::string> teapot() { return {"short and stout"}; }
+[[= http::get("/brew")]]
+Status<std::string> brew() { return {418, "short and stout"}; }
 [[= http::get("/explicit-json")]]
 Json<Hero> explicit_json() { return {flash()}; }
 [[= http::get("/explicit-proto")]]
@@ -88,6 +92,14 @@ int main() {
   CHECK(c.status == 201 && c.headers.get("location") == "/heroes/3" && contains(c.body, "Tim Drake"));
   CHECK(client.get("/expected").dispatch().body == p.body);
 
+  section("HTTP: 418 I'm a Teapot");
+  auto tea = client.get("/teapot").dispatch();
+  CHECK(tea.status == 418 && tea.body == "short and stout");
+  CHECK(detail::reason_phrase(tea.status) == "I'm a Teapot");
+  auto brew = client.get("/brew").dispatch();
+  CHECK(brew.status == 418 && brew.body == "short and stout");
+  CHECK(detail::reason_phrase(brew.status) == "I'm a Teapot");
+
   section("HTTP: explicit wrappers win, strings unchanged");
   CHECK(client.get("/explicit-json").dispatch().body == p.body);
   auto pr = client.get("/explicit-proto").dispatch();
@@ -115,6 +127,7 @@ int main() {
   CHECK(contains(doc, R"("/plain")") && contains(doc, R"("#/components/schemas/Hero")"));
   CHECK(contains(doc, R"("application/x-protobuf")"));
   CHECK(contains(doc, R"("201")"));
+  CHECK(contains(doc, R"("418")") && contains(doc, R"("description":"I'm a Teapot")"));
   auto pf = grpc::proto_file<^^heroes>("league");
   CHECK(contains(pf, "rpc GetHero (HeroId) returns (Hero)") && contains(pf, "rpc GetJson (HeroId) returns (Hero)"));
   if (g_failures) std::fprintf(stderr, "%s\n%s\n", doc.c_str(), pf.c_str());

@@ -179,7 +179,8 @@ std::string generate_request_id() {
 }
 
 std::string_view reason_phrase(int status) {
-  // RFC 9110 section 15, plus 428, 429, 431 (RFC 6585) and 451 (RFC 7725).
+  // RFC 9110 section 15, plus 418 (reserved by RFC 9110 15.5.19; the name is
+  // from RFC 2324), 428, 429, 431 (RFC 6585) and 451 (RFC 7725).
   switch (status) {
     case 100: return "Continue";
     case 101: return "Switching Protocols";
@@ -215,6 +216,7 @@ std::string_view reason_phrase(int status) {
     case 415: return "Unsupported Media Type";
     case 416: return "Range Not Satisfiable";
     case 417: return "Expectation Failed";
+    case 418: return "I'm a Teapot";
     case 421: return "Misdirected Request";
     case 422: return "Unprocessable Content";
     case 426: return "Upgrade Required";

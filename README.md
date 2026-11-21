@@ -583,7 +583,7 @@ The return type is the response. Built-in responders:
 | `std::optional<T>` | `T`, or 404 `not_found` when empty |
 | `std::expected<T, ApiError>` (alias `Result<T>`) | `T`, or the error as a problem+json body |
 | `Result<void>` / `void` | 204 |
-| `Created<T>`, `Accepted<T>` | 201 / 202, with an optional `Location` header |
+| `Created<T>`, `Accepted<T>`, `Teapot<T>` | 201 / 202 / 418, with an optional `Location` header |
 | `Status<T>` | Runtime status plus payload |
 | `NoContent` | 204 |
 | `Cacheable<T>` | `T` with `Last-Modified` and byte ranges (see [Caching and ranges](#caching-and-ranges)) |

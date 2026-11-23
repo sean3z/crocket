@@ -287,9 +287,45 @@ The signal handler only sets a flag and writes to an eventfd the loop watches. W
 threads block SIGINT and SIGTERM. SIGPIPE is ignored while the engine runs, because a
 peer closing during a write is an ordinary error.
 
+## Static files
+
+`.mount(prefix, files{...})` (see the README) reads the file in crocket and sends a normal `Response`, so
+Shield, logging, metrics, and conditional requests see it. h2o's file handler
+(`h2o_file_register` in `lib/handler/file.c`) isn't called.
+
+That handler is built for `h2o_req_t`. A hit would be answered before crocket's
+pipeline, and a miss returns -1 to h2o's next handler. crocket registers one handler,
+so there's no next handler that still runs fairings. The open is `O_RDONLY` without
+`O_NOFOLLOW`, which follows a symlink out of the directory. It also has no way to serve
+`#embed` bytes. sendfile would be a second response path beside `Response::body`. The
+cmake build compiles h2o with `-ffunction-sections`, and nothing in crocket references
+the file handler, so a link with `--gc-sections` still drops it.
+
+A URL segment is percent-decoded once, the same text a path capture would hold.
+`%2e%2e%2f` becomes `../`. That string is not appended to the root: `openat` is
+called with one component, and a name that contains `/`, `\`, or NUL, or that
+is `.` or `..`, is a miss.
+
+Disk opens happen on a worker. `loop_route` returns false for a GET or HEAD that a disk
+mount might answer, and `run_routes` moves the request off the loop if a fairing
+rewrote the path onto one. Outside the dev profile, `If-None-Match` and
+`If-Modified-Since` are decided from size and mtime after `fstat`, and `HEAD`
+sends `Content-Length` without a read. A fresh small-file cache hit
+(`.memory`, keyed by relative path and encoding, checked with `fstat` at most
+every `.memory_revalidate`) stays on the loop and does no syscall. The dev
+profile does neither: every request reads the file, so an edit shows up on the
+next one. Dev `HEAD` reads too, then drops the body; `Content-Length` is the
+size of that read. Embedded files and the SPA index send no body on `HEAD`
+either. inotify isn't used. A watch on the inode misses an atomic replace, and
+NFS doesn't deliver the events. The revalidate window is the staleness that
+buys the syscall-free hit. Embedded mounts are a memory lookup and stay on the
+loop. A route that matched never consults a mount, so the router's cost is
+unchanged. With `.fallthrough`, a missing file is tried on the next matching
+files mount (longest prefix first). A rejected path is not.
+
 ## Binary size
 
-h2o's core references parts crocket never calls, such as HTTP/3 and proxying. h2o is
-compiled with `-ffunction-sections -fdata-sections`, so an application that links with
-`-Wl,--gc-sections` drops them. The stripped `crocket_serve` example is about 1.4 MB
-without it and 1.1 MB with it.
+h2o's core references parts crocket never calls, such as HTTP/3, proxying, and its file
+handler. h2o is compiled with `-ffunction-sections -fdata-sections`, so an application
+that links with `-Wl,--gc-sections` drops them. The stripped `crocket_serve` example is
+about 1.4 MB without it and 1.1 MB with it.

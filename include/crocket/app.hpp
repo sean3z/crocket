@@ -6,6 +6,7 @@
 #include "crocket/log.hpp"
 #include "crocket/request.hpp"
 #include "crocket/state.hpp"
+#include "crocket/files.hpp"
 
 #include <array>
 #include <atomic>
@@ -423,6 +424,8 @@ struct IpRange {
   int prefix = 0;
 };
 
+struct StaticTable;
+
 struct Core {
   Config config;
   std::vector<IpRange> trusted_proxies;  // parsed at ignite
@@ -445,6 +448,16 @@ struct Core {
   std::shared_ptr<Router> router;         // built at ignite
   Stats stats;
   bool ignited = false;
+  struct FileMount {
+    std::string base;
+    crocket::files spec;
+  };
+  std::vector<FileMount> static_files;        // .mount(prefix, files), prepared at ignite
+  std::unique_ptr<StaticTable> static_table;   // directory fds live in static.cpp
+  // Defined in static.cpp, where StaticTable is complete. An inline constructor
+  // would destroy that unique_ptr from every caller.
+  Core();
+  ~Core();
 };
 
 }  // namespace detail
@@ -535,6 +548,14 @@ class Crocket {
     return std::move(mount(base, std::move(routes), mode));
   }
 
+  /// Serve static files under `base`. Routes match first, whether this mount
+  /// comes before or after them. A miss is a normal 404 unless `files::fallthrough`.
+  /// See files.hpp. After ignite the call is an error and changes nothing.
+  Crocket& mount(std::string_view base, files spec) &;
+  Crocket&& mount(std::string_view base, files spec) && {
+    return std::move(mount(base, std::move(spec)));
+  }
+
   Crocket& configure(Config cfg) &;
   Crocket&& configure(Config cfg) && { return std::move(configure(std::move(cfg))); }
 
@@ -554,7 +575,9 @@ class Crocket {
   /// Whether every route that can answer method+path runs on the event loop
   /// (an async handler, or a plain function adaptive placement has promoted),
   /// or none does (crocket answers 404 or 405), so the loop can run the request itself.
-  [[nodiscard]] bool loop_route(http::Method method, std::string_view path) const;
+  /// `accept_encoding` lets a cached precompressed file stay on the event loop.
+  [[nodiscard]] bool loop_route(http::Method method, std::string_view path,
+                                std::string_view accept_encoding = {}) const;
   /// handle_async, waiting for the response. Used by LocalClient.
   Response handle(Request req);
 

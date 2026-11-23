@@ -20,4 +20,5 @@
 #include "crocket/request.hpp"
 #include "crocket/responder.hpp"
 #include "crocket/state.hpp"
+#include "crocket/files.hpp"
 #include "crocket/task.hpp"

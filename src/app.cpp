@@ -8,6 +8,7 @@
 #include "identity.hpp"
 #include "log_hub.hpp"
 #include "router.hpp"
+#include "static.hpp"
 
 #include <algorithm>
 #include <thread>
@@ -314,6 +315,14 @@ Crocket& Crocket::mount(std::string_view base, Routes routes, Mode mode) & {
   return *this;
 }
 
+Crocket& Crocket::mount(std::string_view base, files spec) & {
+  if (core_->ignited)
+    core_->build_errors.push_back("mount(\"" + std::string(base) + "\") after ignite");
+  else
+    core_->static_files.push_back({std::string(base), std::move(spec)});
+  return *this;
+}
+
 Crocket& Crocket::configure(Config cfg) & {
   core_->config = std::move(cfg);
   return *this;
@@ -503,6 +512,7 @@ std::expected<void, IgniteError> Crocket::ignite() {
 
   c.routes = std::move(routes);
   c.placement = std::make_unique<detail::Placement[]>(c.routes.size());
+  detail::prepare_static(c, errors);
 
   // 5. Fairings get the last word. Shield is on unless one is attached already
   // (Shield::none() turns it off); attached last, its on_response runs first.
@@ -682,10 +692,15 @@ void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&
   run(new detail::Exchange(*this, std::move(req), std::move(done), loop));
 }
 
-bool Crocket::loop_route(http::Method method, std::string_view path) const {
+bool Crocket::loop_route(http::Method method, std::string_view path, std::string_view accept_encoding) const {
   if (!core_->ignited) return false;
   auto candidates = core_->router->match(method, path);
-  if (candidates.empty()) return true;  // a 404 or 405 crocket writes itself: nothing that can block
+  if (candidates.empty()) {
+    // A disk file can block in open(); embedded bytes can't. A fresh small-file
+    // cache hit does not. Matched routes never get here.
+    if (detail::static_wants_worker(*core_, method, path, accept_encoding)) return false;
+    return true;
+  }
   for (const auto* c : candidates)
     if (!runs_on_loop(*c->def)) return false;
   return true;
@@ -987,6 +1002,17 @@ bool Crocket::run_routes(Request& req, Response& res) {
     write_error(ApiError{405, "method.not_allowed", "method not allowed", {}}, req, res);
     res.headers.set("allow", allow);
     return false;
+  }
+  if (req.method == http::Method::Get || req.method == http::Method::Head) {
+    // On an event loop, a disk mount has to move to a worker before open().
+    // loop_route usually did that already; a fairing may have rewritten the path since.
+    if (req.exchange && req.exchange->loop &&
+        detail::static_wants_worker(*core_, req.method, req.path, req.header("accept-encoding").value_or(""))) {
+      req.exchange->loop = nullptr;
+      req.exchange->reroute = true;
+      return true;
+    }
+    if (detail::serve_static(*core_, req, res)) return false;
   }
   write_error(ApiError::not_found(), req, res);
   return false;

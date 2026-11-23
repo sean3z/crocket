@@ -40,6 +40,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -528,7 +529,7 @@ void Loop::dispatch(Session* s) {
   rq.body = std::move(s->body);
   e_.outstanding_.fetch_add(1);
   std::uint64_t txn = s->txn;
-  if (app_.loop_route(rq.method, rq.path)) {
+  if (app_.loop_route(rq.method, rq.path, rq.header("accept-encoding").value_or(""))) {
     // An async handler (or a plain function proved fast) runs here, on the loop, with no handoff. The response
     // comes back here: now, or when the task finishes (as a loop job).
     app_.handle_async(std::move(rq), [this, txn](Response&& res) {
@@ -632,8 +633,18 @@ void Loop::respond(Session* s, Response res) {
   add_headers(req, &req->res.headers, r.headers, s->meta);
   if (trailers) add_headers(req, &req->res.trailers, r.trailers, s->meta);
   // Without a length the stream stays open for the trailers (and gRPC always
-  // sends them). HEAD reports the GET body's length and sends no body.
-  if (body_allowed && !grpc && !trailers) req->res.content_length = r.body.size();
+  // sends them). HEAD reports the GET body's length and sends no body. A static
+  // HEAD sets content-length and leaves the body empty, so the header wins.
+  if (body_allowed && !grpc && !trailers) {
+    req->res.content_length = r.body.size();
+    if (s->head_only && r.body.empty()) {
+      if (auto cl = r.headers.get("content-length")) {
+        unsigned long long n = 0;
+        auto parsed = std::from_chars(cl->data(), cl->data() + cl->size(), n);
+        if (parsed.ec == std::errc() && parsed.ptr == cl->data() + cl->size()) req->res.content_length = n;
+      }
+    }
+  }
   if (!h2 && app_.core().stats.draining.load()) req->http1_is_persistent = 0;
 
   if (req->proceed_req) {  // answered before the body was in

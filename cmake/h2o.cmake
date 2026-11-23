@@ -40,7 +40,7 @@ block(SCOPE_FOR VARIABLES)
   # wins and keeps libh2o-evloop's debug info to the normal size. Its warnings
   # (mostly variables used only by asserts in release builds) are not ours to fix.
   # Per-function sections let an application linking with -Wl,--gc-sections drop
-  # the parts of h2o crocket never calls (HTTP/3, proxying, file serving).
+  # the parts of h2o crocket never calls (HTTP/3, proxying, h2o's file handler).
   string(APPEND CMAKE_C_FLAGS " -g -w -ffunction-sections -fdata-sections")
   # h2o answers a request with more headers than this itself (400, connection
   # closed). Above crocket's Config::limits.max_header_count, so crocket sends

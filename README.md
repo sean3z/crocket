@@ -654,6 +654,143 @@ auto report(std::uint64_t id, State<Store> store) -> Cacheable<std::string> {
   and a request for several ranges gets the whole body. `If-Range` makes the range
   conditional on the client still having the current version.
 
+### Static files
+
+`.mount(prefix, files{...})` serves a directory, or bytes embedded in the binary, under
+that URL prefix. Routes match before files, whether you mount the routes first or the
+files first, so a handler never waits on the filesystem. A path no route claims and no
+file covers is the ordinary 404 (`not_found`), which is how `/` can serve a frontend
+next to an API without swallowing `/api/...` or `/healthz`.
+
+```cpp
+crocket::build()
+    .attach(Shield{}.set("content-security-policy", "default-src 'self'"))
+    .mount("/", files{.root = "web"})
+    .mount("/api", reflect_routes<^^api>())
+    .launch();
+```
+
+The same struct serves `#embed` bytes. `asset()` points at the array. The path and the
+bytes have to outlive the process, which a constexpr array does. A string literal's
+trailing NUL would be part of the file, so embed the file rather than quoting it.
+
+```cpp
+static constexpr unsigned char index_html[] = {
+#embed "web/index.html"
+};
+static constexpr unsigned char app_js[] = {
+#embed "web/app.js"
+};
+
+.mount("/", files{.assets = {
+    asset("index.html", index_html),
+    asset("app.js", app_js),
+}})
+```
+
+`examples/files.cpp` (`crocket_files`) does both: embedded by default, or the directory
+in `WEB_ROOT` when that is set.
+
+- The mount's first argument is the URL prefix. `/static` matches `/static` and
+  `/static/...`, not   `/staticfile`. The longest matching prefix is tried first. A miss is a 404
+  unless that mount sets `.fallthrough`. A route at the same path wins even when
+  the files were mounted first.
+- **`root`** is a directory, opened at ignite and held for the life of the process.
+  Files added inside it show up on the next request. Replacing the directory inode
+  (remove it and create another at the same path) doesn't retarget the server.
+  **`assets`** is the embedded list. Set one of them.
+- **`index`** defaults to `index.html`. A directory URL that ends in `/` serves it.
+  Without the slash the response is `308` to the path with a slash appended. An empty
+  `index` means a directory isn't a file.
+- **`dotfiles`** is off. A segment that starts with `.` is a miss, same as a missing file.
+- **`spa`** serves the mount's index for a GET or HEAD that missed and whose last
+  segment has no `.`, which is a client-side route. A missing `app.js` stays a 404.
+  Routes, including `/healthz`, still win. `spa` requires the index to exist at ignite.
+- **`cache_control`** is the `Cache-Control` used when no `.cache` rule matches. Empty
+  means `no-cache` (revalidate, don't keep a stale copy).
+- **`cache`** is an ordered list of `{glob, Cache-Control}`. The first glob that
+  matches the path relative to the mount wins. `*` matches any run of characters
+  except `/`, so `*.html` is `index.html` and not `dir/index.html`.
+- **`precompressed`** (off by default) serves a sibling `name.br`, then `name.gz`,
+  when `Accept-Encoding` allows it (`br` before `gzip`; `q=0` rejects that
+  coding; a missing header stays uncompressed). The response keeps the original
+  file's `Content-Type`, sets `Content-Encoding` and `Vary: Accept-Encoding`, and
+  uses a different `ETag` for each encoding. `Range` is not applied to a
+  compressed response: the encoded bytes are sent whole, and `Accept-Ranges` is
+  left off. An uncompressed response from the same mount still honors one range.
+- **`fallthrough`** (off by default) tries the next files mount whose prefix
+  matches when this one has no file. The longest prefix is still tried first.
+  A dotfile, a `..` segment, or a symlink that leaves the root doesn't continue.
+- **`headers`** is an ordered list of `{glob, headers}`. The first matching rule
+  sets those fields on the file response (not on a directory redirect). Shield
+  leaves a header the response already carries, so a rule can replace Shield's
+  `Content-Security-Policy` for `*.html` and leave every other response on
+  Shield's default.
+- **`max_bytes`** defaults to 32 MiB. A larger file on disk is `500 static.too_large`.
+  A larger embedded asset fails ignite.
+- **`memory`** (on by default) keeps small disk files in memory so a repeat hit can
+  run on the event loop. **`memory_file`** is the largest file it holds (256 KiB)
+  and **`memory_bytes`** is the cap for the whole mount (8 MiB). The key is the
+  path relative to the mount plus the encoding, so a `.br` sibling is not the
+  plain file. A hit newer than **`memory_revalidate`** (1 second) is served with
+  no syscall. After that, one `fstat` compares size and mtime: a match refreshes
+  the entry and skips the read, and a mismatch or a missing file drops it.
+  Inside the window a changed or deleted file can still be served. That window
+  is the tradeoff against inotify. inotify is prompt on a local directory, but
+  an editor's temp-file-and-rename leaves a watch on the old inode quiet, and
+  NFS doesn't deliver inotify. `fstat` sees the directory entry the next open
+  would see. `memory_revalidate` of 0 fstats on every request. A write that
+  changes neither size nor mtime is the same file, which is also what the ETag
+  means. The dev profile ignores these fields and reads the disk every time.
+- **`types`** adds or replaces a content type by extension (`{{"weba", "audio/webm"}}`).
+  No leading dot. The built-in list covers the usual web types, and text types include
+  `charset=utf-8`. `application/json` doesn't, matching crocket's other JSON responses.
+  Unknown extensions are `application/octet-stream`.
+
+The request path is normalized before this runs. Each segment is then percent-decoded
+once, which is the same text a path capture would see, and that name has to be one
+component. `%2e%2e%2f` decodes to `../`, so it's a miss. The decoded text is never
+concatenated onto the root: a name that is empty, `.`, `..`, or that contains `/`,
+`\`, or NUL doesn't reach `openat`. A symlink is followed only when the file it names
+stays inside the root. An absolute link, a `..` that climbs out, and a link to
+somewhere like `/etc/passwd` are misses. Paths are case-sensitive, like the filesystem.
+Only GET and HEAD are served. Anything else falls through, so it's a 404 when no route
+matches, or a 405 when some other method has one.
+
+Disk files send a strong `ETag` of size and mtime (with nanoseconds) and a
+`Last-Modified`. A precompressed sibling uses that tag with `-br` or `-gzip` before
+the closing quote, so `If-None-Match` for the plain file does not match the encoded
+one. Embedded files send a strong `ETag`, the same hash crocket generates
+for other bodies, and no `Last-Modified`, because an embed has no mtime. `If-None-Match`
+and `If-Modified-Since` answer `304`. Outside the dev profile that decision is the
+size and mtime from `fstat`: the body is not read, and a compressed sibling is not
+opened. The dev profile reads the file on every request, then applies the same
+validators, so an edit is in the next response. One `Range` is `206` once the file
+fits in `max_bytes`, since the body is already a buffer. Several ranges in one
+request get the whole file, as they do for `Cacheable`. `HEAD` never sends a
+body. Outside dev, `Content-Length` comes from the stat and the file is not
+read. In dev, `HEAD` still reads the file, so `Content-Length`, `ETag`, and
+`Last-Modified` match that read, and the body is then dropped. Embedded files
+and the SPA index do the same. An `ETag` built from size and mtime doesn't
+change if the bytes change without either of those changing.
+
+A disk open runs on a worker, so a slow disk doesn't stall an event loop. A fresh
+`memory` hit does not: `loop_route` is true, and the request stays on the loop.
+A request that wants `br` while only the plain file is cached still takes a
+worker, so a `.br` sibling added later is picked up on that request. Embedded
+files are already in memory and run on the loop. Logs and metrics use one label
+per mount, `/static/{path}` or `/{path}`, not each file's path.
+
+`Shield`'s default content security policy is `default-src 'none'`, which blocks a
+page from loading its own scripts and styles. Attach a `Shield` with the policy the
+page needs (`default-src 'self'` is the usual start) when these files are a browser
+app. Security headers, CORS, metrics, logging, and allowed hosts apply to the response
+the same way they apply to a handler.
+
+h2o's own file handler isn't used. It answers on `h2o_req_t`, before this pipeline, it
+follows symlinks, and it can't serve embedded bytes. That code stays out of the binary.
+[docs/ENGINE.md](docs/ENGINE.md) has the detail.
+
 ### Managed state and sentinels
 
 `manage` a value once and ask for it with `State<T>` anywhere. As with Rocket's
@@ -2218,6 +2355,7 @@ promote it into the corpus yourself. A crash is a vulnerability: report it as
 | `cpus` | The default number of event loops: physical cores from CPU topology, counting hyperthread siblings once, honoring the affinity mask, and falling back when topology is missing. |
 | `placement` | Adaptive placement with durations handed in, not a live clock: 1,000 fast samples promote and log it, a sample at the 100 µs limit resets the streak, one slow sample on a loop stays, eight inside the window demote and log why, one stall demotes at once, the retry hold blocks the next promotion, and a `Pool` route stays on workers. |
 | `router` | The route tree against a linear scan of every route, over 2,000 random route tables: the same candidates in the same order, the same captures, HEAD falling back to GET, and the same methods for 405. |
+| `static` | Static files in-process: a directory and `#embed` bytes, content types, index files, SPA fallback, routes winning, dotfiles, symlink and path-traversal misses, conditional requests, ranges, and fairings (Shield, CORS, metrics, allowed hosts). |
 | `async` | `Task<T>` handlers in-process: suspension and resumption, request context after a resume, the hop back from a foreign library's thread, `callback<T>()` (later, now, twice, abandoned), exceptions after a resume, async gRPC methods, and 200 concurrent sleeping handlers. |
 | `compile_fail.*` | Programs that must not compile. Covers acceptance item 5, where the `{age}` vs `years` diagnostic must name both identifiers, plus other misuses and a control file that must compile. |
 | `consumer` | `tests/consumer`, a small application that adds crocket with FetchContent, builds with only `crocket::crocket` linked (no C++ standard of its own), and serves one request. It also fails if crocket's targets or h2o's options leak into the application's cache. |

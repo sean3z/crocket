@@ -13,4 +13,12 @@ namespace crocket::detail {
 /// `accept-ranges: bytes`.
 void conditional(const Request& rq, Response& rs, std::size_t etag_max_bytes);
 
+/// A strong ETag for `body`, the same 16 hex digits conditional() generates
+/// when a handler didn't set one: `"<16 hex>"`.
+std::string strong_etag(std::string_view body);
+
+/// If-None-Match, or else If-Modified-Since, says this representation is current.
+/// If-None-Match wins when it is present, including when it does not match.
+bool fresh_for(const Request& rq, std::string_view etag, std::string_view last_modified);
+
 }  // namespace crocket::detail

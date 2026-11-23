@@ -150,7 +150,7 @@ configure() { # preset
 }
 
 target_name() { # 'hello' -> crocket_hello
-  case $1 in hello|serve) echo "crocket_$1" ;; *) echo "$1" ;; esac
+  case $1 in hello|serve|files) echo "crocket_$1" ;; *) echo "$1" ;; esac
 }
 
 build() { # preset [target...]

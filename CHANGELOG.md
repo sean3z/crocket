@@ -13,7 +13,13 @@ from outside the project, for example
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-23
+
+Static file serving with `.mount(prefix, files{...})`, from a directory or `#embed` bytes, plus `Teapot<T>` for HTTP 418 I'm a Teapot.
+
 ### Added
+- **`Teapot<T>`** for HTTP 418 I'm a Teapot. RFC 9110 reserves the code, and the reason phrase comes from RFC 2324. It sits with `Created` and `Accepted`, so the status line, problem titles, and OpenAPI descriptions all say I'm a Teapot
+  ([#56](https://github.com/sean3z/crocket/pull/56)).
 - **Static files.** `.mount(prefix, files{...})` serves a directory under that
   prefix, or bytes embedded with `#embed`. Routes match before files, whichever
   was mounted first, and a miss is a normal 404 unless `.fallthrough`. `.cache`
@@ -45,7 +51,8 @@ from outside the project, for example
   comes from the stat, and in dev the file is still read so `Content-Length`,
   `ETag`, and `Last-Modified` match that read, then the body is dropped.
   Embedded files and the SPA index do the same. `examples/files.cpp` is
-  `crocket_files`.
+  `crocket_files`
+  ([#55](https://github.com/sean3z/crocket/pull/55)).
 
 ## [0.5.1] - 2026-11-17
 
@@ -287,7 +294,8 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labeled with their matched route instead of
   `<unmatched>` ([#30](https://github.com/sean3z/crocket/pull/30)).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.1...HEAD
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.2...HEAD
+[0.5.2]: https://github.com/sean3z/crocket/compare/0.5.1...0.5.2
 [0.5.1]: https://github.com/sean3z/crocket/compare/0.4.0...0.5.1
 [0.4.0]: https://github.com/sean3z/crocket/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/sean3z/crocket/compare/0.2.0...0.3.0

@@ -980,6 +980,7 @@ int main() {
                        503, 504, 206, 307, 308})
       CHECK(!detail::reason_phrase(status).empty());
     CHECK_EQ(detail::reason_phrase(416), std::string_view("Range Not Satisfiable"));
+    CHECK_EQ(detail::reason_phrase(418), std::string_view("I'm a Teapot"));
     CHECK_EQ(detail::reason_phrase(431), std::string_view("Request Header Fields Too Large"));
     CHECK_EQ(detail::reason_phrase(499), std::string_view("Client Error"));  // unlisted: its class
     auto r = client.get("/hello/a/36").header("range", "bytes=0-1").dispatch();  // no ranges here: plain 200

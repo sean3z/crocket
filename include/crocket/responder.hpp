@@ -68,6 +68,8 @@ struct WithStatus {
 
 template <class T> using Created = WithStatus<201, T>;
 template <class T> using Accepted = WithStatus<202, T>;
+/// 418 I'm a Teapot. RFC 9110 reserves the code; the name comes from RFC 2324.
+template <class T> using Teapot = WithStatus<418, T>;
 
 struct NoContent {};
 

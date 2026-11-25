@@ -32,7 +32,9 @@ jobs:
           context: .
           file: docker/toolchain.Dockerfile
           push: true
-          tags: ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg
+          tags: |
+            ghcr.io/sean3z/crocket-toolchain:gcc-16.2
+            ghcr.io/sean3z/crocket-toolchain:gcc-16.2-pg
           build-args: ${{ inputs.reuse_gcc && 'BASE=ghcr.io/sean3z/crocket-toolchain:gcc-16.2' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

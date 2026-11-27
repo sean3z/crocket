@@ -351,11 +351,11 @@ struct Metrics::Store {
   std::vector<std::string> extra;    // later slots: templates a fairing set ("/metrics")
   const detail::Stats* stats = nullptr;
 
-  /// Totals at the previous scrape: crocket_worker_busy_ratio and
-  /// crocket_saturation cover the time since then. Under mu.
+  /// Totals at the previous scrape: the saturation gauges cover the time since
+  /// then. Under mu.
   struct Window {
-    std::int64_t at_ns = 0, busy_ns = 0, queue_sum_ns = 0, lag_sum_ns = 0;
-    std::uint64_t queue_count = 0, lag_count = 0;
+    std::int64_t at_ns = 0, busy_ns = 0, queue_sum_ns = 0, lag_sum_ns = 0, dep_wait_ns = 0;
+    std::uint64_t queue_count = 0, lag_count = 0, dep_deadlines = 0;
   };
   Window last;
 
@@ -451,6 +451,8 @@ void Metrics::on_ignite(Ignite& ig) {
   store_->n_routes = ig.routes().size();
   store_->last = {};
   store_->last.at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+  // Deadlines from before this Metrics existed are not part of its first window.
+  store_->last.dep_deadlines = detail::dependency_deadlines();
 }
 
 std::optional<Response> Metrics::on_request(Request& rq) {
@@ -522,7 +524,8 @@ void add_saturation_source(double (*load)()) {
     if (f == load) return;
   saturation_sources().push_back(load);
 }
-/// The largest load figure the optional components report, 0 without any.
+/// The largest in-use figure the optional components report (the database pool),
+/// 0 without any. It feeds crocket_dependency_saturation, not crocket_saturation.
 double saturation_from_sources() {
   std::lock_guard lk(g_extra_mu);
   double m = 0;
@@ -535,11 +538,32 @@ void render_extra_metrics(std::string& out) {
 }
 }  // namespace detail
 
-namespace {
+namespace detail {
 
-// crocket_saturation: queue wait and loop lag count as full (1.0) at these means.
-constexpr double kQueueWaitTarget = 0.025;  // seconds
-constexpr double kLoopLagTarget = 0.050;
+SaturationGauges saturation_gauges(double pod_worker_busy_ratio, double queue_mean_seconds, double lag_mean_seconds,
+                                   double pool_in_use_ratio, double dependency_wait_ratio,
+                                   std::uint64_t dependency_deadlines) {
+  // Queue wait and loop lag count as full pod pressure at these means.
+  constexpr double kQueueWaitTarget = 0.025;  // seconds
+  constexpr double kLoopLagTarget = 0.050;
+  auto unit = [](double v) { return std::clamp(v, 0.0, 1.0); };
+  auto share = [&](double mean, double target) { return unit(std::max(0.0, mean) / target); };
+  // One dependency deadline in the window is full downstream pressure: the call
+  // gave up, so another pod would add callers to something already not answering.
+  // None is 0. Monotonic in the count, and it does not depend on the window length.
+  double deadline_signal = dependency_deadlines > 0 ? 1.0 : 0.0;
+  SaturationGauges g;
+  g.pod = unit(std::max({unit(pod_worker_busy_ratio), share(queue_mean_seconds, kQueueWaitTarget),
+                         share(lag_mean_seconds, kLoopLagTarget)}));
+  g.dependency = unit(std::max({unit(pool_in_use_ratio), unit(dependency_wait_ratio), deadline_signal}));
+  // Will another pod help? A saturated dependency answers no, whatever the queue says.
+  g.value = unit(g.pod * (1.0 - g.dependency));
+  return g;
+}
+
+}  // namespace detail
+
+namespace {
 
 /// Adds up per-thread histograms into one, and writes it.
 struct LatencyTotals {
@@ -686,17 +710,21 @@ std::string Metrics::render() const {
          "crocket_requests_shed_total{reason=\"max_in_flight\"} " + std::to_string(st->shed_in_flight.load()) + "\n"
          "crocket_requests_shed_total{reason=\"max_body_memory\"} " + std::to_string(st->shed_body_memory.load()) + "\n";
 
-    // Busy time: finished jobs, plus the running ones so far.
-    std::int64_t busy_ns = 0;
+    // Busy time: finished jobs, plus the running ones so far. Dependency
+    // blocking time is the same shape, so a query in progress is not pod work.
+    std::int64_t busy_ns = 0, dep_ns = 0;
     LatencyTotals queue;
     for (unsigned i = 0; i < n; ++i) {
       auto& u = st->worker_usage[i];
       busy_ns += u.busy_ns.load(std::memory_order_relaxed);
       if (auto since = u.since_ns.load(std::memory_order_relaxed); since && since < now) busy_ns += now - since;
+      dep_ns += u.dep_wait_ns.load(std::memory_order_relaxed);
+      if (auto since = u.dep_since_ns.load(std::memory_order_relaxed); since && since < now) dep_ns += now - since;
       queue.add(u.queue_wait);
     }
     LatencyTotals lag;
     lag.add(st->loop_lag);
+    auto dep_deadlines = detail::dependency_deadlines();
     o += "# HELP crocket_worker_busy_seconds_total Time workers spent running handlers, all workers together.\n"
          "# TYPE crocket_worker_busy_seconds_total counter\ncrocket_worker_busy_seconds_total " +
          fixed(double(busy_ns) / 1e9) + "\n";
@@ -706,24 +734,41 @@ std::string Metrics::render() const {
               "How late each event loop's 100 ms tick fired: how long something held the loop.");
 
     // Since the previous scrape (since ignite, for the first).
-    double busy_ratio = 0, queue_mean = 0, lag_mean = 0;
+    double busy_ratio = 0, pod_busy = 0, dep_wait_ratio = 0, queue_mean = 0, lag_mean = 0;
+    std::uint64_t deadline_delta = 0;
     {
       std::lock_guard lk(store_->mu);
       auto& w = store_->last;
       auto dt = now - w.at_ns;
-      if (n && w.at_ns && dt > 0) busy_ratio = std::clamp(double(busy_ns - w.busy_ns) / (double(dt) * n), 0.0, 1.0);
+      if (n && w.at_ns && dt > 0) {
+        auto busy_delta = busy_ns - w.busy_ns;
+        auto dep_delta = dep_ns - w.dep_wait_ns;
+        busy_ratio = std::clamp(double(busy_delta) / (double(dt) * n), 0.0, 1.0);
+        // Pod-owned handler time: drop the part spent blocked on a dependency.
+        pod_busy = std::clamp(double(busy_delta - dep_delta) / (double(dt) * n), 0.0, 1.0);
+        dep_wait_ratio = std::clamp(double(dep_delta) / (double(dt) * n), 0.0, 1.0);
+      }
       if (queue.count > w.queue_count) queue_mean = double(queue.sum_ns - w.queue_sum_ns) / double(queue.count - w.queue_count) / 1e9;
       if (lag.count > w.lag_count) lag_mean = double(lag.sum_ns - w.lag_sum_ns) / double(lag.count - w.lag_count) / 1e9;
-      w = {now, busy_ns, queue.sum_ns, lag.sum_ns, queue.count, lag.count};
+      deadline_delta = dep_deadlines >= w.dep_deadlines ? dep_deadlines - w.dep_deadlines : 0;
+      w = {now, busy_ns, queue.sum_ns, lag.sum_ns, dep_ns, queue.count, lag.count, dep_deadlines};
     }
-    double saturation = std::max({busy_ratio, std::min(1.0, std::max(0.0, queue_mean) / kQueueWaitTarget),
-                                  std::min(1.0, std::max(0.0, lag_mean) / kLoopLagTarget),
-                                  std::clamp(detail::saturation_from_sources(), 0.0, 1.0)});
+    auto sat = detail::saturation_gauges(pod_busy, queue_mean, lag_mean,
+                                         std::clamp(detail::saturation_from_sources(), 0.0, 1.0), dep_wait_ratio,
+                                         deadline_delta);
     o += "# HELP crocket_worker_busy_ratio Share of worker time spent running handlers since the previous scrape "
-         "(0..1).\n# TYPE crocket_worker_busy_ratio gauge\ncrocket_worker_busy_ratio " + fixed(busy_ratio) + "\n";
-    o += "# HELP crocket_saturation How close this instance is to its ceiling since the previous scrape (0..1): the "
-         "largest of the worker busy ratio, the database pool in use, mean queue wait over 25 ms and mean event loop "
-         "lag over 50 ms.\n# TYPE crocket_saturation gauge\ncrocket_saturation " + fixed(saturation) + "\n";
+         "(0..1), including time blocked on a dependency.\n"
+         "# TYPE crocket_worker_busy_ratio gauge\ncrocket_worker_busy_ratio " + fixed(busy_ratio) + "\n";
+    o += "# HELP crocket_pod_saturation Pod-owned execution pressure since the previous scrape (0..1): the largest of "
+         "handler time that was not blocked on a dependency, mean queue wait over 25 ms, and mean event loop lag over "
+         "50 ms.\n# TYPE crocket_pod_saturation gauge\ncrocket_pod_saturation " + fixed(sat.pod) + "\n";
+    o += "# HELP crocket_dependency_saturation Downstream dependency pressure (0..1): the largest of the database pool "
+         "in use, the share of worker time blocked on a dependency, and dependency deadlines in this scrape window "
+         "(any timeout or missed deadline counts as 1).\n"
+         "# TYPE crocket_dependency_saturation gauge\ncrocket_dependency_saturation " + fixed(sat.dependency) + "\n";
+    o += "# HELP crocket_saturation Whether another pod would help right now (0..1): crocket_pod_saturation times one "
+         "minus crocket_dependency_saturation. A saturated dependency drives this to 0. With no dependency pressure it "
+         "equals crocket_pod_saturation.\n# TYPE crocket_saturation gauge\ncrocket_saturation " + fixed(sat.value) + "\n";
   }
   o += "# HELP crocket_extractor_failures_total Extractor failures by kind.\n"
        "# TYPE crocket_extractor_failures_total counter\n";

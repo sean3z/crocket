@@ -389,9 +389,11 @@ struct LatencyHistogram {
 
 /// What one worker thread records about itself; only that worker writes it.
 struct alignas(64) WorkerUsage {
-  std::atomic<std::int64_t> busy_ns{0};   // time spent running jobs, finished ones
-  std::atomic<std::int64_t> since_ns{0};  // steady_clock ns the current job started; 0 when idle
-  LatencyHistogram queue_wait;            // queued -> picked up by this worker
+  std::atomic<std::int64_t> busy_ns{0};       // time spent running jobs, finished ones
+  std::atomic<std::int64_t> since_ns{0};      // steady_clock ns the current job started; 0 when idle
+  std::atomic<std::int64_t> dep_wait_ns{0};   // finished time blocked inside a dependency call
+  std::atomic<std::int64_t> dep_since_ns{0};  // steady_clock ns the current dependency call started; 0 outside one
+  LatencyHistogram queue_wait;                // queued -> picked up by this worker
 };
 
 /// Counters the framework maintains itself (read by Metrics).
@@ -682,6 +684,28 @@ void note_worker_deadline(Clock::time_point at);
 /// On a worker thread: a job queued at `queued` started now (for
 /// crocket_request_queue_wait_seconds). Elsewhere, nothing.
 void note_queue_wait(Clock::time_point queued);
+/// This worker is blocked inside a dependency call (a database pool acquire or
+/// query). The time is kept on the worker so a scrape can take it out of
+/// pod-owned busy time. Not on a worker: nothing, because that time is not
+/// worker busy time. Outbound client calls do not block a worker, so they are
+/// not included; their timeouts are dependency deadlines instead.
+void dependency_call_begin() noexcept;
+void dependency_call_end() noexcept;
+/// A dependency timed out or missed a deadline: a pool acquire that gave up, a
+/// statement the database canceled, or an outbound client timeout. Any thread.
+/// Metrics counts how many fell in the scrape window. One or more is full
+/// dependency pressure. A request deadline that was already past before the
+/// call, while the handler was not blocked on a dependency, is not one of these.
+void note_dependency_deadline() noexcept;
+[[nodiscard]] std::uint64_t dependency_deadlines() noexcept;
+
+/// Times one dependency call on this worker. Not on a worker, it records nothing.
+struct DependencyCall {
+  DependencyCall() noexcept { dependency_call_begin(); }
+  ~DependencyCall() { dependency_call_end(); }
+  DependencyCall(const DependencyCall&) = delete;
+  DependencyCall& operator=(const DependencyCall&) = delete;
+};
 std::string_view reason_phrase(int status);
 std::string iso8601_now();
 /// iso8601_now() appended to `out`, without a temporary (log lines use it).

@@ -487,6 +487,10 @@ int main() {
     CHECK(contains(metrics.body, "crocket_client_breaker_state"));
     CHECK(contains(metrics.body, "upstream=\"billing\""));
     CHECK(!contains(metrics.body, "127.0.0.1"));
+    // The hung call timed out. That is dependency pressure, so the pod does not scale.
+    CHECK(contains(metrics.body, "# TYPE crocket_dependency_saturation gauge\ncrocket_dependency_saturation 1.0000\n"));
+    CHECK(contains(metrics.body, "crocket_pod_saturation 0.0000\n"));
+    CHECK(contains(metrics.body, "crocket_saturation 0.0000\n"));
   }
 
   section("two clients");

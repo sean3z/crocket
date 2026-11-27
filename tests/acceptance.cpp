@@ -621,6 +621,8 @@ int main() {
     CHECK(contains(m.body, "crocket_event_loop_lag_seconds_count 0\n"));
     CHECK(contains(m.body, "crocket_requests_shed_total{reason=\"max_in_flight\"} 0\n"));
     CHECK(contains(m.body, "crocket_requests_shed_total{reason=\"max_body_memory\"} 0\n"));
+    CHECK(contains(m.body, "# TYPE crocket_pod_saturation gauge\ncrocket_pod_saturation 0.0000\n"));
+    CHECK(contains(m.body, "# TYPE crocket_dependency_saturation gauge\ncrocket_dependency_saturation 0.0000\n"));
     CHECK(contains(m.body, "# TYPE crocket_saturation gauge\ncrocket_saturation 0.0000\n"));
     {  // bucket bounds are inclusive upper bounds, as Prometheus' le
       using H = detail::LatencyHistogram;

@@ -13,6 +13,14 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Added
+- **Dependency-aware saturation.** `Metrics` now reports `crocket_pod_saturation` and
+  `crocket_dependency_saturation` (both 0..1). `crocket_saturation`, the HPA target, is
+  pod saturation times one minus dependency saturation. A slow or failing database, or
+  an upstream that timed out, no longer looks like a reason to add pods. With no
+  dependency pressure the gauge equals pod saturation, so a service without a database
+  scales as it did before. See the README section "Autoscaling on crocket_saturation".
+
 ### Fixed
 - **Toolchain image.** `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` and `:gcc-16.2-pg`
   are the same image, and a downstream app builds in it without extra compiler

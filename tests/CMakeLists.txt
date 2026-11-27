@@ -3,6 +3,11 @@ add_executable(crocket_acceptance acceptance.cpp)
 target_link_libraries(crocket_acceptance PRIVATE crocket)
 add_test(NAME acceptance COMMAND crocket_acceptance)
 
+# Pod saturation, dependency saturation, and the HPA gauge that multiplies them.
+add_executable(crocket_saturation_test saturation.cpp)
+target_link_libraries(crocket_saturation_test PRIVATE crocket)
+add_test(NAME saturation COMMAND crocket_saturation_test)
+
 # JSON reading, writing, annotations and validation, plus problem+json bodies.
 add_executable(crocket_json_test json.cpp)
 target_link_libraries(crocket_json_test PRIVATE crocket)

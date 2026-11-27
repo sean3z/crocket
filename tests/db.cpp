@@ -208,8 +208,44 @@ static int run() {
   CHECK(contains(m, "crocket_db_pool_size 2\n"));
   CHECK(contains(m, "# TYPE crocket_db_pool_wait_seconds histogram\n"));
   CHECK(!contains(m, "crocket_db_pool_wait_seconds_count 0\n"));  // every query above checked one out
-  // One of two connections in use, nothing else busy: crocket_saturation is the pool's share.
-  CHECK(contains(m, "crocket_saturation 0.5000\n"));
+  // One of two connections in use and the pod is idle: dependency pressure is the
+  // pool's share, and crocket_saturation stays 0 so an autoscaler does not add pods.
+  CHECK(contains(m, "crocket_dependency_saturation 0.5000\n"));
+  CHECK(contains(m, "crocket_pod_saturation 0.0000\n"));
+  CHECK(contains(m, "crocket_saturation 0.0000\n"));
+
+  section("full pool: dependency saturation, no pod scale-up");
+  {
+    auto* managed = app.core().state.get<db::Pool>();
+    CHECK(managed != nullptr);
+    if (managed) {
+      auto held = managed->handle();  // checked out at the first query; `d` still holds the other
+      CHECK(held.exec("select 1").size() == 1);
+      auto full = client.get("/metrics").dispatch().body;
+      CHECK(contains(full, R"(crocket_db_pool_connections{state="in_use"} 2)"));
+      CHECK(contains(full, "crocket_dependency_saturation 1.0000\n"));
+      CHECK(contains(full, "crocket_pod_saturation 0.0000\n"));
+      CHECK(contains(full, "crocket_saturation 0.0000\n"));
+    }
+  }
+
+  section("statement deadline saturates the dependency while the pool has room");
+  d.exec("set statement_timeout = '50ms'");
+  bool canceled = false;
+  try {
+    d.exec("select pg_sleep(2)");
+    CHECK(false);
+  } catch (const pqxx::sql_error& e) {
+    canceled = std::string_view(e.sqlstate()) == "57014";
+  }
+  CHECK(canceled);
+  d.exec("set statement_timeout = 0");
+  auto after = client.get("/metrics").dispatch().body;
+  // Still one of two connections (`d`). The deadline, not the pool, is what hits 1.
+  CHECK(contains(after, R"(crocket_db_pool_connections{state="in_use"} 1)"));
+  CHECK(contains(after, "crocket_dependency_saturation 1.0000\n"));
+  CHECK(contains(after, "crocket_pod_saturation 0.0000\n"));
+  CHECK(contains(after, "crocket_saturation 0.0000\n"));
 
   std::fprintf(stderr, "%d/%d checks passed\n", g_checks - g_failures, g_checks);
   return g_failures ? 1 : 0;

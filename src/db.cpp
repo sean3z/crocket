@@ -121,7 +121,9 @@ void render(std::string& o) {
   }
 }
 
-/// The share of pool connections in use now, for crocket_saturation.
+/// The share of pool connections in use now, for crocket_dependency_saturation.
+/// A full pool is dependency pressure: it lowers crocket_saturation instead of
+/// telling an autoscaler to add pods.
 double pool_load() {
   auto& r = registry();
   std::lock_guard lk(r.mu);
@@ -202,12 +204,22 @@ Db::~Db() = default;
 detail::Connection& Db::lease() {
   if (lease_) return **lease_;
   auto t0 = Clock::now();
+  // Already past the request deadline: this wait is not what missed it.
+  bool late = rq_ && rq_->deadline.expired();
   Deadline d = rq_ ? rq_->deadline : Deadline{Clock::now() + std::chrono::seconds(30), {}};
-  auto l = pool_->pool.checkout(d);
+  auto l = [&] {
+    crocket::detail::DependencyCall blocked;
+    return pool_->pool.checkout(d);
+  }();
   auto waited = Clock::now() - t0;
   if (rq_) rq_->db_wait += waited;
   detail::registry().pool_wait.record_shared(std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
-  if (!l) throw l.error();
+  if (!l) {
+    // Gave up while waiting, and the request had not already missed its deadline.
+    // max_wait, or a deadline that fires during the wait, is dependency pressure.
+    if (!late) crocket::detail::note_dependency_deadline();
+    throw l.error();
+  }
   lease_.emplace(std::move(*l));
   return **lease_;
 }

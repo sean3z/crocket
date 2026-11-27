@@ -107,13 +107,13 @@ Add crocket to a CMake project with FetchContent:
 include(FetchContent)
 FetchContent_Declare(crocket
   GIT_REPOSITORY https://github.com/sean3z/crocket.git
-  GIT_TAG 0.5.2)  # the current stable release
+  GIT_TAG 0.5.3)  # the current stable release
 FetchContent_MakeAvailable(crocket)
 
 target_link_libraries(my_app PRIVATE crocket::crocket)
 ```
 
-`0.5.2` is the current stable release. To update, change `GIT_TAG` to a newer release
+`0.5.3` is the current stable release. To update, change `GIT_TAG` to a newer release
 from [CHANGELOG.md](CHANGELOG.md). For the bleeding edge, opt in to `GIT_TAG main`
 (the latest channel); for reproducible builds off `main`, pin a full commit SHA.
 
@@ -128,7 +128,7 @@ project(hello_app CXX)
 include(FetchContent)
 FetchContent_Declare(crocket
   GIT_REPOSITORY https://github.com/sean3z/crocket.git
-  GIT_TAG 0.5.2)
+  GIT_TAG 0.5.3)
 FetchContent_MakeAvailable(crocket)
 
 add_executable(hello_app main.cpp)
@@ -2090,8 +2090,8 @@ and carries the request id:
 
 Published images, from the [channels](#versions-and-channels) table:
 
-- `ghcr.io/sean3z/crocket-hello`: the hello example, tagged `:0.5.2`, `:0.5` and
-  `:stable` (the stable release), `:latest` and `:sha-<short>` (`main`). Pin `:0.5.2`
+- `ghcr.io/sean3z/crocket-hello`: the hello example, tagged `:0.5.3`, `:0.5` and
+  `:stable` (the stable release), `:latest` and `:sha-<short>` (`main`). Pin `:0.5.3`
   in anything you deploy.
 - `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` and `:gcc-16.2-pg` are the same image:
   Ubuntu 26.04, GCC 16.2, h2o's build dependencies (OpenSSL, zlib, pkg-config), and
@@ -2101,7 +2101,7 @@ Published images, from the [channels](#versions-and-channels) table:
   two ABIs do not match.
 
 A minimal Dockerfile for the [quick start](#quick-start-hello-world-in-your-own-project)
-app. The build fetches crocket `0.5.2` and h2o from GitHub. The toolchain image
+app. The build fetches crocket `0.5.3` and h2o from GitHub. The toolchain image
 links CMake binaries with an rpath to `/opt/gcc-16.2/lib64` and registers that
 directory with the dynamic linker, so nothing sets `LD_LIBRARY_PATH`.
 
@@ -2157,7 +2157,7 @@ spec:
       terminationGracePeriodSeconds: 30  # > preStop + drain + slowest request
       containers:
         - name: hello
-          image: ghcr.io/sean3z/crocket-hello:0.5.2
+          image: ghcr.io/sean3z/crocket-hello:0.5.3
           ports:
             - {name: http, containerPort: 8000}
           env:
@@ -2209,7 +2209,7 @@ Changed section and rebuild. Pin a tag or a commit for a vendored copy. `main` m
 
 | Channel | Git ref | Docker tags (`ghcr.io/sean3z/crocket-hello`) | For |
 |---|---|---|---|
-| **stable** (default) | the latest `X.Y.Z` tag, now `0.5.2` | `:0.5.2`, `:0.5`, `:stable` | Everyone |
+| **stable** (default) | the latest `X.Y.Z` tag, now `0.5.3` | `:0.5.3`, `:0.5`, `:stable` | Everyone |
 | latest (opt-in) | `main`, every merge | `:latest`, `:sha-<short>` | Trying what's next |
 | experimental (opt-in) | `X.Y.Z-rc.N` pre-release tags | `:X.Y.Z-rc.N`, `:experimental` | Testing risky changes |
 
@@ -2220,7 +2220,7 @@ and an SPDX software bill of materials to the GitHub Release.
 signature and to fetch the bill of materials.
 
 The version is in `<crocket/version.hpp>` (included by `<crocket/crocket.hpp>`):
-`crocket::version::string` (`"0.5.2"`), `major`/`minor`/`patch`, `commit` (the short git
+`crocket::version::string` (`"0.5.3"`), `major`/`minor`/`patch`, `commit` (the short git
 commit at configure time, or `-DCROCKET_GIT_COMMIT=...`) and `compiler`.
 
 For a vendored copy or a git submodule, use

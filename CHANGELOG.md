@@ -13,6 +13,17 @@ from outside the project, for example
 
 ## [Unreleased]
 
+### Fixed
+- **Toolchain image.** `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` and `:gcc-16.2-pg`
+  are the same image, and a downstream app builds in it without extra compiler
+  flags or packages. `gcc`/`cc` and `CC`/`CXX` are GCC 16.2, so CMake finds a C
+  compiler. The image installs h2o's build dependencies (OpenSSL, zlib,
+  pkg-config) and libpqxx 7.10 built with that GCC in C++26. CMake binaries get
+  an rpath to `/opt/gcc-16.2/lib64`, and that directory is on the loader path,
+  so the binary runs in the image with no `LD_LIBRARY_PATH`. A runtime image copies
+  `/opt/gcc-16.2/runtime/` (`libstdc++.so.6` and `libgcc_s.so.1`) onto that path
+  and installs OpenSSL, zlib, and libpq. See the deployment section.
+
 ## [0.5.2] - 2026-11-23
 
 Static file serving with `.mount(prefix, files{...})`, from a directory or `#embed` bytes, plus `Teapot<T>` for HTTP 418 I'm a Teapot.

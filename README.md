@@ -173,7 +173,8 @@ curl localhost:8000/hello/Ada     # Hello, Ada!
 
 The binary needs GCC 16.2's `libstdc++` at run time. If the system one is older
 (`GLIBCXX_3.4.35 not found`), point `LD_LIBRARY_PATH` at GCC's `lib64`, or link with
-`-Wl,-rpath` to it as [docker/hello.Dockerfile](docker/hello.Dockerfile) does.
+`-Wl,-rpath` to it. `./dev` adds that rpath. The [toolchain image](#docker) does
+too, and registers the directory with the dynamic linker.
 
 ## Try it
 
@@ -188,7 +189,7 @@ curl localhost:8000/hello/Rocketeer/42   # Hello, 42 year old named Rocketeer!
 (GCC 16.2, `-std=c++26 -freflection`; a single-file sketch, [examples/godbolt.cpp](examples/godbolt.cpp), without h2o).
 
 **As a dev container:** `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` is Ubuntu 26.04 with every
-`./dev setup` package and GCC 16.2 already built, the same image CI runs in. Point
+`./dev setup` package, GCC 16.2, h2o's build dependencies, and libpqxx already built, the same image CI runs in. Point
 `.devcontainer/devcontainer.json` at it (`{"image": "ghcr.io/sean3z/crocket-toolchain:gcc-16.2"}`),
 or run it by hand:
 
@@ -2052,30 +2053,46 @@ Published images, from the [channels](#versions-and-channels) table:
 - `ghcr.io/sean3z/crocket-hello`: the hello example, tagged `:0.5.2`, `:0.5` and
   `:stable` (the stable release), `:latest` and `:sha-<short>` (`main`). Pin `:0.5.2`
   in anything you deploy.
-- `ghcr.io/sean3z/crocket-toolchain:gcc-16.2`: Ubuntu 26.04 with GCC 16.2, the image
-  CI builds in. `:gcc-16.2-pg` adds libpqxx built with that GCC, for `crocket::pg`.
+- `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` and `:gcc-16.2-pg` are the same image:
+  Ubuntu 26.04, GCC 16.2, h2o's build dependencies (OpenSSL, zlib, pkg-config), and
+  libpqxx built with that GCC in C++26. CI uses `:gcc-16.2-pg`. `gcc` and `cc` are
+  GCC 16.2, so CMake finds a C compiler with no `-DCMAKE_C_COMPILER`. Postgres apps
+  link this libpqxx; Ubuntu's `libpqxx-dev` is built with another compiler, and the
+  two ABIs do not match.
 
 A minimal Dockerfile for the [quick start](#quick-start-hello-world-in-your-own-project)
-app, built the way [docker/hello.Dockerfile](docker/hello.Dockerfile) builds the hello
-image. It runs in the toolchain image so GCC 16.2's `libstdc++` is there at run time,
-and the build fetches crocket `0.5.2` and h2o from GitHub:
+app. The build fetches crocket `0.5.2` and h2o from GitHub. The toolchain image
+links CMake binaries with an rpath to `/opt/gcc-16.2/lib64` and registers that
+directory with the dynamic linker, so nothing sets `LD_LIBRARY_PATH`.
+
+The runtime image is not the toolchain. Copy `/opt/gcc-16.2/runtime/` (the real
+`libstdc++.so.6` and `libgcc_s.so.1`, not the linker symlinks) onto that rpath,
+and install the shared libraries the binary still links: OpenSSL, zlib, and libpq
+when the app uses `crocket::pg`
+([docker/toolchain.Dockerfile](docker/toolchain.Dockerfile)).
+[docker/hello.Dockerfile](docker/hello.Dockerfile) is the other way: it runs the
+hello example inside the toolchain image, which already has those libraries.
 
 ```dockerfile
-FROM ghcr.io/sean3z/crocket-toolchain:gcc-16.2
+FROM ghcr.io/sean3z/crocket-toolchain:gcc-16.2 AS build
 COPY . /src
 WORKDIR /src
 RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_C_COMPILER=/opt/gcc-16.2/bin/gcc-16.2 \
-      -DCMAKE_CXX_COMPILER=/opt/gcc-16.2/bin/g++-16.2 \
-      -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,$(dirname $(/opt/gcc-16.2/bin/g++-16.2 -print-file-name=libstdc++.so))" \
  && cmake --build build \
- && install -m755 build/hello_app /usr/local/bin/ \
- && rm -rf /src/build
+ && install -m755 build/hello_app /usr/local/bin/hello_app
+
+FROM ubuntu:26.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libssl3t64 zlib1g ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/gcc-16.2/runtime/ /opt/gcc-16.2/lib64/
+COPY --from=build /usr/local/bin/hello_app /usr/local/bin/hello_app
 EXPOSE 8000
 CMD ["hello_app"]
 ```
 
-The release profile listens on `0.0.0.0:8000`; every `CROCKET_*`
+An app that links `crocket::pg` adds `libpq5` to that `apt-get install`. The
+release profile listens on `0.0.0.0:8000`; every `CROCKET_*`
 [environment variable](#environment-variables) applies.
 
 ### Kubernetes

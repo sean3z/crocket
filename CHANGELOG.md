@@ -19,7 +19,8 @@ from outside the project, for example
   pod saturation times one minus dependency saturation. A slow or failing database, or
   an upstream that timed out, no longer looks like a reason to add pods. With no
   dependency pressure the gauge equals pod saturation, so a service without a database
-  scales as it did before. See the README section "Autoscaling on crocket_saturation".
+  scales as it did before. See the README section "Autoscaling on crocket_saturation"
+  ([#62](https://github.com/sean3z/crocket/pull/62)).
 
 ### Fixed
 - **Toolchain image.** `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` and `:gcc-16.2-pg`

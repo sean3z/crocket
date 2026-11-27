@@ -13,25 +13,53 @@ from outside the project, for example
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-27
+
+SIGTERM tears a drained loop down on the thread that owns its sockets, an
+oversized HTTP/1 body is a 413 the client can read, the toolchain image ships a
+static GCC 16.2 libpqxx 7.10, and `crocket_saturation` drops to 0 when a
+dependency is saturated.
+
 ### Added
 - **Dependency-aware saturation.** `Metrics` now reports `crocket_pod_saturation` and
   `crocket_dependency_saturation` (both 0..1). `crocket_saturation`, the HPA target, is
-  pod saturation times one minus dependency saturation. A slow or failing database, or
+  pod saturation times one minus dependency saturation, so it drops to 0 when the
+  database or a downstream dependency is saturated. A slow or failing database, or
   an upstream that timed out, no longer looks like a reason to add pods. With no
   dependency pressure the gauge equals pod saturation, so a service without a database
   scales as it did before. See the README section "Autoscaling on crocket_saturation"
   ([#62](https://github.com/sean3z/crocket/pull/62)).
 
 ### Fixed
+- **Graceful shutdown.** On SIGTERM each drained event loop, on its own thread, runs
+  one more turn so sockets it closed are freed there, disposes its h2o context
+  (serialized across loops, which share the proxy socket-pool timer), and clears
+  every h2o recycler with `h2o_cleanup_thread`. Those pools are thread-local. The
+  loop used to clear only the buffer pool, and the main thread then destroyed the
+  context and freed sockets the loop had only queued. `on_shutdown` still runs after
+  the loops are torn down, then managed state is destroyed
+  ([#60](https://github.com/sean3z/crocket/pull/60)).
+- **Oversized HTTP/1 bodies.** A `Content-Length` above `max_body_bytes` already
+  answered `413` `body.too_large` before the body was stored. HTTP/1 then read and
+  dropped at most 8 MiB and closed the socket. Unread bytes still in the kernel
+  receive buffer make that close a TCP RST, so a client that writes the whole body
+  before it reads never sees the 413 (about 16 MiB and up). HTTP/1 now keeps pulling
+  and dropping until the body ends. The bytes are not stored. HTTP/2 is unchanged
+  (`RST_STREAM` with `NO_ERROR` after the response)
+  ([#60](https://github.com/sean3z/crocket/pull/60)).
 - **Toolchain image.** `ghcr.io/sean3z/crocket-toolchain:gcc-16.2` and `:gcc-16.2-pg`
   are the same image, and a downstream app builds in it without extra compiler
   flags or packages. `gcc`/`cc` and `CC`/`CXX` are GCC 16.2, so CMake finds a C
   compiler. The image installs h2o's build dependencies (OpenSSL, zlib,
-  pkg-config) and libpqxx 7.10 built with that GCC in C++26. CMake binaries get
-  an rpath to `/opt/gcc-16.2/lib64`, and that directory is on the loader path,
-  so the binary runs in the image with no `LD_LIBRARY_PATH`. A runtime image copies
-  `/opt/gcc-16.2/runtime/` (`libstdc++.so.6` and `libgcc_s.so.1`) onto that path
-  and installs OpenSSL, zlib, and libpq. See the deployment section.
+  pkg-config) and a static libpqxx 7.10 built with that GCC in C++26. Ubuntu's
+  shared libpqxx, built with the system GCC, aborted on exit inside
+  `__cxa_finalize` (`double free or corruption`, exit 139) when linked into a
+  GCC 16.2 binary. CMake binaries get an rpath to `/opt/gcc-16.2/lib64`, and that
+  directory is on the loader path, so the binary runs in the image with no
+  `LD_LIBRARY_PATH`. A runtime image copies `/opt/gcc-16.2/runtime/`
+  (`libstdc++.so.6` and `libgcc_s.so.1`) onto that path and installs OpenSSL,
+  zlib, and libpq. See the deployment section
+  ([#61](https://github.com/sean3z/crocket/pull/61)).
 
 ## [0.5.2] - 2026-11-23
 
@@ -314,7 +342,8 @@ The first tagged release: the stable channel starts here.
 - Metrics: 504 deadline responses are labeled with their matched route instead of
   `<unmatched>` ([#30](https://github.com/sean3z/crocket/pull/30)).
 
-[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.2...HEAD
+[Unreleased]: https://github.com/sean3z/crocket/compare/0.5.3...HEAD
+[0.5.3]: https://github.com/sean3z/crocket/compare/0.5.2...0.5.3
 [0.5.2]: https://github.com/sean3z/crocket/compare/0.5.1...0.5.2
 [0.5.1]: https://github.com/sean3z/crocket/compare/0.4.0...0.5.1
 [0.4.0]: https://github.com/sean3z/crocket/compare/0.3.0...0.4.0

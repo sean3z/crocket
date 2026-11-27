@@ -165,8 +165,10 @@ When the engine answers before the body is in (413, or a 504 during a slow uploa
 
 - **h2:** it ends the request body with `h2o_httpclient_error_is_eos`, so h2o resets the
   stream with `NO_ERROR` once the response is out (RFC 9113, section 8.1).
-- **h1:** it keeps reading and dropping the body so the connection can take the next
-  request. Past 8 MiB it stops, and the connection is closed after the response.
+- **h1:** it keeps reading and dropping the body, one piece at a time, until the body
+  ends, so the connection can take the next request. The bytes are not stored. Closing
+  the socket while the client is still uploading leaves unread data in the kernel
+  receive buffer; that close is a TCP RST and the client never sees the response.
 
 HTTP/2 bodies are read until END_STREAM, so gRPC needs no framing of its own. Chunked
 HTTP/1.1 uploads are decoded by h2o and accepted.
@@ -274,8 +276,10 @@ On SIGINT or SIGTERM:
    running handlers 1 s to finish. If a handler is still running, log it and
    `std::quick_exit(1)`. Destroying managed state under a running handler would be
    undefined behavior.
-5. Give h2o up to 1 s to finish writing and close the remaining connections, then
-   destroy the h2o context, and call `detail::shut_down`. That runs `on_shutdown`
+5. Give h2o up to 1 s to finish writing and close the remaining connections. Each
+   loop then frees the sockets it closed, disposes its h2o context, and clears
+   h2o's thread-local buffer pools, all on that loop's thread. The main thread
+   joins the loops and calls `detail::shut_down`. That runs `on_shutdown`
    fairings in reverse attach order, then destroys managed state in reverse
    `manage` order, which drops pools. If a connection is still open at that point the
    h2o context is left for process exit rather than destroyed under it.

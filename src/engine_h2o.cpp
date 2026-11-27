@@ -65,10 +65,11 @@ namespace {
 
 using namespace std::chrono_literals;
 
-/// After answering early (413, 504, ...) an h1 connection must still read the
-/// rest of the body before it can take the next request. Up to this much is
-/// read and dropped; past it the connection is closed after the response.
-constexpr std::size_t kMaxDiscard = 8 << 20;
+/// After answering early (413, 504, ...) an h1 connection keeps reading and
+/// dropping the rest of the body, one piece at a time, until it ends. Closing
+/// sooner, while the client is still uploading, leaves unread bytes in the
+/// kernel receive buffer; close() then sends RST and the client never sees
+/// the response. The bytes are not stored.
 
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_reload{false};  // SIGHUP: load the TLS certificate and key again
@@ -242,6 +243,9 @@ class Engine final : public Executor {
   std::atomic<unsigned> paused_loops_{0};
   std::mutex ip_m_;
   std::unordered_map<std::string, unsigned> per_ip_;  // only with max_connections_per_ip
+  /// Disposing an h2o context touches the shared proxy socket pool. Loops
+  /// finish on their own threads and dispose one at a time.
+  std::mutex dispose_m_;
 
   // Shutdown, in phases the loops and run() take in turn.
   std::optional<std::latch> loops_drained_;
@@ -349,6 +353,7 @@ class Loop final : public Executor {
   Receiver jobs_rx_{};
   bool drained_ = false;
   bool cleaned_up_ = false;
+  bool disposed_ = false;  // h2o context and evloop freed on this loop's thread
   std::atomic<bool> paused_{false};  // not accepting: at max_connections
 
   std::uint64_t next_txn_ = 1;
@@ -505,11 +510,13 @@ int Loop::on_body(Session* s, bool end) {
 void Loop::on_kick(Session* s) {
   h2o_req_t* req = s->req;
   if (!req->proceed_req) return;
-  // Answered already: h2 resets the stream (NO_ERROR) once the response is out,
-  // and h1 closes the connection after it once kMaxDiscard bytes were dropped.
-  // An error may be reported at any time; asking for more only for a held piece.
+  // Answered already. h2 ends the request body so the stream resets with
+  // NO_ERROR once the response is out (RFC 9113). h1 keeps pulling pieces and
+  // dropping them until the body ends: stopping early and closing the socket
+  // while the client is still writing unread bytes makes the kernel send RST,
+  // which drops the 413 before a write-then-read client can see it.
   bool h2 = s->meta.protocol == std::string_view("h2");
-  if (s->discarding && (h2 || s->discarded > kMaxDiscard)) {
+  if (s->discarding && h2) {
     s->piece_held = false;
     req->proceed_req(req, h2o_httpclient_error_is_eos);
   } else if (s->piece_held) {
@@ -964,15 +971,17 @@ Loop::Loop(Engine& e, int listen_fd) : e_(e), app_(e.app_), opts_(e.opts_), cfg_
 }
 
 Loop::~Loop() {
-  // A connection that is still open owns a request (and a session) h2o has not
-  // freed; tearing the loop down under it is not safe, so it is left to exit.
-  if (!cleaned_up_) return;
+  // serve() disposes a fully drained loop on its own thread. A connection that
+  // is still open owns a request h2o has not freed; tearing that loop down
+  // (or dropping its TLS context) is not safe, so it is left to exit.
+  if (!disposed_ && !cleaned_up_) return;
+  if (accept_ctx_.ssl_ctx) SSL_CTX_free(accept_ctx_.ssl_ctx);
+  if (disposed_) return;
   h2o_multithread_unregister_receiver(ctx_.queue, &done_rx_.rx);
   h2o_multithread_unregister_receiver(ctx_.queue, &jobs_rx_.rx);
   h2o_evloop_t* loop = ctx_.loop;
   h2o_context_dispose(&ctx_);
   h2o_evloop_destroy(loop);
-  if (accept_ctx_.ssl_ctx) SSL_CTX_free(accept_ctx_.ssl_ctx);
 }
 
 void Loop::use_tls(SSL_CTX* fresh) {
@@ -1032,8 +1041,27 @@ void Loop::serve() {
   wake_ = nullptr;
   cleaned_up_ = open_connections() == 0 && live_.empty();
   if (crocket_client_loop_leave) crocket_client_loop_leave(ctx_.loop);
+
+  // h2o_socket_close only queues the socket. The next turn frees it and returns
+  // its buffer to this thread's recycle pool. Do that here, then dispose the
+  // context (the queue socket too) before clearing the pools: h2o's recyclers
+  // are thread-local, and crocket used to clear them and free the sockets on
+  // two different threads.
+  h2o_evloop_run(ctx_.loop, 0);
+
+  if (cleaned_up_) {
+    std::lock_guard lk(e_.dispose_m_);
+    h2o_multithread_unregister_receiver(ctx_.queue, &done_rx_.rx);
+    h2o_multithread_unregister_receiver(ctx_.queue, &jobs_rx_.rx);
+    h2o_evloop_t* loop = ctx_.loop;
+    h2o_context_dispose(&ctx_);  // closes the queue socket on this thread
+    h2o_evloop_destroy(loop);
+    ctx_.loop = nullptr;
+    disposed_ = true;
+  }
+  // Now nothing on this thread still points into the recyclers.
+  h2o_cleanup_thread(0, nullptr);
   t_loop = nullptr;
-  h2o_buffer_clear_recycle(1);  // h2o keeps freed buffers per thread, for reuse; this thread is ending
 }
 
 // ---- the engine ------------------------------------------------------------------------

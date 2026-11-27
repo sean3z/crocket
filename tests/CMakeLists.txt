@@ -29,6 +29,13 @@ target_link_libraries(crocket_cpus_test PRIVATE crocket)
 target_include_directories(crocket_cpus_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME cpus COMMAND crocket_cpus_test)
 
+# SIGTERM exits 0 (idle and with requests in flight), and a multi-tens-of-MB
+# upload past max_body_bytes is an HTTP 413 the client can read.
+add_executable(crocket_resilience_test resilience.cpp)
+target_link_libraries(crocket_resilience_test PRIVATE crocket)
+add_test(NAME resilience COMMAND crocket_resilience_test)
+set_tests_properties(resilience PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
 # Adaptive placement decisions, with durations supplied by the test.
 add_executable(crocket_placement_test placement.cpp)
 target_link_libraries(crocket_placement_test PRIVATE crocket)

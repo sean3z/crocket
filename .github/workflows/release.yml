@@ -7,7 +7,8 @@ name: Release
 #
 # Every pushed image is signed with keyless Sigstore (cosign) and gets a
 # CycloneDX and SPDX SBOM attested to that digest. A tag also attaches the
-# SBOM files to the GitHub Release. See SECURITY.md.
+# SBOM files to the GitHub Release. If that release already exists, its title
+# and notes stay as they are and the files are uploaded again. See SECURITY.md.
 on:
   workflow_dispatch:
   push:
@@ -173,12 +174,16 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+      # A re-run of this job keeps the artifact name. upload-artifact@v4
+      # fails on that name unless the previous copy is replaced, and the
+      # release job downloads the artifact by this name.
       - uses: actions/upload-artifact@v4
         with:
           name: crocket-hello-sbom
           path: sbom/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   release:
     needs: [meta, image]
@@ -207,11 +212,25 @@ jobs:
           fi
           compgen -G 'sbom/*.cdx.json' >/dev/null
           compgen -G 'sbom/*.spdx.json' >/dev/null
+      # Publishing a draft release creates the tag, so this job can start
+      # after the GitHub Release already exists. `gh release create` then
+      # fails ("a release with the same tag name already exists") and the
+      # SBOM files are never attached. Create the release when it is missing.
+      # Otherwise leave its title and notes alone and replace the assets.
       - name: Create GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.meta.outputs.channel }}
         run: |
-          flags=()
-          if [[ "${{ needs.meta.outputs.channel }}" == experimental ]]; then flags+=(--prerelease); else flags+=(--latest); fi
-          gh release create "$GITHUB_REF_NAME" sbom/*.cdx.json sbom/*.spdx.json \
-            --title "crocket $GITHUB_REF_NAME" --notes-file notes.md --verify-tag "${flags[@]}"
+          set -euo pipefail
+          assets=(sbom/*.cdx.json sbom/*.spdx.json)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; uploading assets without changing its title or notes."
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            flags=()
+            if [[ "$CHANNEL" == experimental ]]; then flags+=(--prerelease); else flags+=(--latest); fi
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "crocket $GITHUB_REF_NAME" --notes-file notes.md --verify-tag "${flags[@]}"
+          fi

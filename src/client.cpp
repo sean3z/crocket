@@ -935,6 +935,13 @@ Task<std::expected<Response, ApiError>> detail::client_request(const ClientHandl
   if (impl->closing.load() && last.kind == FailKind::Local && !last.result)
     last.result = std::unexpected(upstream_unavailable("client shut down"));
 
+  // The call does not block a worker (it suspends), so its duration is not
+  // dependency wait. A timeout is: another pod would call the same upstream.
+  // Cancel before any attempt is the inbound request ending on its own.
+  if (last.kind == FailKind::Timeout && !last.result) {
+    if (last.result.error().detail != "request canceled" || completed > 0) crocket::detail::note_dependency_deadline();
+  }
+
   auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count();
   observe(impl->upstream, http::method_name(method), status_label(last), ns);
   if (!last.result && last.result.error().code != std::string_view("upstream.circuit_open"))

@@ -1515,7 +1515,8 @@ What it tells you, with no code of your own:
   table and operation (`find`, `insert`, `update`, `erase`, `where`, `count`, `sql`),
   `crocket_db_pool_connections{state="idle"|"in_use"}`, `crocket_db_pool_size` and a
   `crocket_db_pool_wait_seconds` histogram (time spent waiting for a connection), in
-  `Metrics`. The pool's in-use share also feeds `crocket_saturation`;
+  `Metrics`. The pool's in-use share feeds `crocket_dependency_saturation`, which
+  lowers `crocket_saturation` when the database is what is full;
 - `db_ms`, `db_wait_ms` (waiting for a pool connection) and `db_queries` on the
   request's `Logger` line, so `duration_ms - db_ms` is time spent outside the database.
 
@@ -1830,7 +1831,12 @@ The `Metrics` fairing serves Prometheus text at `GET /metrics`, labeled by route
     answered 503 `server.busy` before a handler ran (see [Limits](#limits)). With
     `crocket_requests_abandoned_total` and 504s in `crocket_http_requests_total`, these
     say you scaled too late.
-  - `crocket_saturation`, one 0..1 gauge combining the above, for HPA or KEDA.
+  - `crocket_pod_saturation` (0..1), pod-owned pressure: handler time that was not
+    blocked on a dependency, queue wait, and event loop lag.
+  - `crocket_dependency_saturation` (0..1), downstream pressure: the database pool,
+    time workers spent blocked on a dependency, and dependency timeouts.
+  - `crocket_saturation`, one 0..1 gauge, pod saturation times one minus dependency
+    saturation, for HPA or KEDA. It asks whether another pod would help.
   - With `crocket::db`: `crocket_db_pool_size` and `crocket_db_pool_wait_seconds` (see
     [Databases](#databases-crocketdb)).
   - With `crocket::client`: `crocket_client_requests_total`,
@@ -1858,23 +1864,57 @@ The `Metrics` fairing serves Prometheus text at `GET /metrics`, labeled by route
 
 ### Autoscaling on crocket_saturation
 
-`crocket_saturation` is the largest of:
+`crocket_saturation` answers one question: will another pod help right now?
+
+```
+crocket_saturation = crocket_pod_saturation * (1 - crocket_dependency_saturation)
+```
+
+Each gauge is clamped to 0..1, and so is the product. A saturated dependency drives
+it to 0, so an autoscaler does not add pods onto a database or upstream that is
+already the limit. With no dependency pressure it equals `crocket_pod_saturation`,
+which is what a service without a database scales on.
+
+`crocket_pod_saturation` is the largest of:
 
 | Input | Counts as 1.0 at |
 | --- | --- |
-| `crocket_worker_busy_ratio` | every worker busy for the whole window |
-| database pool connections in use / `crocket_db_pool_size` (with `crocket::db`) | every connection checked out |
+| pod worker busy: `(worker busy time - dependency blocking time) / (window * workers)` | every worker busy for the whole window, not counting time blocked on a dependency |
 | mean `crocket_request_queue_wait_seconds` in the window / 25 ms | 25 ms average wait for a worker |
 | mean `crocket_event_loop_lag_seconds` in the window / 50 ms | loops 50 ms late on average |
 
-Each input is capped at 1. The window is the time since the previous scrape of that
-`/metrics`, so scrape each pod from one Prometheus (two scrapers would each see half
-windows); the pool share is read at scrape time. Taking the largest input means the
-first resource to run out drives it: target about 0.7 to leave headroom for spikes.
+`crocket_worker_busy_ratio` still reports handler time with dependency blocking left
+in. Pod saturation uses the handler time that is left after that blocking is removed.
 
-When the pool input is the one at 1.0 while the database itself is near its limit,
-more pods will not help: scale the database instead. Compare
-`crocket_db_pool_wait_seconds` with the database's own CPU before scaling out.
+`crocket_dependency_saturation` is the largest of:
+
+| Input | Counts as 1.0 at |
+| --- | --- |
+| database pool connections in use / `crocket_db_pool_size` (with `crocket::db`) | every connection checked out |
+| dependency blocking time / `(window * workers)` | every worker blocked inside a dependency for the whole window |
+| dependency deadlines in the window | one or more |
+
+A dependency deadline is a pool acquire that gave up, a statement the database
+canceled (SQLSTATE 57014, such as `statement_timeout`), or an outbound
+`crocket::client` call that timed out. One in the scrape window counts as 1 even
+when the pool still has free connections: the dependency already failed to answer
+in time. None is 0. The signal does not depend on how long the window is.
+
+The window is the time since the previous scrape of that `/metrics`, so scrape each
+pod from one Prometheus (two scrapers would each see half windows). The pool share
+is read at scrape time. Each input is capped at 1.
+
+A busy pod and a healthy database (pod about 0.9, dependency about 0.05) gives
+about 0.85: scale up. A slow or full database (dependency 1, pod about 0.02) gives
+0: do not add pods. A long queue does not change that while the dependency is
+saturated, because the queue is workers stuck downstream. Target about 0.7 to leave
+headroom for spikes. Compare `crocket_db_pool_wait_seconds` and
+`crocket_dependency_saturation` with the database's own CPU before scaling the
+database out.
+
+Outbound client calls suspend instead of blocking a worker, so their wait is not
+dependency blocking time. A client timeout is a dependency deadline, which lowers
+`crocket_saturation`.
 
 With [prometheus-adapter](https://github.com/kubernetes-sigs/prometheus-adapter),
 expose it as a pods metric and point an HPA at it:

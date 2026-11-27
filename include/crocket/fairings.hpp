@@ -101,7 +101,12 @@ class Shield {
 ///   crocket_worker_busy_seconds_total, crocket_worker_busy_ratio (since the previous scrape)
 ///   crocket_request_queue_wait_seconds (histogram: queued until a worker took it)
 ///   crocket_event_loop_lag_seconds (histogram: how late each loop's 100 ms tick fires)
-///   crocket_saturation (0..1, for autoscaling; see README "Autoscaling on crocket_saturation")
+///   crocket_pod_saturation (0..1, pod-owned pressure: handler time outside dependencies,
+///     queue wait, event loop lag)
+///   crocket_dependency_saturation (0..1, database pool, time blocked on a dependency,
+///     dependency timeouts)
+///   crocket_saturation (0..1, pod times one minus dependency: will another pod help?
+///     see README "Autoscaling on crocket_saturation")
 ///   crocket_build_info{version,commit,compiler,hostname} 1
 ///   crocket_db_seconds{table,op} (histogram), crocket_db_pool_connections{state}, crocket_db_pool_size,
 ///   crocket_db_pool_wait_seconds (histogram): with crocket::db
@@ -115,9 +120,27 @@ namespace detail {
 /// render through this. Registering the same function twice is a no-op.
 void add_metrics_renderer(void (*render)(std::string&));
 void render_extra_metrics(std::string& out);
-/// Optional components (crocket::db) add a 0..1 load figure to crocket_saturation
-/// through this. Registering the same function twice is a no-op.
+/// Optional components (crocket::db) add a 0..1 in-use figure to
+/// crocket_dependency_saturation through this (the database pool). Registering
+/// the same function twice is a no-op. It does not raise crocket_saturation:
+/// a full dependency means another pod would not help.
 void add_saturation_source(double (*load)());
+
+/// The three saturation gauges for one scrape window.
+/// `pod_worker_busy_ratio` is handler time that was not blocked on a dependency,
+/// over worker time. `dependency_wait_ratio` is the blocked share. Both are 0..1.
+/// `queue_mean_seconds` counts as 1 at 25 ms, `lag_mean_seconds` at 50 ms.
+/// `pool_in_use_ratio` is the database pool (0 without one).
+/// `dependency_deadlines` is how many dependency timeouts fell in the window:
+/// one or more is full dependency pressure.
+struct SaturationGauges {
+  double pod = 0;         // crocket_pod_saturation
+  double dependency = 0;  // crocket_dependency_saturation
+  double value = 0;       // crocket_saturation = pod * (1 - dependency)
+};
+SaturationGauges saturation_gauges(double pod_worker_busy_ratio, double queue_mean_seconds, double lag_mean_seconds,
+                                   double pool_in_use_ratio, double dependency_wait_ratio,
+                                   std::uint64_t dependency_deadlines);
 }  // namespace detail
 
 class Metrics {

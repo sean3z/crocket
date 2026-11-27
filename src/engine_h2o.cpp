@@ -376,6 +376,9 @@ thread_local std::atomic<std::int64_t>* t_worker_deadline = nullptr;
 /// This worker's busy time and queue wait, and when its current job started.
 thread_local WorkerUsage* t_worker_usage = nullptr;
 thread_local std::int64_t t_job_start_ns = 0;
+/// Nested dependency calls on this worker. Only the outermost sets dep_since_ns.
+thread_local int t_dep_depth = 0;
+std::atomic<std::uint64_t> g_dependency_deadlines{0};
 
 std::int64_t steady_ns(Clock::time_point t) {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
@@ -1235,6 +1238,29 @@ void note_worker_deadline(Clock::time_point at) {
 void note_queue_wait(Clock::time_point queued) {
   if (t_worker_usage) t_worker_usage->queue_wait.record(t_job_start_ns - steady_ns(queued));
 }
+
+void dependency_call_begin() noexcept {
+  if (!t_worker_usage) return;
+  if (t_dep_depth++ == 0) t_worker_usage->dep_since_ns.store(steady_ns(Clock::now()), std::memory_order_relaxed);
+}
+
+void dependency_call_end() noexcept {
+  if (!t_worker_usage || t_dep_depth == 0) return;
+  if (--t_dep_depth != 0) return;
+  auto since = t_worker_usage->dep_since_ns.load(std::memory_order_relaxed);
+  auto now = steady_ns(Clock::now());
+  // Add before clearing: a scrape in between counts this call twice for a
+  // moment (Metrics clamps the ratio), never not at all. Same as busy_ns.
+  if (since && now > since) {
+    auto& w = t_worker_usage->dep_wait_ns;
+    w.store(w.load(std::memory_order_relaxed) + (now - since), std::memory_order_relaxed);
+  }
+  t_worker_usage->dep_since_ns.store(0, std::memory_order_relaxed);
+}
+
+void note_dependency_deadline() noexcept { g_dependency_deadlines.fetch_add(1, std::memory_order_relaxed); }
+
+std::uint64_t dependency_deadlines() noexcept { return g_dependency_deadlines.load(std::memory_order_relaxed); }
 
 int run_engine(Crocket& app, const ServerConfig& opts) {
   Engine engine(app, opts);

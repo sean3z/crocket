@@ -24,7 +24,10 @@
 //
 // Every query is timed with steady_clock: crocket_db_seconds{table,op} in
 // Metrics, and db_ms, db_wait_ms and db_queries on the request's log line.
-// Handlers that never take Db& pay nothing.
+// Pool acquire and query execution are dependency blocking time, so they are
+// not pod saturation. A pool acquire that gives up, or a statement the database
+// cancels (SQLSTATE 57014), is a dependency deadline. Handlers that never take
+// Db& pay nothing.
 
 #include "crocket/app.hpp"
 #include "crocket/extract.hpp"
@@ -525,12 +528,24 @@ class Db {
   template <class F>
   auto run(detail::Series* s, F&& f) {
     auto& pc = lease();
+    // A deadline already past is the request's, not this query's.
+    bool late = rq_ && rq_->deadline.expired();
     auto t0 = Clock::now();
     try {
-      auto out = f(pc.get(), pc);
+      auto out = [&] {
+        crocket::detail::DependencyCall blocked;
+        return f(pc.get(), pc);
+      }();
       finish(t0, s);
+      if (!late && rq_ && rq_->deadline.expired()) crocket::detail::note_dependency_deadline();
       return out;
+    } catch (const pqxx::sql_error& e) {
+      // 57014 is query_canceled: statement_timeout, or a statement deadline.
+      if (std::string_view(e.sqlstate()) == "57014" || (!late && rq_ && rq_->deadline.expired()))
+        crocket::detail::note_dependency_deadline();
+      rethrow(t0, s, pc);
     } catch (...) {
+      if (!late && rq_ && rq_->deadline.expired()) crocket::detail::note_dependency_deadline();
       rethrow(t0, s, pc);
     }
   }

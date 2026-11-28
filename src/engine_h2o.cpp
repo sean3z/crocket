@@ -21,6 +21,7 @@
 // See docs/ENGINE.md.
 
 #include "engine.hpp"
+#include "crocket/detail/functional.hpp"
 #include "cpus.hpp"
 #include "crocket/grpc.hpp"
 
@@ -142,7 +143,7 @@ struct Done {
 /// A job for the event loop itself: an async handler to resume there.
 struct LoopJob {
   h2o_multithread_message_t msg;
-  std::move_only_function<void()> run;
+  crocket::detail::move_only_function<void()> run;
 };
 
 h2o_generator_t g_generator = {nullptr, nullptr};  // the whole body goes in one h2o_send
@@ -159,13 +160,16 @@ class Loop;
 /// its queues, and the counts the drain waits on.
 class Engine final : public Executor {
  public:
-  Engine(Crocket& app, const ServerConfig& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
+  // Defined after Loop: libc++ instantiates vector's destructor from an inline
+  // constructor, and unique_ptr cannot delete an incomplete Loop.
+  Engine(Crocket& app, const ServerConfig& opts);
+  ~Engine() override;
 
   int run();
 
   /// Executor: resumes a suspended handler on a worker. Ahead of new requests,
   /// and kept at shutdown (unlike requests that have not started).
-  void post(std::move_only_function<void()> job) override {
+  void post(crocket::detail::move_only_function<void()> job) override {
     {
       std::lock_guard lk(jobs_m_);
       resumes_.push_back(std::move(job));
@@ -202,7 +206,7 @@ class Engine final : public Executor {
   void worker_loop(unsigned index);
   bool wait_workers_idle(Clock::time_point until);
   void stop_workers();
-  void queue_job(std::move_only_function<void()> job) {
+  void queue_job(crocket::detail::move_only_function<void()> job) {
     {
       std::lock_guard lk(jobs_m_);
       jobs_.push_back(std::move(job));
@@ -223,8 +227,8 @@ class Engine final : public Executor {
   std::mutex jobs_m_;
   std::condition_variable jobs_cv_;
   std::condition_variable idle_cv_;
-  std::deque<std::move_only_function<void()>> jobs_;     // new requests
-  std::deque<std::move_only_function<void()>> resumes_;  // suspended handlers to continue
+  std::deque<crocket::detail::move_only_function<void()>> jobs_;     // new requests
+  std::deque<crocket::detail::move_only_function<void()>> resumes_;  // suspended handlers to continue
   unsigned busy_ = 0;
   bool stopping_ = false;
   std::vector<std::thread> workers_;
@@ -262,7 +266,7 @@ class Loop final : public Executor {
   ~Loop() override;
 
   /// Executor: runs `job` on this loop's thread (async handlers resume here).
-  void post(std::move_only_function<void()> job) override {
+  void post(crocket::detail::move_only_function<void()> job) override {
     h2o_multithread_send_message(&jobs_rx_.rx, &(new LoopJob{{}, std::move(job)})->msg);
   }
 
@@ -368,6 +372,9 @@ class Loop final : public Executor {
   } lag_{};
   static constexpr std::chrono::milliseconds kLagTick{100};
 };
+
+Engine::Engine(Crocket& app, const ServerConfig& opts) : app_(app), opts_(opts), cfg_(app.config()) {}
+Engine::~Engine() = default;
 
 /// The loop that runs on this thread (h2o calls one handler for every context).
 thread_local Loop* t_loop = nullptr;
@@ -812,7 +819,7 @@ void Engine::worker_loop(unsigned index) {
   auto& usage = app_.core().stats.worker_usage[index];
   t_worker_usage = &usage;
   for (;;) {
-    std::move_only_function<void()> job;
+    crocket::detail::move_only_function<void()> job;
     {
       std::unique_lock lk(jobs_m_);
       jobs_cv_.wait(lk, [&] { return stopping_ || !jobs_.empty() || !resumes_.empty(); });

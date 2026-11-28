@@ -17,6 +17,7 @@
 // context; elsewhere they carry none. Config::log sets the level, sampling,
 // redaction and where lines go. Lines are written by a background thread.
 
+#include "crocket/detail/meta.hpp"
 #include "crocket/json.hpp"
 
 #include <chrono>
@@ -89,7 +90,7 @@ consteval Parsed<N> parse(std::string_view text) {
   std::size_t count = 0;
   auto fail = [&](std::string why) {
     std::string msg = "crocket: log message \"" + std::string(text) + "\": " + why;
-    throw std::meta::exception(std::u8string(msg.begin(), msg.end()), ^^Parsed<N>);
+    ::crocket::detail::reflect_error(std::u8string(msg.begin(), msg.end()), ^^Parsed<N>);
   };
   for (std::size_t i = 0; i < text.size(); ++i) {
     char c = text[i];

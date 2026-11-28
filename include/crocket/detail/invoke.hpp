@@ -3,6 +3,7 @@
 // uniform `Outcome(Request&, Response&)`. reflect_routes() produces the
 // bindings; everything here is ordinary C++20 templates.
 
+#include "crocket/detail/meta.hpp"
 #include "crocket/extract.hpp"
 #include "crocket/responder.hpp"
 #include "crocket/task.hpp"
@@ -200,7 +201,7 @@ Outcome invoke_impl(Request& rq, Response& rs, type_list<A...>, std::index_seque
 
 template <std::meta::info Fn, const Binding* B>
 Outcome invoke(Request& rq, Response& rs) {
-  if constexpr (std::meta::annotations_of_with_type(Fn, ^^auth::RoleCheck).size() > 0) {
+  if constexpr (::crocket::detail::has_annotation(Fn, ^^auth::RoleCheck)) {
     if (auto err = role_gate<Fn>(rq)) {
       Outcome out;
       out.kind = Outcome::Failed;

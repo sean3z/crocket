@@ -22,6 +22,7 @@
 // with an exact code using grpc::error().
 
 #include "crocket/detail/invoke.hpp"
+#include "crocket/detail/meta.hpp"
 #include "crocket/proto.hpp"
 
 #include <meta>
@@ -277,7 +278,7 @@ Outcome invoke_impl(Request& rq, Response& rs, type_list<A...>, std::index_seque
 
 template <std::meta::info Fn, const Binding* B>
 Outcome invoke(Request& rq, Response& rs) {
-  if constexpr (std::meta::annotations_of_with_type(Fn, ^^crocket::auth::RoleCheck).size() > 0) {
+  if constexpr (::crocket::detail::has_annotation(Fn, ^^crocket::auth::RoleCheck)) {
     if (auto err = crocket::detail::role_gate<Fn>(rq)) {
       crocket::detail::Outcome out;
       out.kind = crocket::detail::Outcome::Failed;
@@ -294,7 +295,7 @@ Outcome invoke(Request& rq, Response& rs) {
 // ---- schema -----------------------------------------------------------------------
 
 consteval bool is_rpc(std::meta::info fn) {
-  return std::meta::is_function(fn) && !std::meta::annotations_of_with_type(fn, ^^Rpc).empty();
+  return std::meta::is_function(fn) && !::crocket::detail::annotations_of_type(fn, ^^Rpc).empty();
 }
 
 consteval std::vector<std::meta::info> rpcs_of(std::meta::info scope) {

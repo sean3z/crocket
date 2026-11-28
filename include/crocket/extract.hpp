@@ -13,6 +13,7 @@
 //       static void state_deps(std::vector<detail::StateDep>&);   // optional
 //     Declared state dependencies are verified at ignite.
 
+#include "crocket/detail/meta.hpp"
 #include "crocket/json.hpp"
 #include "crocket/request.hpp"
 #include "crocket/state.hpp"
@@ -133,7 +134,7 @@ struct FromRequest<State<T>> {
 namespace detail {
 
 consteval bool has_from_path(std::meta::info member) {
-  return !std::meta::annotations_of_with_type(member, ^^json::FromPath).empty();
+  return !::crocket::detail::annotations_of_type(member, ^^json::FromPath).empty();
 }
 
 /// Applies [[= json::from_path]] members of the top-level body struct T.
@@ -145,18 +146,21 @@ std::expected<void, ApiError> apply_from_path(const Request& rq, T& value) {
       if constexpr (has_from_path(m)) {
         using M = [:std::meta::remove_cvref(std::meta::type_of(m)):];
         constexpr std::string_view name = std::meta::identifier_of(m);
-        static_assert(json::is_optional<M>::value,
-                      std::string("crocket: [[= json::from_path]] member '") + std::string(name) + "' of " +
-                          std::string(std::meta::display_string_of(^^T)) +
-                          " must be std::optional<P>: it is absent on routes without a {" + std::string(name) +
-                          "} capture");
+        constexpr std::string_view must_optional = std::define_static_string(
+            std::string("crocket: [[= json::from_path]] member '") + std::string(name) + "' of " +
+            std::string(std::meta::display_string_of(^^T)) +
+            " must be std::optional<P>: it is absent on routes without a {" + std::string(name) + "} capture");
+        static_assert(json::is_optional<M>::value, must_optional);
         using P = typename M::value_type;
-        static_assert(PathParam<P>, std::string("crocket: [[= json::from_path]] member '") + std::string(name) +
-                                        "' has type " + std::string(std::meta::display_string_of(^^P)) +
-                                        ", which cannot be parsed from a path segment (no FromParam)");
-        static_assert(std::equality_comparable<P>,
-                      std::string("crocket: [[= json::from_path]] member '") + std::string(name) +
-                          "' must be equality-comparable to check it against the URL");
+        constexpr std::string_view must_param = std::define_static_string(
+            std::string("crocket: [[= json::from_path]] member '") + std::string(name) + "' has type " +
+            std::string(std::meta::display_string_of(^^P)) +
+            ", which cannot be parsed from a path segment (no FromParam)");
+        static_assert(PathParam<P>, must_param);
+        constexpr std::string_view must_eq = std::define_static_string(
+            std::string("crocket: [[= json::from_path]] member '") + std::string(name) +
+            "' must be equality-comparable to check it against the URL");
+        static_assert(std::equality_comparable<P>, must_eq);
 
         auto& field = value.[:m:];
         if (auto raw = rq.capture(name)) {
@@ -380,7 +384,7 @@ consteval RoleCheck make_role_check(bool all, const char (&...name)[N]) {
   unsigned count = 0;
   auto add = [&](std::string_view role) {
     if (role.empty() || role.find('\n') != std::string_view::npos)
-      throw std::meta::exception(u8"crocket: a role name must be one non-empty line", ^^RoleCheck);
+      ::crocket::detail::reflect_error(u8"crocket: a role name must be one non-empty line", ^^RoleCheck);
     if (count) packed += '\n';
     packed += role;
     ++count;
@@ -434,7 +438,7 @@ namespace detail {
 /// The caller skips the call when the function has no such annotation.
 template <std::meta::info Fn>
 std::optional<ApiError> role_gate(Request& rq) {
-  constexpr auto anns = std::define_static_array(std::meta::annotations_of_with_type(Fn, ^^auth::RoleCheck));
+  constexpr auto anns = std::define_static_array(::crocket::detail::annotations_of_type(Fn, ^^auth::RoleCheck));
   if constexpr (anns.size() == 0) {
     return std::nullopt;
   } else {

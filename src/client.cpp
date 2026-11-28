@@ -3,6 +3,7 @@
 // the circuit breaker are in client_policy.hpp.
 
 #include "client_policy.hpp"
+#include "crocket/detail/functional.hpp"
 #include "crocket/fairings.hpp"
 #include "crocket/log.hpp"
 
@@ -49,7 +50,7 @@ using client_detail::upstream_unavailable;
 
 struct Pin;
 
-void post_async(Pin* pin, std::move_only_function<void()> fn);
+void post_async(Pin* pin, crocket::detail::move_only_function<void()> fn);
 void ensure_loop(detail::ClientState* impl);
 
 std::mutex g_mu;
@@ -60,7 +61,7 @@ thread_local Pin* t_pin = nullptr;
 
 struct Job {
   h2o_multithread_message_t msg;
-  std::move_only_function<void()> run;
+  crocket::detail::move_only_function<void()> run;
 };
 
 struct Pin {
@@ -83,7 +84,7 @@ void on_jobs(h2o_multithread_receiver_t*, h2o_linklist_t* messages) {
   }
 }
 
-void post_async(Pin* pin, std::move_only_function<void()> fn) {
+void post_async(Pin* pin, crocket::detail::move_only_function<void()> fn) {
   auto* job = new Job{{}, std::move(fn)};
   h2o_multithread_send_message(&pin->jobs, &job->msg);
 }

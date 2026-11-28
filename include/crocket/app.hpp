@@ -1,6 +1,7 @@
 #pragma once
 // Crocket, the application: managed state, fairings, mounted routes, ignite, launch.
 
+#include "crocket/detail/functional.hpp"
 #include "crocket/detail/invoke.hpp"
 #include "crocket/http.hpp"
 #include "crocket/log.hpp"
@@ -278,7 +279,7 @@ struct ReadyCheck {
 /// Runs jobs on worker threads: the engine's pool while launched.
 struct Executor {
   virtual ~Executor() = default;
-  virtual void post(std::move_only_function<void()> job) = 0;
+  virtual void post(detail::move_only_function<void()> job) = 0;
 };
 
 /// One request in flight. Owns the Request and Response at a fixed address
@@ -286,7 +287,7 @@ struct Executor {
 /// delivers the Response once.
 class Exchange {
  public:
-  using Done = std::move_only_function<void(Response&&)>;
+  using Done = detail::move_only_function<void(Response&&)>;
   Exchange(Crocket& app, Request&& rq, Done done, Executor* loop)
       : req(std::move(rq)), loop(loop), app_(app), done_(std::move(done)) {}
 
@@ -573,7 +574,7 @@ class Crocket {
   /// before handle_async returns, or later, when an async handler finishes.
   /// Called on an event loop (`loop`), async handlers run and resume there, and
   /// a synchronous handler moves to a worker. Used by the engine.
-  void handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop = nullptr);
+  void handle_async(Request&& req, detail::move_only_function<void(Response&&)> done, detail::Executor* loop = nullptr);
   /// Whether every route that can answer method+path runs on the event loop
   /// (an async handler, or a plain function adaptive placement has promoted),
   /// or none does (crocket answers 404 or 405), so the loop can run the request itself.

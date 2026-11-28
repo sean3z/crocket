@@ -1,6 +1,7 @@
 #include "log_hub.hpp"
 
 #include "crocket/app.hpp"
+#include "crocket/detail/atomic_shared_ptr.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -32,7 +33,7 @@ struct Current {
 };
 thread_local Current t_current;
 
-std::atomic<std::shared_ptr<Hub>> g_default;
+::crocket::detail::atomic_shared_ptr<Hub> g_default;
 thread_local std::shared_ptr<Hub> t_default_hold;  // keeps the default hub alive while this thread uses it
 
 Hub& fallback() {

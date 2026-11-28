@@ -1,5 +1,6 @@
 #include "internal.hpp"
 
+#include "crocket/detail/atomic_shared_ptr.hpp"
 #include "crocket/fairings.hpp"
 #include "crocket/json.hpp"
 #include "crocket/log.hpp"
@@ -137,7 +138,7 @@ struct Jwt::State {
     std::uint64_t id = 0;
   } cfg;
 
-  std::atomic<std::shared_ptr<const detail::KeySet>> keys;
+  ::crocket::detail::atomic_shared_ptr<const detail::KeySet> keys;
   std::atomic<bool> loaded{false};
   std::chrono::milliseconds interval{600'000};
 

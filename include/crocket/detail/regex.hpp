@@ -15,6 +15,8 @@
 // anchor it, "^[a-z]+$", to constrain the whole value. `.` and classes match
 // code points, not bytes.
 
+#include "crocket/detail/meta.hpp"
+
 #include <meta>
 #include <cstdint>
 #include <string>
@@ -88,7 +90,7 @@ class Compiler {
   [[noreturn]] consteval void error(std::string_view what) const {
     std::string msg = "crocket: invalid json::pattern \"" + std::string(src_) + "\": " + std::string(what) +
                       " at offset " + decimal(pos_);
-    throw std::meta::exception(std::u8string(msg.begin(), msg.end()), ^^Compiler);
+    ::crocket::detail::reflect_error(std::u8string(msg.begin(), msg.end()), ^^Compiler);
   }
   consteval int add(Node n) {
     nodes_.push_back(n);

@@ -270,7 +270,7 @@ std::string struct_component(Components& c) {
   namespace jd = json::detail;
   Object properties;
   Array required;
-  template for (constexpr auto m : std::define_static_array(jd::members_of(^^T))) {
+  template for (constexpr auto m : std::define_static_array(jd::data_members(^^T))) {
     using M = [:std::meta::remove_cv(std::meta::type_of(m)):];
     constexpr std::string_view key = std::define_static_string(jd::json_name(m));
     Value s;

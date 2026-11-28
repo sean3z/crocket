@@ -35,12 +35,17 @@ if(CMAKE_LINKER_TYPE)
 endif()
 
 # ---- reflection check ---------------------------------------------------------
-# crocket needs C++26 static reflection (P2996). Today that means GCC 16+ with
-# -freflection. Fail here with a clear message rather than deep in a header.
+# crocket needs C++26 static reflection (P2996). GCC 16 enables it with
+# -freflection. Bloomberg's clang-p2996 also needs -fexpansion-statements
+# (template for), -fannotation-attributes ([[= ...]]) and -fparameter-reflection
+# (std::meta::parameters_of). Fail here with a clear message rather than deep
+# in a header.
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_FLAGS "-std=c++26")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   string(APPEND CMAKE_REQUIRED_FLAGS " -freflection")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  string(APPEND CMAKE_REQUIRED_FLAGS " -freflection -fexpansion-statements -fannotation-attributes -fparameter-reflection")
 endif()
 check_cxx_source_compiles("
 #include <meta>
@@ -50,9 +55,10 @@ unset(CMAKE_REQUIRED_FLAGS)
 if(NOT CROCKET_HAS_REFLECTION)
   message(FATAL_ERROR
     "crocket requires a C++26 compiler with static reflection (P2996): "
-    "GCC 16+ with -freflection. ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
-    "(${CMAKE_CXX_COMPILER}) cannot compile a ^^int / std::meta test. "
-    "Set CMAKE_CXX_COMPILER to g++-16 or newer.")
+    "GCC 16+ with -freflection, or clang-p2996 with -freflection "
+    "-fexpansion-statements -fannotation-attributes -fparameter-reflection. "
+    "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+    "(${CMAKE_CXX_COMPILER}) cannot compile a ^^int / std::meta test.")
 endif()
 
 # ---- h2o (the only wire engine) ---------------------------------------------
@@ -107,7 +113,14 @@ target_include_directories(crocket PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_include_directories(crocket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Users of crocket need C++26 and reflection too, so both are PUBLIC.
 target_compile_features(crocket PUBLIC cxx_std_26)
-target_compile_options(crocket PUBLIC $<$<CXX_COMPILER_ID:GNU>:-freflection>)
+# Same flags as the check above. PUBLIC: a translation unit that includes
+# crocket headers reflects too.
+target_compile_options(crocket PUBLIC
+  $<$<CXX_COMPILER_ID:GNU>:-freflection>
+  $<$<CXX_COMPILER_ID:Clang>:-freflection>
+  $<$<CXX_COMPILER_ID:Clang>:-fexpansion-statements>
+  $<$<CXX_COMPILER_ID:Clang>:-fannotation-attributes>
+  $<$<CXX_COMPILER_ID:Clang>:-fparameter-reflection>)
 target_compile_options(crocket PRIVATE -Wall -Wextra)
 # h2o is PRIVATE: application code never sees h2o headers. Only the engine
 # includes them.

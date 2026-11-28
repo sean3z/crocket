@@ -18,6 +18,7 @@
 // service named after the scope (see grpc.hpp); mount them with Mode::Grpc.
 
 #include "crocket/app.hpp"
+#include "crocket/detail/meta.hpp"
 #include "crocket/detail/openapi.hpp"
 #include "crocket/grpc.hpp"
 
@@ -73,21 +74,21 @@ consteval std::vector<std::meta::info> route_functions(std::meta::info scope) {
   std::vector<std::meta::info> out;
   for (auto m : std::meta::members_of(scope, std::meta::access_context::current()))
     if (std::meta::is_function(m) &&
-        (!std::meta::annotations_of_with_type(m, ^^http::Route).empty() || grpc::detail::is_rpc(m)))
+        (!::crocket::detail::annotations_of_type(m, ^^http::Route).empty() || grpc::detail::is_rpc(m)))
       out.push_back(m);
   return out;
 }
 
 consteval http::Route route_of(std::meta::info fn) {
-  return std::meta::extract<http::Route>(std::meta::annotations_of_with_type(fn, ^^http::Route)[0]);
+  return std::meta::extract<http::Route>(::crocket::detail::annotations_of_type(fn, ^^http::Route)[0]);
 }
 
 /// Bindings for a [[= grpc::rpc]] method, or a diagnostic.
 consteval std::string analyze_rpc(std::meta::info fn, std::vector<Binding>& out) {
   std::string where = "crocket: rpc " + qualified_name(fn);
-  if (std::meta::annotations_of_with_type(fn, ^^grpc::Rpc).size() != 1)
+  if (::crocket::detail::annotations_of_type(fn, ^^grpc::Rpc).size() != 1)
     return where + " has more than one grpc::rpc annotation";
-  if (!std::meta::annotations_of_with_type(fn, ^^http::Route).empty())
+  if (!::crocket::detail::annotations_of_type(fn, ^^http::Route).empty())
     return where + " has both [[= grpc::rpc]] and an HTTP route annotation; a function is one or the other";
 
   std::string message;  // the request message parameter, once seen
@@ -134,11 +135,11 @@ consteval std::string analyze_rpc(std::meta::info fn, std::vector<Binding>& out)
 /// Computes the parameter bindings for `fn`, or returns a diagnostic.
 consteval std::string analyze(std::meta::info fn, std::vector<Binding>& out) {
   out.clear();
-  if (std::meta::annotations_of_with_type(fn, ^^auth::RoleCheck).size() > 1)
+  if (::crocket::detail::annotations_of_type(fn, ^^auth::RoleCheck).size() > 1)
     return "crocket: handler " + qualified_name(fn) +
            " has more than one auth role annotation (auth::require or auth::any_of)";
   if (grpc::detail::is_rpc(fn)) return analyze_rpc(fn, out);
-  auto anns = std::meta::annotations_of_with_type(fn, ^^http::Route);
+  auto anns = ::crocket::detail::annotations_of_type(fn, ^^http::Route);
   std::string where = "crocket: handler " + qualified_name(fn);
   if (anns.size() != 1)
     return where + " has " + decimal(static_cast<long long>(anns.size())) +
@@ -260,7 +261,7 @@ void describe_operation(openapi::Operation& op) {
     if constexpr (B[i].kind == BindKind::Path) op.parameter("path", B[i].name, true, openapi::param_schema<T>());
     else if constexpr (B[i].kind == BindKind::Extract) openapi::DescribeExtractor<T>::apply(op);
   }
-  constexpr auto roles = std::define_static_array(std::meta::annotations_of_with_type(Fn, ^^auth::RoleCheck));
+  constexpr auto roles = std::define_static_array(::crocket::detail::annotations_of_type(Fn, ^^auth::RoleCheck));
   if constexpr (roles.size() == 1) {
     constexpr auth::RoleCheck need = std::meta::extract<auth::RoleCheck>(roles[0]);
     op.bearer = true;
@@ -294,8 +295,13 @@ Routes reflect_routes() {
         static_assert(std::meta::has_identifier(Scope), "crocket: gRPC methods need a named namespace or class");
         d.mode = Mode::Grpc;
         d.method = http::Method::Post;
-        d.service = grpc::detail::service_name(Scope);
-        d.rpc = grpc::detail::method_name(fn);
+        // Scope is a consteval-only value. clang-p2996 rejects passing it to a
+        // consteval function from a runtime statement inside template for;
+        // a constexpr variable is a constant-evaluated context on both compilers.
+        constexpr auto service = grpc::detail::service_name(Scope);
+        constexpr auto rpc = grpc::detail::method_name(fn);
+        d.service = service;
+        d.rpc = rpc;
         d.path = "/" + std::string(d.service) + "/" + std::string(d.rpc);  // mount() adds the package
         d.invoke = &grpc::detail::invoke<fn, bindings.data()>;
         d.async = detail::Awaitable<std::remove_cvref_t<typename detail::fn_traits<decltype(&[:fn:])>::ret>>;
@@ -320,7 +326,7 @@ Routes reflect_routes() {
         using C = [:std::meta::parent_of(fn):];
         d.needs.push_back(detail::state_dep<C>());
       }
-      if constexpr (!std::meta::annotations_of_with_type(fn, ^^auth::RoleCheck).empty())
+      if constexpr (::crocket::detail::has_annotation(fn, ^^auth::RoleCheck))
         d.needs.push_back(detail::state_dep<Authenticator>());
       out.push_back(std::move(d));
     }

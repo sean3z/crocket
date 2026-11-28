@@ -2,6 +2,8 @@
 // HTTP vocabulary shared by handlers, the router, and the engine.
 // Nothing in this header knows about the wire engine.
 
+#include "crocket/detail/meta.hpp"
+
 #include <meta>
 #include <algorithm>
 #include <chrono>
@@ -137,7 +139,7 @@ consteval Route route(Method m, std::string_view path, RouteOptions opts = {}) {
   std::vector<Segment> segs;
   if (auto err = parse_template(path, segs); !err.empty()) {
     std::string msg = "crocket: invalid route \"" + std::string(path) + "\": " + err;
-    throw std::meta::exception(std::u8string(msg.begin(), msg.end()), ^^Route);
+    ::crocket::detail::reflect_error(std::u8string(msg.begin(), msg.end()), ^^Route);
   }
   return Route{m, std::define_static_string(path), opts.rank};
 }

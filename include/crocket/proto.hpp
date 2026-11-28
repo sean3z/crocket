@@ -30,6 +30,7 @@
 //
 // Decoding skips unknown fields, so old servers accept newer clients' messages.
 
+#include "crocket/detail/meta.hpp"
 #include "crocket/json.hpp"
 
 #include <meta>
@@ -139,7 +140,7 @@ consteval std::vector<int> field_numbers(std::meta::info type) {
   std::vector<int> out;
   int next = 1;
   for (auto m : fields_of(type)) {
-    auto anns = std::meta::annotations_of_with_type(m, ^^Field);
+    auto anns = ::crocket::detail::annotations_of_type(m, ^^Field);
     int n = anns.empty() ? next : std::meta::extract<Field>(anns[0]).number;
     out.push_back(n);
     next = n + 1;
@@ -162,7 +163,7 @@ consteval std::string numbering_problem(std::meta::info type) {
   std::string where = "crocket: proto message " + std::string(std::meta::display_string_of(type));
   for (std::size_t i = 0; i < ms.size(); ++i) {
     std::string name(std::meta::identifier_of(ms[i]));
-    if (std::meta::annotations_of_with_type(ms[i], ^^Field).size() > 1)
+    if (::crocket::detail::annotations_of_type(ms[i], ^^Field).size() > 1)
       return where + ": member '" + name + "' has more than one proto::field annotation";
     int n = nums[i];
     if (n < 1 || n > kMaxFieldNumber)
@@ -187,13 +188,16 @@ constexpr bool validate() {
   template for (constexpr auto m : std::define_static_array(fields_of(^^T))) {
     using M = [:std::meta::remove_cv(std::meta::type_of(m)):];
     constexpr std::string_view name = std::meta::identifier_of(m);
-    static_assert(field_ok<M>(),
-                  std::string("crocket: member '") + std::string(name) + "' of proto message " +
-                      std::string(std::meta::display_string_of(^^T)) + " has type " +
-                      std::string(std::meta::display_string_of(std::meta::type_of(m))) +
-                      ", which has no protobuf mapping (use bool, intN_t, uintN_t, float, double, std::string, "
-                      "proto::Bytes, an enum, a message struct, or std::optional, std::vector or std::map of "
-                      "those)");
+    // A temporary std::string is not a usable static_assert message on clang-p2996:
+    // its allocation is not treated as freed. define_static_string is, on both compilers.
+    constexpr std::string_view why = std::define_static_string(
+        std::string("crocket: member '") + std::string(name) + "' of proto message " +
+        std::string(std::meta::display_string_of(^^T)) + " has type " +
+        std::string(std::meta::display_string_of(std::meta::type_of(m))) +
+        ", which has no protobuf mapping (use bool, intN_t, uintN_t, float, double, std::string, "
+        "proto::Bytes, an enum, a message struct, or std::optional, std::vector or std::map of "
+        "those)");
+    static_assert(field_ok<M>(), why);
   }
   return true;
 }

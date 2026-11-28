@@ -37,6 +37,7 @@
 //   };
 
 #include "crocket/detail/regex.hpp"
+#include "crocket/detail/meta.hpp"
 #include "crocket/request.hpp"
 
 #include <meta>
@@ -175,7 +176,7 @@ struct Rename {
   constexpr bool operator==(const Rename&) const = default;
 };
 consteval Rename rename(std::string_view name) {
-  if (name.empty()) throw std::meta::exception(u8"crocket: json::rename(\"\") needs a name", ^^Rename);
+  if (name.empty()) ::crocket::detail::reflect_error(u8"crocket: json::rename(\"\") needs a name", ^^Rename);
   return Rename{std::define_static_string(name)};
 }
 
@@ -240,7 +241,7 @@ struct Tag {
   constexpr bool operator==(const Tag&) const = default;
 };
 consteval Tag tag(std::string_view field) {
-  if (field.empty()) throw std::meta::exception(u8"crocket: json::tag(\"\") needs a member name", ^^Tag);
+  if (field.empty()) ::crocket::detail::reflect_error(u8"crocket: json::tag(\"\") needs a member name", ^^Tag);
   return Tag{std::define_static_string(field)};
 }
 
@@ -532,11 +533,11 @@ consteval std::string convert_case(std::string_view id, Case style) {
 
 template <class A>
 consteval bool has(std::meta::info r) {
-  return !std::meta::annotations_of_with_type(r, ^^A).empty();
+  return !::crocket::detail::annotations_of_type(r, ^^A).empty();
 }
 template <class A>
 consteval A get(std::meta::info r) {
-  return std::meta::extract<A>(std::meta::annotations_of_with_type(r, ^^A)[0]);
+  return std::meta::extract<A>(::crocket::detail::annotations_of_type(r, ^^A)[0]);
 }
 
 /// The JSON name of a data member or an enumerator.
@@ -552,7 +553,7 @@ consteval std::string tag_name(std::meta::info t) {
   t = std::meta::dealias(t);
   if (has<Rename>(t)) return get<Rename>(t).name;
   if (!std::meta::has_identifier(t))
-    throw std::meta::exception(u8"crocket: a json::tag alternative without a simple name needs [[= json::rename(...)]]",
+    ::crocket::detail::reflect_error(u8"crocket: a json::tag alternative without a simple name needs [[= json::rename(...)]]",
                                ^^Tag);
   return std::string(std::meta::identifier_of(t));
 }
@@ -572,19 +573,21 @@ consteval std::string quoted(std::string_view s) {
   return out + "\"";
 }
 
-consteval std::vector<std::meta::info> members_of(std::meta::info type) {
+// Not named members_of: libc++ also provides that as a one-argument metafunction,
+// so an unqualified call would be ambiguous by ADL on the reflection argument.
+consteval std::vector<std::meta::info> data_members(std::meta::info type) {
   return std::meta::nonstatic_data_members_of(type, std::meta::access_context::current());
 }
 
 consteval std::vector<const char*> member_names(std::meta::info type) {
   std::vector<const char*> out;
-  for (auto m : members_of(type)) out.push_back(std::define_static_string(json_name(m)));
+  for (auto m : data_members(type)) out.push_back(std::define_static_string(json_name(m)));
   return out;
 }
 
 consteval std::vector<const char*> member_keys(std::meta::info type) {  // "\"name\":"
   std::vector<const char*> out;
-  for (auto m : members_of(type)) out.push_back(std::define_static_string(quoted(json_name(m)) + ":"));
+  for (auto m : data_members(type)) out.push_back(std::define_static_string(quoted(json_name(m)) + ":"));
   return out;
 }
 
@@ -596,7 +599,7 @@ consteval std::vector<const char*> enumerator_names(std::meta::info type) {
 
 /// Empty when two members do not share a JSON name, otherwise a diagnostic.
 consteval std::string name_clash(std::meta::info type) {
-  auto ms = members_of(type);
+  auto ms = data_members(type);
   for (std::size_t i = 0; i < ms.size(); ++i)
     for (std::size_t j = 0; j < i; ++j)
       if (json_name(ms[i]) == json_name(ms[j]))
@@ -664,7 +667,7 @@ template <class T>
 consteval bool check_struct() {
   constexpr std::string_view clash = std::define_static_string(name_clash(^^T));
   static_assert(clash.empty(), clash);
-  template for (constexpr auto m : std::define_static_array(members_of(^^T))) {
+  template for (constexpr auto m : std::define_static_array(data_members(^^T))) {
     using M = [:std::meta::remove_cv(std::meta::type_of(m)):];
     using E = unopt_t<M>;
     constexpr auto where = [](std::string_view ann, std::string_view needs) consteval {
@@ -1113,7 +1116,7 @@ bool read(Reader& r, T& out, const Path* path) {
 template <class T>
 bool read_struct(Reader& r, T& out, const Path* path, std::string_view tag_field) {
   static_assert(check_struct<T>());
-  static constexpr auto members = std::define_static_array(members_of(^^T));
+  static constexpr auto members = std::define_static_array(data_members(^^T));
   constexpr std::size_t N = members.size();
   static constexpr auto name_ptrs = std::define_static_array(member_names(^^T));
   static constexpr auto names = [] {
@@ -1203,7 +1206,7 @@ void validate_into(const T& v, const Path* path, std::vector<FieldError>& out) {
     static_assert(check_struct<T>());
     static constexpr auto names = std::define_static_array(member_names(^^T));
     std::size_t i = 0;
-    template for (constexpr auto m : std::define_static_array(members_of(^^T))) {
+    template for (constexpr auto m : std::define_static_array(data_members(^^T))) {
       Path child{path, names[i++]};
       if constexpr (has_checks(m)) check_member<m>(v.[:m:], &child, out);
       validate_into(v.[:m:], &child, out);
@@ -1378,7 +1381,7 @@ void write_struct(std::string& out, const T& v, std::string_view prefix) {
   out += prefix;
   bool first = prefix.empty();
   std::size_t i = 0;
-  template for (constexpr auto m : std::define_static_array(members_of(^^T))) {
+  template for (constexpr auto m : std::define_static_array(data_members(^^T))) {
     using M = [:std::meta::remove_cv(std::meta::type_of(m)):];
     const auto& field = v.[:m:];
     bool skip = false;

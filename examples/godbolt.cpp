@@ -73,13 +73,21 @@ auto try_call(std::string_view pattern, std::string_view path) -> std::optional<
   }(std::make_index_sequence<arity>{});
 }
 
+// libstdc++ calls this annotations_of_with_type; clang-p2996's libc++ overloads annotations_of.
+consteval auto route_annotations(std::meta::info fn) {
+#if defined(__clang__)
+  return std::meta::annotations_of(fn, ^^http::route);
+#else
+  return std::meta::annotations_of_with_type(fn, ^^http::route);
+#endif
+}
+
 template <std::meta::info Ns>
 auto dispatch(std::string_view method, std::string_view path) -> std::string {
   constexpr auto ctx = std::meta::access_context::current();
   template for (constexpr auto fn : std::define_static_array(std::meta::members_of(Ns, ctx))) {
     if constexpr (std::meta::is_function(fn)) {
-      template for (constexpr auto a : std::define_static_array(
-                        std::meta::annotations_of_with_type(fn, ^^http::route))) {
+      template for (constexpr auto a : std::define_static_array(route_annotations(fn))) {
         constexpr auto r = std::meta::extract<http::route>(a);
         if (method == r.method)
           if (auto body = try_call<fn>(r.path, path)) return "200 " + *body;

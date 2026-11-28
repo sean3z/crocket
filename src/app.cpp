@@ -587,7 +587,7 @@ class FallbackPool final : public Executor {
     cv_.notify_all();
     for (auto& t : threads_) t.join();
   }
-  void post(std::move_only_function<void()> job) override {
+  void post(crocket::detail::move_only_function<void()> job) override {
     {
       std::lock_guard lk(mu_);
       jobs_.push_back(std::move(job));
@@ -598,7 +598,7 @@ class FallbackPool final : public Executor {
  private:
   void loop() {
     for (;;) {
-      std::move_only_function<void()> job;
+      crocket::detail::move_only_function<void()> job;
       {
         std::unique_lock lk(mu_);
         cv_.wait(lk, [&] { return stop_ || !jobs_.empty(); });
@@ -611,7 +611,7 @@ class FallbackPool final : public Executor {
   }
   std::mutex mu_;
   std::condition_variable cv_;
-  std::deque<std::move_only_function<void()>> jobs_;
+  std::deque<crocket::detail::move_only_function<void()>> jobs_;
   std::vector<std::thread> threads_;
   bool stop_ = false;
 };
@@ -688,7 +688,7 @@ void async_handler_done(Request& rq) { rq.exchange->handler_done(); }
 
 }  // namespace detail
 
-void Crocket::handle_async(Request&& req, std::move_only_function<void(Response&&)> done, detail::Executor* loop) {
+void Crocket::handle_async(Request&& req, crocket::detail::move_only_function<void(Response&&)> done, detail::Executor* loop) {
   run(new detail::Exchange(*this, std::move(req), std::move(done), loop));
 }
 
